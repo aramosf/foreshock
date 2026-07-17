@@ -89,15 +89,18 @@ class OsvSource(BaseSource):
                     rec = json.loads(zf.read(name))
                 except (json.JSONDecodeError, KeyError):
                     continue
-                modified = rec.get("modified")
+                # Usamos 'published' (fecha real de publicación), NO 'modified':
+                # OSV re-modifica registros antiguos, lo que colaba CVEs viejos y
+                # contaminaba la serie temporal. Fallback a 'modified' si no hay.
+                date_str = rec.get("published") or rec.get("modified")
                 seen = None
-                if modified:
+                if date_str:
                     try:
-                        seen = isoparse(modified)
+                        seen = isoparse(date_str)
                         if seen < cutoff:
-                            continue  # demasiado antiguo -> fuera de la ventana
+                            continue  # publicado fuera de la ventana -> se descarta
                     except (ValueError, TypeError):
-                        pass
+                        seen = None
                 osv_id = rec.get("id")
                 cve = _cve_alias(rec.get("aliases") or [])
                 if not cve and not osv_id:

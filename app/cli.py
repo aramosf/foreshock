@@ -15,8 +15,11 @@ Ejemplos:
 from __future__ import annotations
 
 import asyncio
+import csv
+import json
 import re
 import subprocess
+import sys
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -45,6 +48,33 @@ app.add_typer(baseline_app, name="baseline")
 app.add_typer(db_app, name="db")
 
 console = Console()
+
+# Formatos de salida soportados por los comandos de consulta.
+Fmt = str  # "table" | "json" | "csv"
+
+
+def _emit(fmt: str, columns: list[str], rows: list[tuple],
+          meta: dict | None = None, title: str | None = None) -> None:
+    """Emite filas como tabla (rich), JSON o CSV. `meta` es un resumen opcional
+    (se incluye en JSON; en tabla se imprime al pie; en CSV se omite para no
+    contaminar la salida)."""
+    if fmt == "json":
+        payload: dict = {"data": [dict(zip(columns, r, strict=False)) for r in rows]}
+        if meta:
+            payload["meta"] = meta
+        typer.echo(json.dumps(payload, default=str, ensure_ascii=False, indent=2))
+    elif fmt == "csv":
+        writer = csv.writer(sys.stdout)
+        writer.writerow(columns)
+        for r in rows:
+            writer.writerow(["" if v is None else v for v in r])
+    else:
+        table = Table(*columns, title=title)
+        for r in rows:
+            table.add_row(*["" if v is None else str(v) for v in r])
+        console.print(table)
+        if meta:
+            console.print("  ".join(f"[dim]{k}={v}[/dim]" for k, v in meta.items()))
 
 
 def _parse_since(s: str | None) -> datetime | None:
@@ -144,6 +174,7 @@ def emerging(
     tier: int | None = typer.Option(None, help="filtra por tier de fuente"),
     min_mentions: int = typer.Option(1, help="mínimo de menciones"),
     limit: int = typer.Option(50),
+    fmt: str = typer.Option("table", "--format", "-f", help="table | json | csv"),
 ) -> None:
     """Lista candidates emergentes con filtros."""
     if action != "list":
@@ -166,8 +197,7 @@ def emerging(
         stmt = stmt.order_by(Candidate.last_seen_at.desc()).limit(limit)
         rows = session.execute(stmt).scalars().all()
 
-        table = Table("cve/id", "status", "vuln", "sev", "mentions", "sources",
-                      "days_ahead", "last_seen")
+        data = []
         for c in rows:
             score = session.execute(
                 select(CVSSScore.base_score, CVSSScore.version)
@@ -175,14 +205,14 @@ def emerging(
                 .order_by(CVSSScore.base_score.desc().nullslast()).limit(1)
             ).first()
             sev = (f"{score[0]} (v{score[1]})" if score and score[0] is not None
-                   else (c.severity_hint or "-"))
-            table.add_row(
-                c.cve_id or str(c.id)[:8], c.status or "-", c.vuln_type or "-", sev,
-                str(c.mention_count), str(c.source_count),
-                str(c.days_ahead_vs_nvd_present) if c.days_ahead_vs_nvd_present is not None else "-",
-                c.last_seen_at.strftime("%Y-%m-%d %H:%M") if c.last_seen_at else "-",
-            )
-    console.print(table)
+                   else (c.severity_hint or None))
+            data.append((
+                c.cve_id or str(c.id)[:8], c.status, c.vuln_type, sev,
+                c.mention_count, c.source_count, c.days_ahead_vs_nvd_present,
+                c.last_seen_at.strftime("%Y-%m-%d %H:%M") if c.last_seen_at else None,
+            ))
+    _emit(fmt, ["cve_id", "status", "vuln", "sev", "mentions", "sources",
+                "days_ahead", "last_seen"], data)
 
 
 # --------------------------------------------------------------------- cve
@@ -278,17 +308,15 @@ async def _enrich_wrap(cid: uuid.UUID) -> bool:
 
 # ------------------------------------------------------------------- stats
 @app.command("stats")
-def stats() -> None:
-    """Media de días de ventaja por fuente, tasa de promoción y top CNAs."""
+def stats(
+    fmt: str = typer.Option("table", "--format", "-f", help="table | json | csv"),
+) -> None:
+    """Media de días de ventaja por fuente y tasa de promoción."""
     with get_session() as session:
         total = session.execute(select(func.count()).select_from(Candidate)).scalar_one()
         promoted = session.execute(
             select(func.count()).select_from(Candidate).where(Candidate.status == "published")
         ).scalar_one()
-        console.print(f"candidates={total} promovidos={promoted} "
-                      f"tasa={ (promoted/total*100) if total else 0:.1f}%")
-
-        console.print("[bold]Días de ventaja medios por fuente (vs NVD present):[/bold]")
         rows = session.execute(
             select(Source.name, func.avg(Candidate.days_ahead_vs_nvd_present),
                    func.count(func.distinct(Candidate.id)))
@@ -297,10 +325,12 @@ def stats() -> None:
             .where(Candidate.days_ahead_vs_nvd_present.is_not(None))
             .group_by(Source.name).order_by(func.avg(Candidate.days_ahead_vs_nvd_present).desc())
         ).all()
-        t = Table("source", "avg_days_ahead", "candidates")
-        for name, avg, cnt in rows:
-            t.add_row(name, f"{float(avg):.1f}" if avg is not None else "-", str(cnt))
-        console.print(t)
+    data = [(name, round(float(avg), 1) if avg is not None else None, cnt)
+            for name, avg, cnt in rows]
+    meta = {"candidates": total, "promoted": promoted,
+            "promotion_rate_pct": round(promoted / total * 100, 1) if total else 0}
+    _emit(fmt, ["source", "avg_days_ahead", "candidates"], data, meta=meta,
+          title="Días de ventaja por fuente (vs NVD present)")
 
 
 # ----------------------------------------------------- pending / trend
@@ -377,6 +407,7 @@ def _load_pending(session) -> list[tuple[str | None, str, object]]:
 def pending(
     top: int = typer.Option(20, help="nº de software en el ranking"),
     kind: str = typer.Option("product", help="product | distro | malware | all"),
+    fmt: str = typer.Option("table", "--format", "-f", help="table | json | csv"),
 ) -> None:
     """CVEs identificados asociados a software SIN publicación oficial (NVD/MITRE),
     y ranking del software con más pendientes. Canonicaliza el ecosistema y separa
@@ -387,54 +418,53 @@ def pending(
         rows = _load_pending(session)
 
     by_kind = Counter(k for _, k, _ in rows)
-    console.print(
-        f"[bold]CVEs sin publicación oficial: {len(rows)}[/bold]  "
-        f"(product={by_kind['product']} · distro={by_kind['distro']} · "
-        f"malware={by_kind['malware']} · sin-software={by_kind['unknown']})"
-    )
     counter: Counter = Counter()
     for canon, k, _ in rows:
         if canon and (kind == "all" or k == kind):
             counter[canon] += 1
-    table = Table("software", "cves_pendientes", title=f"Top software (kind={kind})")
-    for name, n in counter.most_common(top):
-        table.add_row(name, str(n))
-    console.print(table)
+    data = [(name, n) for name, n in counter.most_common(top)]
+    meta = {
+        "total": len(rows), "product": by_kind["product"], "distro": by_kind["distro"],
+        "malware": by_kind["malware"], "sin_software": by_kind["unknown"], "kind": kind,
+    }
+    _emit(fmt, ["software", "cves_pendientes"], data, meta=meta,
+          title=f"Top software (kind={kind})")
 
 
 @app.command("trend")
 def trend(
     kind: str = typer.Option("all", help="product | distro | malware | all"),
     granularity: str = typer.Option("month", help="month | year"),
+    months: int = typer.Option(12, help="ventana de meses hacia atrás (p.ej. 6, 12)"),
+    fmt: str = typer.Option("table", "--format", "-f", help="table | json | csv"),
 ) -> None:
-    """Serie temporal de vulnerabilidades pendientes por mes/año (fecha real más
-    temprana de la señal). Sirve para ver crecimiento reciente / efecto palo de hockey."""
+    """Serie temporal de vulnerabilidades pendientes por mes/año (fecha real de
+    publicación). Ventana configurable (--months). Ver crecimiento / palo de hockey."""
     from collections import Counter
 
-    fmt = "%Y-%m" if granularity == "month" else "%Y"
+    date_fmt = "%Y-%m" if granularity == "month" else "%Y"
+    cutoff = datetime.now(UTC) - timedelta(days=30 * months) if months > 0 else None
     with get_session() as session:
         rows = _load_pending(session)
     buckets: Counter = Counter()
     for _canon, k, first_seen in rows:
-        if first_seen is None:
+        if first_seen is None or (kind != "all" and k != kind):
             continue
-        if kind != "all" and k != kind:
+        if cutoff is not None and first_seen < cutoff:
             continue
-        buckets[first_seen.strftime(fmt)] += 1
+        buckets[first_seen.strftime(date_fmt)] += 1
     if not buckets:
         console.print("[yellow]sin datos temporales[/yellow]")
         return
-    peak = max(buckets.values())
-    table = Table("periodo", "pendientes", "", title=f"Tendencia (kind={kind})")
-    for period in sorted(buckets):
-        n = buckets[period]
-        bar = "█" * max(1, round(40 * n / peak))
-        table.add_row(period, str(n), bar)
-    console.print(table)
-    console.print(
-        "[dim]Nota: OSV/GitHub se ingieren con ventana de ~5 meses, así que la "
-        "caída en meses antiguos es en parte artefacto de la ventana de captación.[/dim]"
-    )
+    periods = sorted(buckets)
+    if fmt == "table":
+        peak = max(buckets.values())
+        data = [(p, buckets[p], "█" * max(1, round(40 * buckets[p] / peak))) for p in periods]
+        _emit("table", ["periodo", "pendientes", ""], data,
+              meta={"kind": kind, "months": months}, title=f"Tendencia (kind={kind})")
+    else:
+        _emit(fmt, ["periodo", "pendientes"], [(p, buckets[p]) for p in periods],
+              meta={"kind": kind, "months": months})
 
 
 if __name__ == "__main__":
