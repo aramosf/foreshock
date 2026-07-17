@@ -83,7 +83,7 @@ class OsvSource(BaseSource):
             for name in zf.namelist():
                 if not name.endswith(".json"):
                     continue
-                if len(out) >= cap:
+                if cap > 0 and len(out) >= cap:  # cap<=0 => sin límite
                     break
                 try:
                     rec = json.loads(zf.read(name))
