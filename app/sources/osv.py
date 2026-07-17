@@ -108,7 +108,9 @@ class OsvSource(BaseSource):
 
     async def fetch(self, ctx: FetchContext) -> list[FetchedMention]:
         settings = get_settings()
-        cutoff = datetime.now(UTC) - timedelta(days=30 * settings.osv_months)
+        # osv_months <= 0 -> sin ventana (histórico COMPLETO del ecosistema).
+        cutoff = (datetime.now(UTC) - timedelta(days=30 * settings.osv_months)
+                  if settings.osv_months > 0 else None)
         ecosystems = [e.strip() for e in settings.osv_ecosystems.split(",") if e.strip()]
         out: list[FetchedMention] = []
         for eco in ecosystems:
@@ -118,8 +120,8 @@ class OsvSource(BaseSource):
                 log.warning("osv.eco_error", ecosystem=eco, error=str(exc))
         return out
 
-    async def _scan_eco(self, ctx: FetchContext, eco: str, cutoff: datetime, cap: int
-                        ) -> list[FetchedMention]:
+    async def _scan_eco(self, ctx: FetchContext, eco: str, cutoff: datetime | None,
+                        cap: int) -> list[FetchedMention]:
         # Streaming a fichero temporal: los all.zip grandes (npm/Debian) pesan
         # cientos de MB; bufferizarlos en RAM (resp.content + BytesIO) puede
         # provocar OOM. ZipFile lee las entradas de forma perezosa desde disco.
@@ -154,15 +156,15 @@ class OsvSource(BaseSource):
         return out
 
     @staticmethod
-    def _to_mention(rec: dict, cutoff: datetime) -> FetchedMention | None:
+    def _to_mention(rec: dict, cutoff: datetime | None) -> FetchedMention | None:
         # 'published' (fecha real), fallback a 'modified'.
         date_str = rec.get("published") or rec.get("modified")
         seen = None
         if date_str:
             try:
                 seen = isoparse(date_str)
-                if seen < cutoff:
-                    return None  # publicado fuera de la ventana
+                if cutoff is not None and seen < cutoff:
+                    return None  # publicado fuera de la ventana (osv_months>0)
             except (ValueError, TypeError):
                 seen = None
         osv_id = rec.get("id")

@@ -59,8 +59,11 @@ class Settings(BaseSettings):
 
     # --- OSV.dev (ecosistemas de paquetes) ---
     osv_ecosystems: str = Field(default="PyPI,Go,crates.io,RubyGems,Packagist")
-    osv_months: int = Field(default=5)
-    osv_max_per_ecosystem: int = Field(default=3000)
+    osv_months: int = Field(default=5)          # <=0 => histórico COMPLETO (sin ventana)
+    osv_max_per_ecosystem: int = Field(default=3000)  # <=0 => sin cap
+
+    # --- Red Hat Security Data ---
+    redhat_lookback_days: int = Field(default=3)  # días hacia atrás (sube para histórico)
 
     # --- Fetchers / scraping educado ---
     user_agent: str = Field(

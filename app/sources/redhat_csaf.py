@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+from app.core.config import get_settings
 from app.sources.base import BaseSource, FetchContext, register
 from app.sources.http import get
 from app.ingest.service import FetchedMention
@@ -23,14 +24,12 @@ class RedHatCSAFSource(BaseSource):
     tier = 2
     cadence_seconds = 3600
 
-    #: días hacia atrás a consultar en cada ejecución
-    lookback_days = 3
-
     per_page = 1000        # tope alto por página
-    max_pages = 20         # cota de seguridad
+    max_pages = 200        # cota de seguridad (permite históricos grandes)
 
     async def fetch(self, ctx: FetchContext) -> list[FetchedMention]:
-        after = (datetime.now(UTC) - timedelta(days=self.lookback_days)).strftime("%Y-%m-%d")
+        lookback = get_settings().redhat_lookback_days
+        after = (datetime.now(UTC) - timedelta(days=lookback)).strftime("%Y-%m-%d")
         out: list[FetchedMention] = []
         for page in range(1, self.max_pages + 1):
             resp = await get(ctx.http, API,
