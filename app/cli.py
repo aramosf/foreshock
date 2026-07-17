@@ -303,10 +303,10 @@ def stats() -> None:
         console.print(t)
 
 
-# ----------------------------------------------------------------- pending
-# CTE compartido: candidates SIN CVE público oficial (pre-CVE o CVE no PUBLISHED),
-# con el software derivado (repo GHCOMMIT -> paquete 'affected:' -> prefijo owner/repo).
-_PENDING_SW_CTE = """
+# ----------------------------------------------------- pending / trend
+# Filas por candidate SIN CVE público oficial (pre-CVE o CVE no PUBLISHED):
+# software derivado + señal de malware (OSV MAL-) + fecha real más temprana.
+_PENDING_ROWS_SQL = text("""
 WITH pending AS (
   SELECT c.id, c.cve_id
   FROM candidates c
@@ -314,59 +314,127 @@ WITH pending AS (
     AND ( c.cve_id IS NULL
        OR NOT EXISTS (SELECT 1 FROM published_cves p
                       WHERE p.id = c.cve_id AND p.state = 'PUBLISHED') )
-),
-sw AS (
-  SELECT p.id, p.cve_id,
-    COALESCE(
-      (SELECT regexp_replace(i.value,'^GHCOMMIT:(.*)@.*$','\\1')
-         FROM identifiers i WHERE i.candidate_id=p.id AND i.scheme='GHCOMMIT' LIMIT 1),
-      (SELECT substring(m.snippet from 'affected: (\\S+)')
-         FROM mentions m WHERE m.candidate_id=p.id AND m.snippet LIKE '%affected:%' LIMIT 1),
-      (SELECT substring(m.title from '^([^:]+/[^:]+):')
-         FROM mentions m WHERE m.candidate_id=p.id AND m.title LIKE '%/%:%' LIMIT 1)
-    ) AS software
-  FROM pending p
 )
-"""
+SELECT p.id, p.cve_id,
+  COALESCE(
+    (SELECT regexp_replace(i.value,'^GHCOMMIT:(.*)@.*$','\\1')
+       FROM identifiers i WHERE i.candidate_id=p.id AND i.scheme='GHCOMMIT' LIMIT 1),
+    (SELECT substring(m.snippet from 'affected: (\\S+)')
+       FROM mentions m WHERE m.candidate_id=p.id AND m.snippet LIKE '%affected:%' LIMIT 1),
+    (SELECT substring(m.title from '^([^:]+/[^:]+):')
+       FROM mentions m WHERE m.candidate_id=p.id AND m.title LIKE '%/%:%' LIMIT 1)
+  ) AS software,
+  EXISTS(SELECT 1 FROM identifiers i WHERE i.candidate_id=p.id
+         AND i.scheme='OSV' AND i.value ILIKE 'MAL-%') AS is_malware,
+  (SELECT min(m.seen_at) FROM mentions m WHERE m.candidate_id=p.id) AS first_seen
+FROM pending p
+""")
+
+# Canonicalización de ecosistema (une pip/PyPI, rust/cargo/crates, etc.).
+_ECO_ALIAS = {
+    "pip": "pypi", "pypi": "pypi",
+    "cargo": "crates.io", "rust": "crates.io", "crates": "crates.io", "crates.io": "crates.io",
+    "go": "go", "golang": "go",
+    "npm": "npm", "node": "npm",
+    "maven": "maven", "nuget": "nuget",
+    "gem": "rubygems", "rubygems": "rubygems",
+    "composer": "packagist", "packagist": "packagist",
+    "hex": "hex", "pub": "pub", "pub.dev": "pub", "hackage": "hackage",
+}
+_DISTRO = ("ubuntu", "debian", "alpine", "rocky", "almalinux", "suse", "opensuse",
+           "red hat", "redhat", "chainguard", "wolfi", "linux", "android", "bitnami",
+           "mageia", "photon", "gentoo", "oracle")
+
+
+def _classify(raw: str | None, is_malware: bool) -> tuple[str | None, str]:
+    """Devuelve (software_canónico, kind ∈ product|distro|malware|unknown)."""
+    if not raw:
+        return None, "unknown"
+    if is_malware:
+        return raw.strip().lower(), "malware"
+    s = raw.strip()
+    head = s.split("/", 1)[0]
+    if "/" in s and ":" not in head:               # repo GitHub owner/repo
+        return s.lower(), "product"
+    eco, _, name = s.partition(":")
+    ecol = eco.strip().lower()
+    if any(ecol.startswith(d) for d in _DISTRO):
+        return f"{ecol}:{name.split(':')[-1]}".lower().strip(":"), "distro"
+    canon = _ECO_ALIAS.get(ecol, ecol)
+    return f"{canon}:{name}".lower().strip(":"), "product"
+
+
+def _load_pending(session) -> list[tuple[str | None, str, object]]:
+    """Devuelve [(software_canónico, kind, first_seen)] por candidate pendiente."""
+    out = []
+    for _id, _cve, software, is_mal, first_seen in session.execute(_PENDING_ROWS_SQL):
+        canon, kind = _classify(software, is_mal)
+        out.append((canon, kind, first_seen))
+    return out
 
 
 @app.command("pending")
 def pending(
     top: int = typer.Option(20, help="nº de software en el ranking"),
-    reserved_only: bool = typer.Option(
-        False, help="solo los que ya tienen un cve_id (reservado, no publicado)"),
+    kind: str = typer.Option("product", help="product | distro | malware | all"),
 ) -> None:
-    """CVEs identificados asociados a software SIN publicación oficial en NVD/MITRE,
-    y ranking del software con más pendientes de publicar."""
-    where_reserved = "WHERE cve_id IS NOT NULL" if reserved_only else ""
-    counts_sql = text(_PENDING_SW_CTE + f"""
-        SELECT
-          (SELECT count(*) FROM sw {where_reserved}) AS total,
-          (SELECT count(*) FROM sw {where_reserved}
-             {'AND' if reserved_only else 'WHERE'} software IS NOT NULL) AS con_sw,
-          (SELECT count(*) FROM sw WHERE cve_id IS NULL) AS sin_cve_id,
-          (SELECT count(*) FROM sw WHERE cve_id IS NOT NULL) AS cve_reservado;
-    """)
-    top_sql = text(_PENDING_SW_CTE + f"""
-        SELECT trim(software) AS software, count(*) AS n
-        FROM sw WHERE software IS NOT NULL {'AND cve_id IS NOT NULL' if reserved_only else ''}
-        GROUP BY trim(software) ORDER BY 2 DESC LIMIT :top;
-    """)
+    """CVEs identificados asociados a software SIN publicación oficial (NVD/MITRE),
+    y ranking del software con más pendientes. Canonicaliza el ecosistema y separa
+    productos reales de advisories de distro/malware."""
+    from collections import Counter
+
     with get_session() as session:
-        r = session.execute(counts_sql).one()
-        console.print(
-            f"[bold]CVEs sin publicación oficial:[/bold] {r.total} "
-            f"([green]{r.con_sw}[/green] con software identificable)"
-        )
-        console.print(
-            f"  desglose: {r.sin_cve_id} sin cve_id (pre-CVE) · "
-            f"{r.cve_reservado} con cve_id reservado/no-publicado"
-        )
-        rows = session.execute(top_sql, {"top": top}).all()
-        table = Table("software", "cves_pendientes")
-        for name, n in rows:
-            table.add_row(name, str(n))
-        console.print(table)
+        rows = _load_pending(session)
+
+    by_kind = Counter(k for _, k, _ in rows)
+    console.print(
+        f"[bold]CVEs sin publicación oficial: {len(rows)}[/bold]  "
+        f"(product={by_kind['product']} · distro={by_kind['distro']} · "
+        f"malware={by_kind['malware']} · sin-software={by_kind['unknown']})"
+    )
+    counter: Counter = Counter()
+    for canon, k, _ in rows:
+        if canon and (kind == "all" or k == kind):
+            counter[canon] += 1
+    table = Table("software", "cves_pendientes", title=f"Top software (kind={kind})")
+    for name, n in counter.most_common(top):
+        table.add_row(name, str(n))
+    console.print(table)
+
+
+@app.command("trend")
+def trend(
+    kind: str = typer.Option("all", help="product | distro | malware | all"),
+    granularity: str = typer.Option("month", help="month | year"),
+) -> None:
+    """Serie temporal de vulnerabilidades pendientes por mes/año (fecha real más
+    temprana de la señal). Sirve para ver crecimiento reciente / efecto palo de hockey."""
+    from collections import Counter
+
+    fmt = "%Y-%m" if granularity == "month" else "%Y"
+    with get_session() as session:
+        rows = _load_pending(session)
+    buckets: Counter = Counter()
+    for _canon, k, first_seen in rows:
+        if first_seen is None:
+            continue
+        if kind != "all" and k != kind:
+            continue
+        buckets[first_seen.strftime(fmt)] += 1
+    if not buckets:
+        console.print("[yellow]sin datos temporales[/yellow]")
+        return
+    peak = max(buckets.values())
+    table = Table("periodo", "pendientes", "", title=f"Tendencia (kind={kind})")
+    for period in sorted(buckets):
+        n = buckets[period]
+        bar = "█" * max(1, round(40 * n / peak))
+        table.add_row(period, str(n), bar)
+    console.print(table)
+    console.print(
+        "[dim]Nota: OSV/GitHub se ingieren con ventana de ~5 meses, así que la "
+        "caída en meses antiguos es en parte artefacto de la ventana de captación.[/dim]"
+    )
 
 
 if __name__ == "__main__":

@@ -100,8 +100,9 @@ cveradar emerging list --since 24h --tier 1 --min-mentions 2
 cveradar cve show CVE-2026-12345            # timeline + enrichment
 cveradar enrich CVE-2026-12345              # LLM + CVSS
 cveradar stats                              # lead days per source
-cveradar pending                            # vulns tied to software with NO official CVE yet,
-                                            # and which software has the most pending
+cveradar pending --kind product             # vulns tied to software with NO official CVE yet
+                                            # (kind: product | distro | malware | all)
+cveradar trend --kind product               # pending vulns by month/year (growth / hockey-stick)
 ```
 
 The **flagship question** this project answers — *"how many identified,
