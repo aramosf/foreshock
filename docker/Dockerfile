@@ -17,7 +17,7 @@ RUN uv pip install --system --no-cache \
     "pydantic>=2.8" "pydantic-settings>=2.4" "structlog>=24.4" \
     "httpx>=0.27" "feedparser>=6.0" "selectolax>=0.3" "tenacity>=9.0" \
     "python-dateutil>=2.9" "apscheduler>=3.10" "redis>=5.0" "cvss>=3.2" \
-    "typer>=0.12" "rich>=13.7"
+    "typer>=0.12" "rich>=13.7" "fastapi>=0.115" "uvicorn[standard]>=0.30"
 
 # 2) Código + migraciones.
 COPY alembic.ini ./

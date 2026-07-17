@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CVERadar — Publicados vs Pre-publicados</title>
+<style>
+  :root{
+    --bg:#f5f7fa; --panel:#fff; --ink:#141821; --ink2:#4a5568; --muted:#8a94a6;
+    --grid:#e2e7ef; --hair:#d3dae6;
+    --pub:#3b6fd4; --pub-fill:rgba(59,111,212,.14);
+    --pre:#b9781a; --pre-fill:rgba(201,127,26,.16);
+    --kev:#c0392b;
+  }
+  @media(prefers-color-scheme:dark){:root{
+    --bg:#0b0f16; --panel:#121821; --ink:#e6edf3; --ink2:#aeb9c8; --muted:#6d7787;
+    --grid:#1e2732; --hair:#29323f;
+    --pub:#5b8ff9; --pub-fill:rgba(91,143,249,.16);
+    --pre:#e8a33d; --pre-fill:rgba(232,163,61,.15); --kev:#ff6b5e;
+  }}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;font-size:14px}
+  .mono{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
+  header{padding:18px 22px;border-bottom:1px solid var(--hair);display:flex;
+    align-items:baseline;gap:14px;flex-wrap:wrap}
+  header h1{font-size:18px;margin:0;letter-spacing:-.01em}
+  header .sub{color:var(--muted);font-size:12.5px}
+  .wrap{max-width:1240px;margin:0 auto;padding:18px 20px 60px}
+  .card{background:var(--panel);border:1px solid var(--hair);border-radius:12px;
+    padding:16px 18px;margin-bottom:18px}
+  .controls{display:flex;gap:12px;align-items:end;flex-wrap:wrap}
+  .controls label{display:flex;flex-direction:column;gap:4px;font-size:11px;
+    text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+  select,input{background:var(--bg);color:var(--ink);border:1px solid var(--hair);
+    border-radius:7px;padding:6px 8px;font-size:13px;font-family:inherit}
+  .seg{display:inline-flex;border:1px solid var(--hair);border-radius:7px;overflow:hidden}
+  .seg button{background:var(--bg);color:var(--ink2);border:0;padding:6px 12px;cursor:pointer;font-size:13px}
+  .seg button.on{background:var(--pub);color:#fff}
+  .btn{background:var(--pub);color:#fff;border:0;border-radius:7px;padding:7px 14px;cursor:pointer;font-weight:600}
+  .legend{display:flex;gap:18px;margin:2px 0 8px;font-size:13px;color:var(--ink2)}
+  .legend .sw{width:10px;height:10px;border-radius:3px;display:inline-block;margin-right:7px;vertical-align:middle}
+  .ptitle{font:600 12px/1 ui-monospace,monospace;color:var(--ink2);margin:12px 2px 2px}
+  svg{display:block;width:100%;height:auto}
+  .grid line{stroke:var(--grid)} .axis text{fill:var(--muted);font:500 11px ui-monospace,monospace}
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  @media(max-width:880px){.cols{grid-template-columns:1fr}}
+  h2{font-size:14px;margin:0 0 10px}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{padding:6px 9px;border-bottom:1px solid var(--grid);text-align:left}
+  th{color:var(--muted);font-weight:600;text-transform:uppercase;font-size:10.5px;letter-spacing:.06em}
+  td.num,th.num{text-align:right;font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums}
+  tbody tr{cursor:pointer} tbody tr:hover{background:var(--bg)}
+  .pill{display:inline-block;padding:1px 7px;border-radius:20px;font-size:11px;font-weight:600}
+  .pill.kev{background:var(--kev);color:#fff} .pill.pre{background:var(--pre-fill);color:var(--pre)}
+  .muted{color:var(--muted)} .crosshair{stroke:var(--muted);stroke-dasharray:3 3;opacity:0}
+  #tt{position:absolute;pointer-events:none;opacity:0;transform:translate(-50%,-115%);
+    background:var(--panel);border:1px solid var(--hair);border-radius:8px;padding:8px 10px;
+    font-size:12px;z-index:9;min-width:150px}
+  #tt .m{font:600 11px ui-monospace,monospace;color:var(--muted);text-transform:uppercase;margin-bottom:5px}
+  #tt .row{display:flex;justify-content:space-between;gap:12px;margin:2px 0}
+  #drawer{position:fixed;top:0;right:0;height:100%;width:min(560px,94vw);background:var(--panel);
+    border-left:1px solid var(--hair);box-shadow:-8px 0 30px rgba(0,0,0,.25);transform:translateX(100%);
+    transition:transform .18s;overflow-y:auto;z-index:20;padding:18px 20px}
+  #drawer.open{transform:translateX(0)}
+  #drawer .x{float:right;cursor:pointer;color:var(--muted);font-size:20px;border:0;background:none}
+  #drawer h3{margin:0 0 4px} .kv{display:flex;gap:8px;font-size:12.5px;margin:3px 0}
+  .kv b{color:var(--muted);font-weight:600;min-width:120px}
+  .tl{border-left:2px solid var(--hair);margin:10px 0;padding-left:12px}
+  .tl .ev{margin:8px 0} .tl .ev .d{font:600 11px ui-monospace,monospace;color:var(--muted)}
+  a{color:var(--pub)}
+  .note{color:var(--muted);font-size:12px;margin-top:10px}
+</style>
+</head>
+<body>
+<header>
+  <h1>📡 CVERadar</h1>
+  <span class="sub">CVEs oficiales publicados vs. potenciales (pre-publicados, ya referenciados en otras notas)</span>
+</header>
+<div class="wrap">
+
+  <div class="card">
+    <div class="controls">
+      <label>Granularidad
+        <span class="seg" id="gran"><button data-v="month" class="on">Mes</button><button data-v="year">Año</button></span>
+      </label>
+      <label>Ventana
+        <select id="months">
+          <option value="6">6 meses</option>
+          <option value="12" selected>12 meses</option>
+          <option value="24">24 meses</option>
+          <option value="60">5 años</option>
+          <option value="240">Todo</option>
+        </select>
+      </label>
+      <label>Tipo
+        <select id="kind"><option value="product">product</option><option value="distro">distro</option>
+          <option value="malware">malware</option><option value="all">todos</option></select>
+      </label>
+      <label>Tecnología
+        <input id="tech" placeholder="p.ej. axios" size="14">
+      </label>
+      <button class="btn" id="apply">Aplicar</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="legend">
+      <span><span class="sw" style="background:var(--pub)"></span>Publicados oficialmente</span>
+      <span><span class="sw" style="background:var(--pre)"></span>Pre-publicados (sin CVE oficial)</span>
+      <span class="muted" id="hint">— clic en un periodo para filtrar las tablas</span>
+    </div>
+    <figure id="fig" style="margin:0;position:relative">
+      <div class="ptitle">CVEs publicados oficialmente / periodo</div>
+      <svg id="s-pub" viewBox="0 0 960 190" preserveAspectRatio="none"></svg>
+      <div class="ptitle">Pre-publicados — detectados sin CVE oficial / periodo</div>
+      <svg id="s-pre" viewBox="0 0 960 190" preserveAspectRatio="none"></svg>
+      <div id="tt"></div>
+    </figure>
+    <div class="note" id="chartnote"></div>
+  </div>
+
+  <div class="cols">
+    <div class="card">
+      <h2>Top software pendiente <span class="muted" id="pcount"></span></h2>
+      <table><thead><tr><th>Software</th><th class="num">Pendientes</th></tr></thead>
+        <tbody id="ptbody"></tbody></table>
+    </div>
+    <div class="card">
+      <h2>Notas / candidates <span class="muted" id="ecount"></span></h2>
+      <table><thead><tr><th>CVE / id</th><th>Vuln</th><th class="num">CVSS</th>
+        <th class="num">Fuentes</th><th></th></tr></thead>
+        <tbody id="etbody"></tbody></table>
+    </div>
+  </div>
+</div>
+
+<div id="drawer"><button class="x" onclick="closeDrawer()">×</button><div id="dbody"></div></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
