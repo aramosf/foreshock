@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 # Orden = prioridad de "nativo" cuando no hay CVE.
 _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("CVE", re.compile(r"\bCVE-\d{4}-\d{4,7}\b", re.IGNORECASE)),
+    ("CVE", re.compile(r"\bCVE-\d{4}-\d{4,}\b", re.IGNORECASE)),
     ("ZDI-CAN", re.compile(r"\bZDI-CAN-\d{3,6}\b", re.IGNORECASE)),
     ("ZDI", re.compile(r"\bZDI-\d{2}-\d{3,5}\b", re.IGNORECASE)),
     ("VU", re.compile(r"\bVU#\d{5,7}\b", re.IGNORECASE)),

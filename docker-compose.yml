@@ -50,6 +50,7 @@ services:
       CVERADAR_NVD_API_KEY: ${CVERADAR_NVD_API_KEY:-}
     depends_on:
       migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
     volumes:
       - data:/data
     command: ["python", "-m", "app.baseline"]
@@ -74,6 +75,7 @@ services:
       CVERADAR_OSV_MAX_PER_ECOSYSTEM: ${CVERADAR_OSV_MAX_PER_ECOSYSTEM:-3000}
     depends_on:
       migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
     volumes:
       - data:/data
     command: ["python", "-m", "app.sources"]

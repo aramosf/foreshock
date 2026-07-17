@@ -106,7 +106,7 @@ def persist_cvss_vectors(session: Session, candidate_id: uuid.UUID,
                          vectors: list[str], source: str) -> None:
     """Escribe cvss_scores AUTORITATIVOS a partir de vectores estructurados."""
     for vec in vectors:
-        v = vec.strip()
+        v = vec.strip().upper()   # normaliza: 'cvss:3.1/...' también válido
         if v.startswith("CVSS:4"):
             version = "4.0"
         elif v.startswith("CVSS:3.1"):

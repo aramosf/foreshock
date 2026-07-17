@@ -72,15 +72,24 @@ async def run_source(name: str) -> dict[str, int]:
         if row is None or row.id is None:
             raise RuntimeError(f"fuente '{name}' no está en la tabla sources; corre el seeding")
         source_id = row.id
+        stats["errors"] = 0
         for m in mentions:
             stats["fetched"] += 1
-            res = ingest_mention(session, source_id, m)
-            if res.created:
-                stats["created"] += 1
-            elif res.duplicate:
-                stats["duplicate"] += 1
+            # Aislamiento por mención vía savepoint: una mención mala no revierte
+            # el lote entero ni pierde las válidas.
+            try:
+                with session.begin_nested():
+                    res = ingest_mention(session, source_id, m)
+                if res.created:
+                    stats["created"] += 1
+                elif res.duplicate:
+                    stats["duplicate"] += 1
+            except Exception as exc:  # noqa: BLE001
+                stats["errors"] += 1
+                log.warning("ingest.mention_error", source=name, error=str(exc))
         row.last_success_at = datetime.now(UTC)
-        row.last_error = None
+        row.last_error = (f"{stats['errors']} menciones con error"
+                          if stats["errors"] else None)
 
     log.info("source.run", source=name, **stats)
     return stats

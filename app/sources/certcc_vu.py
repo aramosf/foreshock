@@ -6,6 +6,8 @@ asociado cuando ya existe reserva.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import feedparser
 
 from app.sources.base import BaseSource, FetchContext, register
@@ -31,7 +33,9 @@ class CertCCVuSource(BaseSource):
             title = entry.get("title", "")
             summary = entry.get("summary", "")
             url = entry.get("link")
-            seen = None
+            # Fecha real de publicación del feed (no el momento del fetch).
+            pp = entry.get("published_parsed") or entry.get("updated_parsed")
+            seen = datetime(*pp[:6], tzinfo=UTC) if pp else None
             out.append(
                 FetchedMention(
                     url=url,

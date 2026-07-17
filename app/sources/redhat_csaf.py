@@ -26,10 +26,25 @@ class RedHatCSAFSource(BaseSource):
     #: días hacia atrás a consultar en cada ejecución
     lookback_days = 3
 
+    per_page = 1000        # tope alto por página
+    max_pages = 20         # cota de seguridad
+
     async def fetch(self, ctx: FetchContext) -> list[FetchedMention]:
         after = (datetime.now(UTC) - timedelta(days=self.lookback_days)).strftime("%Y-%m-%d")
-        resp = await get(ctx.http, API, params={"after": after, "per_page": 100})
-        data = resp.json()
+        out: list[FetchedMention] = []
+        for page in range(1, self.max_pages + 1):
+            resp = await get(ctx.http, API,
+                             params={"after": after, "per_page": self.per_page, "page": page})
+            data = resp.json()
+            if not data:
+                break
+            out.extend(self._parse(data))
+            if len(data) < self.per_page:
+                break  # última página
+        return out
+
+    @staticmethod
+    def _parse(data: list[dict]) -> list[FetchedMention]:
         out: list[FetchedMention] = []
         for item in data:
             cve = item.get("CVE")

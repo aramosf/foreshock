@@ -13,8 +13,10 @@ advisory extrae TODO lo aprovechable:
 
 from __future__ import annotations
 
-import io
+import contextlib
 import json
+import os
+import tempfile
 import zipfile
 from datetime import UTC, datetime, timedelta
 
@@ -118,59 +120,73 @@ class OsvSource(BaseSource):
 
     async def _scan_eco(self, ctx: FetchContext, eco: str, cutoff: datetime, cap: int
                         ) -> list[FetchedMention]:
-        resp = await ctx.http.get(BUCKET.format(eco=eco), timeout=120.0)
-        resp.raise_for_status()
+        # Streaming a fichero temporal: los all.zip grandes (npm/Debian) pesan
+        # cientos de MB; bufferizarlos en RAM (resp.content + BytesIO) puede
+        # provocar OOM. ZipFile lee las entradas de forma perezosa desde disco.
         out: list[FetchedMention] = []
-        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-            for name in zf.namelist():
-                if not name.endswith(".json"):
-                    continue
-                if cap > 0 and len(out) >= cap:
-                    break
-                try:
-                    rec = json.loads(zf.read(name))
-                except (json.JSONDecodeError, KeyError):
-                    continue
-                # 'published' (fecha real), fallback a 'modified'.
-                date_str = rec.get("published") or rec.get("modified")
-                seen = None
-                if date_str:
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
+                tmp_path = tmp.name
+                async with ctx.http.stream("GET", BUCKET.format(eco=eco),
+                                           timeout=300.0) as resp:
+                    resp.raise_for_status()
+                    async for chunk in resp.aiter_bytes():
+                        tmp.write(chunk)
+            with zipfile.ZipFile(tmp_path) as zf:
+                for name in zf.namelist():
+                    if not name.endswith(".json"):
+                        continue
+                    if cap > 0 and len(out) >= cap:
+                        break
                     try:
-                        seen = isoparse(date_str)
-                        if seen < cutoff:
-                            continue
-                    except (ValueError, TypeError):
-                        seen = None
-
-                osv_id = rec.get("id")
-                aliases = rec.get("aliases") or []
-                cve = _cve_alias(aliases)
-                if not cve and not osv_id:
-                    continue
-                is_malware = bool(osv_id and osv_id.upper().startswith("MAL-"))
-                summary = rec.get("summary") or rec.get("details") or ""
-                affected, labels = _affected(rec, is_malware)
-                # Todos los aliases al snippet -> extract_identifiers los ancla.
-                alias_txt = " ".join(a for a in aliases if a != cve)
-                snippet = summary
-                if labels:
-                    snippet = f"{summary} | affected: {', '.join(labels[:10])}"
-                if alias_txt:
-                    snippet = f"{snippet} | aliases: {alias_txt}"
-                out.append(
-                    FetchedMention(
-                        url=f"https://osv.dev/vulnerability/{osv_id}" if osv_id else None,
-                        title=(summary[:200] or cve or osv_id),
-                        snippet=snippet[:2000] if snippet else None,
-                        cve_id=cve,
-                        native_id=osv_id,
-                        seen_at=seen,
-                        affected=affected or None,
-                        cvss_vectors=_cvss_vectors(rec) or None,
-                        cwe_ids=_cwe_ids(rec) or None,
-                        reference_urls=_references(rec) or None,
-                        withdrawn=bool(rec.get("withdrawn")) or None,
-                    )
-                )
+                        rec = json.loads(zf.read(name))
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+                    m = self._to_mention(rec, cutoff)
+                    if m is not None:
+                        out.append(m)
+        finally:
+            if tmp_path:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_path)
         log.info("osv.eco_done", ecosystem=eco, mentions=len(out))
         return out
+
+    @staticmethod
+    def _to_mention(rec: dict, cutoff: datetime) -> FetchedMention | None:
+        # 'published' (fecha real), fallback a 'modified'.
+        date_str = rec.get("published") or rec.get("modified")
+        seen = None
+        if date_str:
+            try:
+                seen = isoparse(date_str)
+                if seen < cutoff:
+                    return None  # publicado fuera de la ventana
+            except (ValueError, TypeError):
+                seen = None
+        osv_id = rec.get("id")
+        aliases = rec.get("aliases") or []
+        cve = _cve_alias(aliases)
+        if not cve and not osv_id:
+            return None
+        is_malware = bool(osv_id and osv_id.upper().startswith("MAL-"))
+        summary = rec.get("summary") or rec.get("details") or ""
+        affected, labels = _affected(rec, is_malware)
+        alias_txt = " ".join(a for a in aliases if a != cve)
+        snippet = summary
+        if labels:
+            snippet = f"{summary} | affected: {', '.join(labels[:10])}"
+        if alias_txt:
+            snippet = f"{snippet} | aliases: {alias_txt}"
+        return FetchedMention(
+            url=f"https://osv.dev/vulnerability/{osv_id}" if osv_id else None,
+            title=(summary[:200] or cve or osv_id),
+            snippet=snippet[:2000] if snippet else None,
+            cve_id=cve, native_id=osv_id, seen_at=seen,
+            affected=affected or None,
+            cvss_vectors=_cvss_vectors(rec) or None,
+            cwe_ids=_cwe_ids(rec) or None,
+            reference_urls=_references(rec) or None,
+            withdrawn=bool(rec.get("withdrawn")) or None,
+        )

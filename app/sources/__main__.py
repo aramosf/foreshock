@@ -35,13 +35,35 @@ async def _run(name: str) -> None:
         log.error("sources.run_error", source=name, error=str(exc))
 
 
+def _reconcile_jobs(scheduler: AsyncIOScheduler) -> None:
+    """Sincroniza los jobs del scheduler con la tabla `sources`: añade las
+    habilitadas nuevas, elimina las deshabilitadas, y reprograma si cambió la
+    cadencia. Permite enable/disable y ajustes de cadencia EN CALIENTE."""
+    enabled = dict(_enabled_sources())
+    current = {j.id for j in scheduler.get_jobs() if j.id != "_reconcile"}
+    for name in current - enabled.keys():          # deshabilitadas -> quitar
+        scheduler.remove_job(name)
+        log.info("sources.job_removed", source=name)
+    for name, cadence in enabled.items():
+        job = scheduler.get_job(name)
+        if job is None:                            # nueva habilitada -> añadir
+            scheduler.add_job(_run, "interval", seconds=cadence, args=[name],
+                              id=name, max_instances=1, jitter=30)
+            log.info("sources.job_added", source=name, cadence=cadence)
+        elif getattr(job.trigger, "interval", None) and \
+                job.trigger.interval.total_seconds() != cadence:  # cadencia cambiada
+            scheduler.reschedule_job(name, trigger="interval", seconds=cadence)
+            log.info("sources.job_rescheduled", source=name, cadence=cadence)
+
+
 async def main() -> None:
     configure_logging()
     sync_registry_to_db()
     scheduler = AsyncIOScheduler()
-    for name, cadence in _enabled_sources():
-        scheduler.add_job(_run, "interval", seconds=cadence, args=[name],
-                          id=name, max_instances=1, jitter=30)
+    _reconcile_jobs(scheduler)
+    # Re-sincroniza cada 60 s con la BD (enable/disable/cadencia en caliente).
+    scheduler.add_job(_reconcile_jobs, "interval", seconds=60, args=[scheduler],
+                      id="_reconcile", max_instances=1)
     scheduler.start()
     log.info("sources.worker_started", count=len(scheduler.get_jobs()))
     await asyncio.Event().wait()

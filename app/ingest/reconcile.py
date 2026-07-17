@@ -12,7 +12,7 @@ import uuid
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from app.core.models import Candidate, CVSSScore, Identifier
+from app.core.models import AffectedProduct, Candidate, CVSSScore, Identifier
 from app.core.models import Mention as MentionRow
 from app.ingest.identifiers import ExtractedId, primary_cve
 
@@ -53,16 +53,47 @@ def _pick_winner(candidates: list[Candidate]) -> Candidate:
 
 
 def merge_candidates(session: Session, winner: Candidate, loser: Candidate) -> None:
-    """Fusiona loser -> winner: reasigna hijos, marca tombstone. Reversible."""
+    """Fusiona loser -> winner: reasigna TODOS los hijos, marca tombstone. Reversible.
+
+    Identifier y Mention tienen UNIQUE globales (sin candidate_id) -> reasignar es
+    seguro. CVSSScore y AffectedProduct tienen UNIQUE que INCLUYE candidate_id, así
+    que dos candidates pueden tener filas colisionantes: antes de reasignar, se
+    borran del loser las que ya existen en el winner (evita IntegrityError).
+    """
     if winner.id == loser.id:
         return
-    for model in (Identifier, MentionRow, CVSSScore):
+
+    # Tablas con UNIQUE global: reasignación directa.
+    for model in (Identifier, MentionRow):
         session.execute(
             update(model)
             .where(model.candidate_id == loser.id)  # type: ignore[attr-defined]
             .values(candidate_id=winner.id)
         )
-    # afectados y enlaces se reasignan por SQL directo (evita import pesado aquí)
+
+    # Tablas con UNIQUE que incluye candidate_id: elimina colisiones del loser, reasigna resto.
+    for model, keycols in (
+        (CVSSScore, (CVSSScore.version, CVSSScore.provenance, CVSSScore.source)),
+        (AffectedProduct, (AffectedProduct.vendor, AffectedProduct.product,
+                           AffectedProduct.ecosystem)),
+    ):
+        for loser_row in session.execute(
+            select(model).where(model.candidate_id == loser.id)  # type: ignore[attr-defined]
+        ).scalars():
+            conflict = session.execute(
+                select(model.id).where(  # type: ignore[attr-defined]
+                    model.candidate_id == winner.id,  # type: ignore[attr-defined]
+                    *[kc == getattr(loser_row, kc.key) for kc in keycols],
+                )
+            ).first()
+            if conflict is not None:
+                session.delete(loser_row)  # ya existe en el winner -> descarta duplicado
+            else:
+                loser_row.candidate_id = winner.id
+    session.flush()
+
+    # candidate_links no se reasignan: su UNIQUE canónico (a<b) haría colisiones y son
+    # sugerencias reversibles; quedan referidas al tombstone (limpieza futura).
     session.execute(
         update(Candidate).where(Candidate.id == loser.id).values(
             merged_into=winner.id, status="merged"

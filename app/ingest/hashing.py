@@ -17,7 +17,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 _SEP = "\x1f"
 
 # Parámetros de tracking que se eliminan de la URL canónica.
-_TRACKING_PREFIXES = ("utm_", "mc_", "fbclid", "gclid", "ref", "source")
+_TRACKING_PREFIXES = ("utm_", "mc_")               # por prefijo
+_TRACKING_EXACT = {"fbclid", "gclid", "ref", "source", "mkt_tok"}  # exactos
 
 
 def normalize_text(s: str | None) -> str:
@@ -35,7 +36,8 @@ def canonical_url(url: str | None) -> str:
     query = [
         (k, v)
         for k, v in parse_qsl(parts.query, keep_blank_values=True)
-        if not any(k.lower().startswith(p) for p in _TRACKING_PREFIXES)
+        if k.lower() not in _TRACKING_EXACT
+        and not any(k.lower().startswith(p) for p in _TRACKING_PREFIXES)
     ]
     query.sort()
     netloc = parts.netloc.lower()

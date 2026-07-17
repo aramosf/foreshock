@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     github_top_n: int = Field(default=10000)          # nº de repos más populares a vigilar
     github_commits_months: int = Field(default=5)     # ventana de changelog a escanear
     github_repos_per_run: int = Field(default=150)    # repos por ejecución (crawl incremental)
+    github_commits_max_pages: int = Field(default=10)  # páginas de commits/repo (100/pág)
     github_synthesize_candidates: bool = Field(default=True)  # candidate pre-CVE en fixes sin CVE
     github_advisories_max_pages: int = Field(default=30)  # paginación GHSA (100/pág -> ~3000)
 

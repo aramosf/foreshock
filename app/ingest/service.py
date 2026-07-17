@@ -64,6 +64,24 @@ def _apply_flags(candidate: Candidate, flags: dict[str, object] | None) -> None:
             setattr(candidate, key, value)
 
 
+def _apply_candidate_updates(session: Session, candidate: Candidate,
+                             m: "FetchedMention") -> None:
+    """Aplica al candidate los flags y datos estructurados de una mención
+    (idempotente: los upserts de CVSS/afectados no duplican). Se usa tanto en el
+    camino de mención nueva como en el de mención duplicada."""
+    _apply_flags(candidate, m.flags)          # p.ej. in_kev
+    if m.cvss_vectors:
+        persist_cvss_vectors(session, candidate.id, m.cvss_vectors, source="osv")
+    if m.affected:
+        persist_affected(session, candidate.id, m.affected)
+    if m.cwe_ids:
+        candidate.cwe_ids = m.cwe_ids
+    if m.reference_urls:
+        candidate.reference_urls = m.reference_urls[:50]
+    if m.withdrawn is not None:
+        candidate.withdrawn = m.withdrawn
+
+
 @dataclass
 class IngestResult:
     candidate_id: str
@@ -88,7 +106,8 @@ def _persist_raw(source_id: int, chash: str, raw_html: str | None) -> str | None
 def _days(a: datetime | None, b: datetime | None) -> int | None:
     if a is None or b is None:
         return None
-    return (a - b).days
+    # round (no timedelta.days, que hace floor y da -1 en deltas negativos pequeños).
+    return round((a - b).total_seconds() / 86400)
 
 
 def compute_days_ahead(session: Session, candidate: Candidate) -> None:
@@ -138,6 +157,8 @@ def _refresh_aggregates(session: Session, candidate: Candidate) -> None:
 def ingest_mention(session: Session, source_id: int, m: FetchedMention) -> IngestResult:
     """Ingesta idempotente de una mención. Requiere sesión abierta (no hace commit)."""
     seen_at = m.seen_at or datetime.now(UTC)
+    if seen_at.tzinfo is None:            # normaliza a UTC-aware (evita mezcla naive/aware)
+        seen_at = seen_at.replace(tzinfo=UTC)
 
     ids = extract_identifiers(m.cve_id, m.native_id, m.title, m.snippet, m.url)
     if not ids:
@@ -159,6 +180,12 @@ def ingest_mention(session: Session, source_id: int, m: FetchedMention) -> Inges
         )
     ).scalar_one_or_none()
     if existing is not None:
+        # Mención duplicada, PERO los flags/extras van al CANDIDATE, no a la mención:
+        # una reemisión que ahora añade in_kev o productos debe aplicarse igualmente.
+        candidate = session.get(Candidate, existing.candidate_id)
+        if candidate is not None:
+            _apply_candidate_updates(session, candidate, m)
+            session.flush()
         return IngestResult(
             candidate_id=str(existing.candidate_id),
             mention_id=existing.id,
@@ -167,19 +194,7 @@ def ingest_mention(session: Session, source_id: int, m: FetchedMention) -> Inges
         )
 
     candidate = resolve_candidate(session, ids)
-    _apply_flags(candidate, m.flags)  # p.ej. in_kev (marca candidate existente o nuevo)
-
-    # Datos estructurados (OSV/GHSA…): CVSS autoritativo, productos afectados y metadatos.
-    if m.cvss_vectors:
-        persist_cvss_vectors(session, candidate.id, m.cvss_vectors, source="osv")
-    if m.affected:
-        persist_affected(session, candidate.id, m.affected)
-    if m.cwe_ids:
-        candidate.cwe_ids = m.cwe_ids
-    if m.reference_urls:
-        candidate.reference_urls = m.reference_urls[:50]
-    if m.withdrawn is not None:
-        candidate.withdrawn = m.withdrawn
+    _apply_candidate_updates(session, candidate, m)
 
     raw_path = _persist_raw(source_id, chash, m.raw_html)
 

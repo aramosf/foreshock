@@ -103,10 +103,14 @@ def upsert_nvd(session: Session, record: dict[str, Any], observed_at: datetime) 
 
 
 def _iso_z(dt: datetime) -> str:
-    """Formatea un datetime aware como ISO-8601 con offset (formato NVD)."""
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    return dt.isoformat()
+    """ISO-8601 con milisegundos + 'Z' (formato que documenta la API NVD 2.0).
+
+    `datetime.isoformat()` emite microsegundos de 6 dígitos, que NVD puede
+    rechazar; usamos 3 dígitos de fracción y sufijo Z.
+    """
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(UTC).replace(tzinfo=None)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
 async def sync_nvd_delta(hours: int = 3) -> dict[str, int]:
@@ -146,12 +150,19 @@ async def sync_nvd_delta(hours: int = 3) -> dict[str, int]:
             with session_scope() as session:
                 for vuln in vulns:
                     stats["fetched"] += 1
-                    record = parse_nvd_vuln(vuln)
-                    if not record.get("id"):
+                    # Aislamiento por fila: un registro corrupto (fecha mal formada,
+                    # etc.) NO debe abortar la página ni el resto del delta.
+                    try:
+                        record = parse_nvd_vuln(vuln)
+                        if not record.get("id"):
+                            stats["skipped"] += 1
+                            continue
+                        with session.begin_nested():
+                            upsert_nvd(session, record, observed_at)
+                        stats["upserted"] += 1
+                    except Exception as exc:  # noqa: BLE001
                         stats["skipped"] += 1
-                        continue
-                    upsert_nvd(session, record, observed_at)
-                    stats["upserted"] += 1
+                        log.warning("nvd.row_error", error=str(exc))
 
             page_size = data.get("resultsPerPage") or len(vulns)
             start_index += page_size

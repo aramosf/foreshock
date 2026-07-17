@@ -34,11 +34,13 @@ class CisaKevSource(BaseSource):
                 continue
             added = v.get("dateAdded")
             kev_date = None
+            seen = None
             if added:
                 try:
-                    kev_date = isoparse(added).date()
+                    seen = isoparse(added)
+                    kev_date = seen.date()
                 except (ValueError, TypeError):
-                    kev_date = None
+                    seen = None
             ransom = v.get("knownRansomwareCampaignUse")
             snippet = " | ".join(
                 p for p in [
@@ -54,7 +56,7 @@ class CisaKevSource(BaseSource):
                     title=f"KEV: {v.get('vulnerabilityName') or cve}"[:200],
                     snippet=snippet[:2000] if snippet else None,
                     cve_id=cve,
-                    seen_at=None,
+                    seen_at=seen,
                     flags={"in_kev": True, "kev_date": kev_date, "kev_source": "cisa"},
                 )
             )

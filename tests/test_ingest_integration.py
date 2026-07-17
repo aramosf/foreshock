@@ -76,6 +76,32 @@ def test_days_ahead_computed_against_nvd_observation(session):
     assert cand.status == "published"
 
 
+def test_merge_resolves_unique_collisions(session):
+    """Fusionar dos candidates con filas cvss/affected colisionantes no debe
+    violar UNIQUE, y debe reasignar los affected_products del loser."""
+    from app.core.models import AffectedProduct, CVSSScore
+    from app.ingest.reconcile import merge_candidates
+    w, l = Candidate(status="emerging"), Candidate(status="emerging")
+    session.add(w); session.add(l); session.flush()
+    for c in (w, l):
+        session.add(CVSSScore(candidate_id=c.id, version="3.1", vector="CVSS:3.1/AV:N",
+                              provenance="authoritative", source="source-text"))
+        session.add(AffectedProduct(candidate_id=c.id, vendor="acme", product="widget",
+                                    ecosystem="pypi", kind="product"))
+    session.add(AffectedProduct(candidate_id=l.id, product="gadget", ecosystem="npm",
+                                kind="product"))
+    session.flush()
+    merge_candidates(session, w, l)  # no debe lanzar IntegrityError
+    session.flush()
+    cvss = session.execute(
+        select(CVSSScore).where(CVSSScore.candidate_id == w.id)).scalars().all()
+    prods = {a.product for a in session.execute(
+        select(AffectedProduct).where(AffectedProduct.candidate_id == w.id)).scalars()}
+    assert len(cvss) == 1                       # colisión deduplicada
+    assert prods == {"widget", "gadget"}        # gadget reasignado del loser
+    assert session.get(Candidate, l.id).status == "merged"
+
+
 def test_pre_cve_candidate_reconciles_on_cve_arrival(session):
     sid = _sid(session, "github_commits")
     r1 = ingest_mention(session, sid, FetchedMention(

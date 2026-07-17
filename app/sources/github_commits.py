@@ -173,43 +173,52 @@ async def _scan_repo(client: httpx.AsyncClient, settings: Settings, full: str,
     if synthesize is None:
         synthesize = settings.github_synthesize_candidates
     owner_repo = full
-    resp = await client.get(
-        f"{settings.github_api_base}/repos/{full}/commits",
-        headers=_headers(settings),
-        params={"since": since_iso, "per_page": 100},
-    )
-    if resp.status_code != 200:
-        return [], None
     out: list[FetchedMention] = []
     newest: str | None = None
-    for commit in resp.json():
-        commit_date = (commit.get("commit") or {}).get("committer", {}).get("date")
-        if commit_date and (newest is None or commit_date > newest):
-            newest = commit_date
-        msg = (commit.get("commit") or {}).get("message", "")
-        cve = None
-        m = _CVE.search(msg)
-        if m:
-            cve = m.group(0).upper()
-        sec = bool(_SECFIX.search(msg))
-        if not cve and not (sec and synthesize):
-            continue
-        sha = commit.get("sha", "")[:12]
-        native = None
-        if not cve and sec:
-            native = f"GHCOMMIT:{owner_repo}@{sha}"
-        first_line = msg.splitlines()[0] if msg else ""
-        out.append(
-            FetchedMention(
-                url=commit.get("html_url"),
-                title=f"{owner_repo}: {first_line}"[:200],
-                snippet=f"[{owner_repo}] {msg}"[:2000],
-                cve_id=cve,
-                native_id=native,
-                seen_at=datetime.fromisoformat(commit_date.replace("Z", "+00:00"))
-                if commit_date else None,
+    # Paginación: GitHub devuelve los commits más nuevos primero, 100/página.
+    # Sin paginar, un repo con >100 commits en la ventana perdería el resto para
+    # siempre (el watermark saltaría al más reciente). Seguimos el header Link.
+    url: str | None = f"{settings.github_api_base}/repos/{full}/commits"
+    params: dict | None = {"since": since_iso, "per_page": 100}
+    pages = 0
+    while url and pages < settings.github_commits_max_pages:
+        resp = await client.get(url, headers=_headers(settings), params=params)
+        if resp.status_code != 200:
+            break  # rate limit / repo inaccesible: devolvemos lo acumulado
+        commits = resp.json()
+        if not commits:
+            break
+        for commit in commits:
+            commit_date = (commit.get("commit") or {}).get("committer", {}).get("date")
+            if commit_date and (newest is None or commit_date > newest):
+                newest = commit_date
+            msg = (commit.get("commit") or {}).get("message", "")
+            cve = None
+            m = _CVE.search(msg)
+            if m:
+                cve = m.group(0).upper()
+            sec = bool(_SECFIX.search(msg))
+            if not cve and not (sec and synthesize):
+                continue
+            sha = commit.get("sha", "")[:12]
+            native = None
+            if not cve and sec:
+                native = f"GHCOMMIT:{owner_repo}@{sha}"
+            first_line = msg.splitlines()[0] if msg else ""
+            out.append(
+                FetchedMention(
+                    url=commit.get("html_url"),
+                    title=f"{owner_repo}: {first_line}"[:200],
+                    snippet=f"[{owner_repo}] {msg}"[:2000],
+                    cve_id=cve,
+                    native_id=native,
+                    seen_at=datetime.fromisoformat(commit_date.replace("Z", "+00:00"))
+                    if commit_date else None,
+                )
             )
-        )
+        pages += 1
+        url = resp.links.get("next", {}).get("url")
+        params = None  # la URL 'next' ya lleva since/per_page/page
     return out, newest
 
 

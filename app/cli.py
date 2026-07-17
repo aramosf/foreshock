@@ -313,18 +313,25 @@ def stats(
 ) -> None:
     """Media de días de ventaja por fuente y tasa de promoción."""
     with get_session() as session:
-        total = session.execute(select(func.count()).select_from(Candidate)).scalar_one()
-        promoted = session.execute(
-            select(func.count()).select_from(Candidate).where(Candidate.status == "published")
+        total = session.execute(
+            select(func.count()).select_from(Candidate)
+            .where(Candidate.merged_into.is_(None))
         ).scalar_one()
-        rows = session.execute(
-            select(Source.name, func.avg(Candidate.days_ahead_vs_nvd_present),
-                   func.count(func.distinct(Candidate.id)))
-            .join(Mention, Mention.source_id == Source.id)
-            .join(Candidate, Candidate.id == Mention.candidate_id)
-            .where(Candidate.days_ahead_vs_nvd_present.is_not(None))
-            .group_by(Source.name).order_by(func.avg(Candidate.days_ahead_vs_nvd_present).desc())
-        ).all()
+        promoted = session.execute(
+            select(func.count()).select_from(Candidate)
+            .where(Candidate.status == "published", Candidate.merged_into.is_(None))
+        ).scalar_one()
+        # AVG deduplicada por candidate (el join fuente->mención da N filas/candidate;
+        # promediar directamente sesga la media por nº de menciones). Excluye fusionados.
+        rows = session.execute(text("""
+            SELECT source, avg(days_ahead) AS avg_days, count(*) AS candidates FROM (
+              SELECT DISTINCT s.name AS source, c.id, c.days_ahead_vs_nvd_present AS days_ahead
+              FROM sources s
+              JOIN mentions m ON m.source_id = s.id
+              JOIN candidates c ON c.id = m.candidate_id
+              WHERE c.days_ahead_vs_nvd_present IS NOT NULL AND c.merged_into IS NULL
+            ) t GROUP BY source ORDER BY avg_days DESC
+        """)).all()
     data = [(name, round(float(avg), 1) if avg is not None else None, cnt)
             for name, avg, cnt in rows]
     meta = {"candidates": total, "promoted": promoted,
@@ -397,8 +404,10 @@ def trend(
     months: int = typer.Option(12, help="ventana de meses hacia atrás (p.ej. 6, 12)"),
     fmt: str = typer.Option("table", "--format", "-f", help="table | json | csv"),
 ) -> None:
-    """Serie temporal de vulnerabilidades pendientes por mes/año (fecha real de
-    publicación). Ventana configurable (--months). Ver crecimiento / palo de hockey."""
+    """Serie temporal de vulnerabilidades pendientes por mes/año, por fecha de
+    PRIMERA DETECCIÓN del radar (candidate.first_seen_at ≈ fecha de la señal más
+    temprana: commit, publicación OSV, dateAdded KEV). Ventana configurable
+    (--months). Sirve para ver crecimiento reciente / efecto palo de hockey."""
     from collections import Counter
 
     date_fmt = "%Y-%m" if granularity == "month" else "%Y"

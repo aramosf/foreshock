@@ -59,7 +59,7 @@ def parse_authoritative(text: str | None) -> list[CVSSResult]:
     out: list[CVSSResult] = []
     seen: set[str] = set()
     for m in _VECTOR_RE.finditer(text):
-        vector = m.group(0).upper().replace("CVSS:3.0", "CVSS:3.0")
+        vector = m.group(0).upper()
         if vector in seen:
             continue
         seen.add(vector)
