@@ -1,177 +1,497 @@
 # Data model
 
-The **hand-written Alembic migrations are the source of truth for the schema**
-(`migrations/versions/0001_initial_schema.py`, `0002_affected_products.py`,
-`0003_soft_cve_ref.py`). `app/core/models.py` is an ORM mapping (SQLModel) over
-those tables; `env.py` uses `target_metadata=None`, so the models never
-autogenerate or create tables on their own.
+The **hand-written Alembic migrations are the single source of truth for the
+schema**:
 
-Postgres 16. It leverages `gen_random_uuid()`, `TIMESTAMP WITH TIME ZONE`,
-`JSONB`, `ARRAY(Text)` and partial indexes.
+| Revision | File | What it adds |
+|---|---|---|
+| `0001_initial` | `migrations/versions/0001_initial_schema.py` | baseline, sources, candidates, identifiers, mentions, candidate_links, cvss_scores, epss_scores + the three views |
+| `0002_affected` | `migrations/versions/0002_affected_products.py` | product_catalog, product_aliases, affected_products, affected_version_ranges |
+| `0003_soft_cve` | `migrations/versions/0003_soft_cve_ref.py` | drops the FK `candidates.cve_id → published_cves.id` (soft reference) |
+| `0004_kev_flags` | `migrations/versions/0004_kev_flags.py` | `candidates.in_kev`, `kev_date`, `kev_source` + partial index |
+| `0005_rich_fields` | `migrations/versions/0005_rich_fields.py` | `affected_products.kind`; `candidates.cwe_ids`, `reference_urls`, `withdrawn` |
+
+`app/core/models.py` is a SQLModel ORM mapping **over** those tables. `migrations/env.py`
+sets `target_metadata=None`, so the models never autogenerate migrations and never
+create tables on their own — if you change a migration you must update the model by hand.
+
+Target engine: **Postgres 16**. The schema leans on `gen_random_uuid()`,
+`TIMESTAMP WITH TIME ZONE` (`timestamptz`), `JSONB`, `ARRAY(Text)`, partial indexes,
+`ON CONFLICT` upserts and PG15+ `NULLS NOT DISTINCT` unique constraints.
 
 ---
 
-## Baseline
+## Entity-relationship diagram
+
+```mermaid
+erDiagram
+    published_cves ||..o{ candidates : "soft ref by cve_id (no FK)"
+    published_cves ||..o{ epss_scores : "soft ref by cve_id (no FK)"
+    sources ||--o{ mentions : "source_id (FK)"
+    candidates ||--o{ identifiers : "candidate_id (FK, CASCADE)"
+    candidates ||--o{ mentions : "candidate_id (FK, CASCADE)"
+    candidates ||--o{ cvss_scores : "candidate_id (FK, CASCADE)"
+    candidates ||--o{ affected_products : "candidate_id (FK, CASCADE)"
+    candidates ||--o{ candidate_links : "a / b (FK, CASCADE)"
+    candidates |o--o{ candidates : "merged_into (self-FK, union-find)"
+    product_catalog ||--o{ product_aliases : "catalog_id (FK, CASCADE)"
+    product_catalog |o--o{ affected_products : "catalog_id (FK, SET NULL)"
+    affected_products ||--o{ affected_version_ranges : "affected_product_id (FK, CASCADE)"
+
+    published_cves {
+        text id PK "CVE-YYYY-NNNN"
+        text state "RESERVED|PUBLISHED|REJECTED"
+        timestamptz nvd_first_observed_at "own ground truth"
+        timestamptz nvd_first_analyzed_observed_at
+        jsonb raw_json
+    }
+    sources {
+        int id PK
+        text name UK
+        int tier "1..5"
+        text method "api|rss|scrape|browser"
+    }
+    candidates {
+        uuid id PK
+        text status "candidate|emerging|published|rejected|merged"
+        text cve_id "SOFT ref, no FK"
+        uuid merged_into "self-FK"
+        int days_ahead_vs_nvd_present
+        bool in_kev
+    }
+    identifiers {
+        bigint id PK
+        uuid candidate_id FK
+        text scheme
+        text value
+    }
+    mentions {
+        bigint id PK
+        uuid candidate_id FK
+        int source_id FK
+        text content_hash "UNIQUE(source_id, content_hash)"
+    }
+    candidate_links {
+        uuid a PK
+        uuid b PK
+        text method "fingerprint|embedding|llm"
+        text status "suggested|confirmed|rejected"
+    }
+    cvss_scores {
+        bigint id PK
+        uuid candidate_id FK
+        text version "3.0|3.1|4.0"
+        text provenance "authoritative|derived"
+        text source
+    }
+    epss_scores {
+        text cve_id PK
+        date scored_date PK
+        float score
+        float percentile
+    }
+    product_catalog {
+        bigint id PK
+        text vendor
+        text product
+        text ecosystem
+    }
+    product_aliases {
+        bigint id PK
+        text alias_normalized UK
+        bigint catalog_id FK
+    }
+    affected_products {
+        bigint id PK
+        uuid candidate_id FK
+        bigint catalog_id FK "nullable"
+        text product
+        text kind "product|distro|malware"
+    }
+    affected_version_ranges {
+        bigint id PK
+        bigint affected_product_id FK
+        text introduced
+        text fixed
+        text last_affected
+    }
+```
+
+Relationship notes:
+
+- `published_cves → candidates` and `published_cves → epss_scores` are **soft
+  references by `cve_id`** — deliberately *not* foreign keys (see below).
+- `candidates.merged_into` is a self-FK implementing the union-find tombstone.
+- `affected_products.catalog_id` is `ON DELETE SET NULL` (an affected row survives
+  catalog deletion, becoming "unresolved"); every other FK below is `ON DELETE CASCADE`.
+
+---
+
+## Layer 1 — Baseline
 
 ### `published_cves`
-Canonical state of each CVE (cvelistV5 + NVD 2.0). PK `id` = `CVE-YYYY-NNNN`
-(`Text`).
+Canonical state of each CVE, fed from cvelistV5 (`app/baseline/cvelist.py`) and the
+NVD 2.0 delta feed (`app/baseline/nvd.py`). PK `id` is the CVE string itself.
 
-| Column | Type | Notes |
-|---|---|---|
-| `id` | Text PK | `CVE-YYYY-NNNN` |
-| `state` | Text | `RESERVED` / `PUBLISHED` / `REJECTED` (CHECK `ck_pubcves_state`) |
-| `cvelist_published_at`, `cvelist_updated_at` | timestamptz | Dates self-reported by cvelistV5. |
-| `nvd_published_at`, `nvd_last_modified_at` | timestamptz | Dates self-reported by NVD (**may come with backfill**). |
-| `nvd_vuln_status` | Text | e.g. `Analyzed`, `Awaiting Analysis`. |
-| `nvd_first_observed_at` | timestamptz | **Own observation**: when we first saw it in NVD (immune to backfill). |
-| `nvd_first_analyzed_observed_at` | timestamptz | When we first saw it in `Analyzed` state. |
-| `cna`, `assigner_short_name` | Text | Authorship of the record. |
-| `raw_json` | JSONB | Original CVE 5.x record. |
-| `ingested_at` | timestamptz | `server_default now()`. |
+| Column | Type | Null | Default | Purpose |
+|---|---|---|---|---|
+| `id` | Text | no | — | Primary key = `CVE-YYYY-NNNN`. |
+| `state` | Text | no | — | `RESERVED` / `PUBLISHED` / `REJECTED`. |
+| `cvelist_published_at` | timestamptz | yes | — | Publication date **self-reported** by cvelistV5. |
+| `cvelist_updated_at` | timestamptz | yes | — | Last-update date self-reported by cvelistV5. |
+| `nvd_published_at` | timestamptz | yes | — | Publication date self-reported by NVD (**may arrive back-dated / backfilled**). |
+| `nvd_last_modified_at` | timestamptz | yes | — | Last-modified date self-reported by NVD. |
+| `nvd_vuln_status` | Text | yes | — | NVD status string, e.g. `Awaiting Analysis`, `Analyzed`. |
+| `nvd_first_observed_at` | timestamptz | yes | — | **Own observation ground truth**: the first time *CVERadar* saw this CVE in the NVD delta. Sealed once via `COALESCE`. |
+| `nvd_first_analyzed_observed_at` | timestamptz | yes | — | First time we observed this CVE in `Analyzed` state. Sealed once via `COALESCE`, only when the observed status is `Analyzed`. |
+| `cna` | Text | yes | — | CNA that owns the record. |
+| `assigner_short_name` | Text | yes | — | Assigner short name. |
+| `raw_json` | JSONB | yes | — | Original CVE 5.x record for later re-parsing. |
+| `ingested_at` | timestamptz | no | `now()` | Server-side insert/update timestamp. |
 
-The `cvelist_*` fields are filled by `app/baseline/cvelist.py`; the `nvd_*` ones by
-`app/baseline/nvd.py`. Neither overwrites the other (disjoint upserts by columns).
-The `nvd_first_*` columns are sealed once via `COALESCE` — they are the
-**observation ground truth** that makes the `days_ahead_present` metric robust.
+**Constraints / indexes**
+- `CHECK ck_pubcves_state`: `state IN ('RESERVED','PUBLISHED','REJECTED')`.
+- `idx_pubcves_state (state)`, `idx_pubcves_nvd_published (nvd_published_at DESC)`,
+  `idx_pubcves_assigner (assigner_short_name)`.
+
+**Why the `nvd_first_*` columns exist.** NVD frequently *backfills*: a CVE can be
+published today with `nvd_published_at` set in the past, and dates can be rewritten
+retroactively. A lead-time metric computed against `nvd_published_at` is therefore
+distortable (even negative). `upsert_nvd()` writes `nvd_first_observed_at =
+COALESCE(existing, observed_at)` — it is set exactly once, the first time we see the
+CVE, and never overwritten. It measures a fact on *our* clock ("at this instant the
+CVE was already in NVD for us"), which is what makes `days_ahead_vs_nvd_present` robust.
 
 ### `sources`
-Registry of fetchers. `name` unique; `method IN ('api','rss','scrape','browser')`
-(CHECK `ck_sources_method`); `tier BETWEEN 1 AND 5` (CHECK `ck_sources_tier`).
-Stores `enabled`, `cadence_seconds`, `last_success_at`, `last_error`,
-`last_error_at`. Partial index `idx_sources_enabled WHERE enabled`.
+Registry row per fetcher, synced from code by `sync_registry_to_db()`.
+
+| Column | Type | Null | Default | Purpose |
+|---|---|---|---|---|
+| `id` | Integer | no | autoincrement | Primary key, referenced by `mentions.source_id`. |
+| `name` | Text | no | — | Unique fetcher name (`== BaseSource.name`). |
+| `kind` | Text | no | — | Human-readable description of the origin. |
+| `method` | Text | no | — | `api` / `rss` / `scrape` / `browser`. |
+| `tier` | Integer | no | — | Signal priority `1..5` (1 = strongest/earliest). |
+| `enabled` | Boolean | no | `true` | Scheduler only runs enabled sources. |
+| `cadence_seconds` | Integer | no | — | Interval between runs. **Not overwritten** on re-sync (operator may tune it live). |
+| `last_success_at` | timestamptz | yes | — | Last successful run. |
+| `last_error` | Text | yes | — | Last error text (truncated to 2000 chars). |
+| `last_error_at` | timestamptz | yes | — | When the last error happened. |
+| `created_at` | timestamptz | no | `now()` | Row creation time. |
+
+**Constraints / indexes**
+- `CHECK ck_sources_method`: `method IN ('api','rss','scrape','browser')`.
+- `CHECK ck_sources_tier`: `tier BETWEEN 1 AND 5`.
+- `UNIQUE(name)`; partial `idx_sources_enabled (enabled) WHERE enabled`.
 
 ---
 
-## Tracking
+## Layer 2 — Tracking
 
 ### `candidates` — the tracking unit
 A candidate exists **with or without a CVE**. PK `id` UUID (`gen_random_uuid()`).
 
-- `status` — `candidate` / `emerging` / `published` / `rejected` / `merged`
-  (CHECK `ck_cand_status`).
-- **`cve_id` (Text) — SOFT reference, NO FK.** The `0003` migration drops
-  the `candidates_cve_id_fkey` constraint. Reason: a candidate may reference
-  a CVE that is only RESERVED and not yet ingested by the baseline (or that MITRE/NVD
-  have not published yet). Enforcing the FK would prevent recording the early
-  signal, which is CVERadar's premise. Reconciliation is done by *lookup*
-  (`compute_days_ahead` does `session.get(PublishedCVE, cve_id)`), not by
-  referential integrity. Index `idx_cand_cve`.
-- `merged_into` — self-FK for the merge union-find (tombstone). Partial
-  index `idx_cand_merged_into WHERE merged_into IS NOT NULL`.
-- `cluster_fingerprint` — fingerprint for fuzzy dedup.
-- Mention aggregates: `first_seen_at`, `last_seen_at`, `mention_count`,
-  `source_count` (recomputed by `_refresh_aggregates`).
-- Reconciliation with NVD: `promoted_at`, `days_ahead_vs_nvd_published`,
-  `days_ahead_vs_nvd_present`, `days_ahead_vs_nvd_analyzed`.
-- Enrichment (Layer 3): `affected_product`, `affected_versions`,
-  `vuln_type`, `attack_vector` (CHECK `network/adjacent/local/physical`),
-  `requires_auth`, `requires_interaction`, `has_public_poc`, `poc_urls[]`,
-  `severity_hint` (CHECK `likely-critical/high/medium/low`),
-  `enrichment_confidence` (CHECK 0..1), `enrichment_method`,
-  `enrichment_updated_at`.
+| Column | Type | Null | Default | Purpose |
+|---|---|---|---|---|
+| `id` | UUID | no | `gen_random_uuid()` | Primary key. |
+| `status` | Text | no | `'candidate'` | Lifecycle state (see CHECK below). |
+| `cve_id` | Text | yes | — | **SOFT reference** to `published_cves.id` — no FK since `0003`. |
+| `merged_into` | UUID | yes | — | Self-FK to the winner candidate (union-find tombstone). |
+| `cluster_fingerprint` | Text | yes | — | Fingerprint for fuzzy clustering / dedup. |
+| `first_seen_at` | timestamptz | no | `now()` | Earliest mention time (recomputed as `min(mentions.seen_at)`). Basis for `days_ahead`. |
+| `last_seen_at` | timestamptz | no | `now()` | Latest mention time (`max(mentions.seen_at)`). |
+| `mention_count` | Integer | no | `0` | Total mentions (recomputed). |
+| `source_count` | Integer | no | `0` | Distinct sources (recomputed). |
+| `promoted_at` | timestamptz | yes | — | When status became `published`. |
+| `days_ahead_vs_nvd_published` | Integer | yes | — | Lead days vs `nvd_published_at` (backfill-sensitive). |
+| `days_ahead_vs_nvd_present` | Integer | yes | — | Lead days vs `nvd_first_observed_at` (**robust, default metric**). |
+| `days_ahead_vs_nvd_analyzed` | Integer | yes | — | Lead days vs `nvd_first_analyzed_observed_at`. |
+| `affected_product` | Text | yes | — | Enrichment summary: first affected product (`vendor/product`). |
+| `affected_versions` | Text | yes | — | Enrichment summary: raw version string. |
+| `vuln_type` | Text | yes | — | LLM: RCE / SQLi / XSS / AuthBypass / … |
+| `attack_vector` | Text | yes | — | LLM: `network`/`adjacent`/`local`/`physical`. |
+| `requires_auth` | Boolean | yes | — | LLM inference. |
+| `requires_interaction` | Boolean | yes | — | LLM inference. |
+| `has_public_poc` | Boolean | yes | — | LLM inference / source flag. |
+| `poc_urls` | ARRAY(Text) | yes | — | LLM-extracted PoC links. |
+| `cwe_ids` | ARRAY(Text) | yes | — | (`0005`) CWE ids carried from OSV/GHSA. |
+| `reference_urls` | ARRAY(Text) | yes | — | (`0005`) Reference/fix/PoC links (capped at 50 on ingest). |
+| `withdrawn` | Boolean | yes | — | (`0005`) Advisory withdrawn (OSV/GHSA). |
+| `severity_hint` | Text | yes | — | Qualitative severity when no numeric CVSS exists. |
+| `in_kev` | Boolean | yes | — | (`0004`) Present in a KEV catalog (exploited in the wild). |
+| `kev_date` | Date | yes | — | (`0004`) KEV `dateAdded`. |
+| `kev_source` | Text | yes | — | (`0004`) `'cisa'` or `'vulncheck'`. |
+| `enrichment_confidence` | Float | yes | — | LLM confidence `0..1`. |
+| `enrichment_method` | Text | yes | — | Which LLM path produced the enrichment. |
+| `enrichment_updated_at` | timestamptz | yes | — | Last enrichment time (drives re-enrich policy). |
+| `created_at` | timestamptz | no | `now()` | Row creation. |
 
-### `identifiers` — deterministic link
-Each `(scheme, value)` anchors to **a single** candidate.
-`UNIQUE(scheme, value)` (`uq_identifiers_scheme_value`) is the key of the
-deterministic link (Stage A of the correlation). FK `candidate_id` with
-`ON DELETE CASCADE`. Schemes: `CVE`, `ZDI-CAN`, `ZDI`, `VU`, `GHSA`, `MSRC`,
-`GHCOMMIT` (see `INGESTION.md`).
+**Constraints**
+- `CHECK ck_cand_status`: `status IN ('candidate','emerging','published','rejected','merged')`.
+- `CHECK ck_cand_attack_vector`: `attack_vector IN ('network','adjacent','local','physical') OR NULL`.
+- `CHECK ck_cand_severity_hint`: `severity_hint IN ('likely-critical','likely-high','likely-medium','likely-low') OR NULL`.
+- `CHECK ck_cand_enrichment_conf`: `enrichment_confidence BETWEEN 0 AND 1 OR NULL`.
+
+**Indexes**: `idx_cand_status`, `idx_cand_cve`, `idx_cand_last_seen (last_seen_at DESC)`,
+`idx_cand_fingerprint`, partial `idx_cand_merged_into WHERE merged_into IS NOT NULL`,
+partial `idx_cand_in_kev (in_kev) WHERE in_kev`.
+
+**Why `cve_id` is a soft reference (no FK).** Migration `0003` drops
+`candidates_cve_id_fkey`. A candidate routinely references a CVE that is only
+**RESERVED** and not yet ingested into `published_cves` (or that MITRE/NVD have not
+published at all). Enforcing the FK would *reject the early signal* — the exact thing
+CVERadar exists to capture. Reconciliation is done by *lookup*
+(`compute_days_ahead()` calls `session.get(PublishedCVE, cve_id)`), not by referential
+integrity. The `idx_cand_cve` index keeps that lookup cheap.
+
+**Status lifecycle**: `candidate` → `emerging` (`_refresh_aggregates` promotes on the
+first mention) → `published` (`compute_days_ahead` promotes when the CVE turns up
+`PUBLISHED` in the baseline). `merged` is the union-find tombstone; `rejected` is a
+possible terminal state.
+
+### `identifiers` — deterministic anchor
+Every `(scheme, value)` belongs to exactly one candidate; this is Stage A of the
+correlation (deterministic link).
+
+| Column | Type | Null | Default | Purpose |
+|---|---|---|---|---|
+| `id` | BigInteger | no | autoincrement | Primary key. |
+| `candidate_id` | UUID | no | — | FK → `candidates.id` `ON DELETE CASCADE`. |
+| `scheme` | Text | no | — | Identifier scheme (see table). |
+| `value` | Text | no | — | Canonicalized value. |
+| `first_seen_at` | timestamptz | no | `now()` | First time this id was observed. |
+
+**Constraints / indexes**: `UNIQUE(scheme, value)` (`uq_identifiers_scheme_value`) —
+the key that makes a native id point to a single candidate and enables the merge;
+`idx_ident_candidate (candidate_id)`.
+
+**Identifier schemes** (regexes and canonicalization in `app/ingest/identifiers.py`):
+
+| Scheme | Example | Canonicalization | Meaning |
+|---|---|---|---|
+| `CVE` | `CVE-2026-1234` | uppercased | The CVE itself. |
+| `ZDI-CAN` | `ZDI-CAN-26123` | uppercased | ZDI internal reservation, **pre-CVE**. |
+| `ZDI` | `ZDI-26-123` | uppercased | Published ZDI advisory. |
+| `VU` | `VU#123456` | uppercased | CERT/CC vulnerability note. |
+| `GHSA` | `GHSA-jfh8-c2jp-5v3q` | `GHSA-` + lowercase body | GitHub Security Advisory. |
+| `MSRC` | `ADV123456` | uppercased | Microsoft advisory number. |
+| `GHCOMMIT` | `GHCOMMIT:owner/repo@<sha7-40>` | preserved (case-sensitive) | **Synthetic** id anchoring a pre-CVE security fix from a GitHub commit. |
+| `OSV` | `PYSEC-2026-1`, `GO-2026-1`, `RUSTSEC-2026-0001`, `GSD-2026-1`, `MAL-2026-1`, `OSV-2026-1` | uppercased | OSV ecosystem advisory ids (PyPI/Go/Rust/malware/generic) that anchor advisories that may predate a CVE. |
+
+The list order is the "native" priority: `primary_native()` returns the first
+non-CVE id, used to label a mention when no CVE is present.
 
 ### `mentions` — raw observations
-Each appearance of a vulnerability in a source. FKs to `candidates`
-(CASCADE) and `sources`.
+One row per appearance of a vulnerability in a source (a mention may carry no CVE).
 
-- **Idempotency by `content_hash`**: `UNIQUE(source_id, content_hash)`
-  (`uq_mentions_source_hash`). The hash is computed over the **semantic excerpt**
-  (normalized CVE + native + title + snippet + canonical URL), **not** over the
-  raw HTML. An identical re-listing → same hash → no duplicate; a real
-  content change → new hash → legitimate new mention in the timeline. See
-  `app/ingest/hashing.py`. The CVE identity goes **inside** the hash, which is why
-  the constraint does not include `cve_id`.
-- `extracted_cve`, `extracted_native`, `url`, `title`, `snippet`,
-  `raw_html_path` (on-disk path to the persisted raw HTML), `seen_at`.
+| Column | Type | Null | Default | Purpose |
+|---|---|---|---|---|
+| `id` | BigInteger | no | autoincrement | Primary key. |
+| `candidate_id` | UUID | no | — | FK → `candidates.id` CASCADE. |
+| `source_id` | Integer | no | — | FK → `sources.id`. |
+| `extracted_cve` | Text | yes | — | CVE parsed from the mention (if any). |
+| `extracted_native` | Text | yes | — | Preferred native id (if any). |
+| `url` | Text | yes | — | Source URL. |
+| `title` | Text | yes | — | Title. |
+| `snippet` | Text | yes | — | Short excerpt. |
+| `raw_html_path` | Text | yes | — | On-disk path to persisted raw HTML (`{raw_html_dir}/{source_id}/{hash}.html`). |
+| `seen_at` | timestamptz | no | `now()` | Observation time (normalized to UTC-aware). |
+| `content_hash` | Text | no | — | SHA-256 of the semantic excerpt (idempotency key). |
 
-### `candidate_links` — PROPOSED fuzzy dedup, non-destructive
-Fuzzy links between candidates that **are suggested but not merged**. Composite
-PK `(a, b)` with CHECK `a < b` (canonical pair, `ck_links_canonical_pair`).
+**Constraints / indexes**: `UNIQUE(source_id, content_hash)` (`uq_mentions_source_hash`);
+`idx_mentions_candidate`, `idx_mentions_seen (seen_at DESC)`, `idx_mentions_source`.
 
-- `method IN ('fingerprint','embedding','llm')` (CHECK `ck_links_method`).
-- `confidence` 0..1; `status IN ('suggested','confirmed','rejected')`
-  (default `suggested`).
-- `rationale` for auditing. Partial index
-  `idx_links_status WHERE status = 'suggested'`.
+**Why the hash is over the excerpt, not the raw HTML.** `content_hash()`
+(`app/ingest/hashing.py`) hashes the normalized excerpt = `upper(cve)` + `upper(native)`
++ normalized `title` + normalized `snippet` + `canonical_url(url)`. Raw HTML changes
+every fetch (timestamps, ads, CSRF tokens) and would spuriously create new rows.
+Hashing the excerpt means an identical re-listing → same hash → no duplicate, while a
+real content change → new hash → a legitimately new timeline entry. The CVE identity
+lives **inside** the hash, which is why the UNIQUE constraint does **not** include
+`cve_id`. `canonical_url()` drops the fragment, strips tracking params (`utm_*`, `mc_*`,
+`fbclid`, `gclid`, `ref`, `source`, `mkt_tok`), lowercases host, trims trailing slash
+and sorts the query.
 
-It is non-destructive: unlike the `identifiers` union-find (which really merges
-by deterministic evidence), here a link is only proposed for review.
+### `candidate_links` — proposed fuzzy links (non-destructive)
+Suggested associations between candidates that are **not** merged.
+
+| Column | Type | Null | Default | Purpose |
+|---|---|---|---|---|
+| `a` | UUID | no | — | FK → `candidates.id` CASCADE. Part of composite PK. |
+| `b` | UUID | no | — | FK → `candidates.id` CASCADE. Part of composite PK. |
+| `method` | Text | no | — | `fingerprint` / `embedding` / `llm`. |
+| `confidence` | Float | no | — | `0..1`. |
+| `status` | Text | no | `'suggested'` | `suggested` / `confirmed` / `rejected`. |
+| `rationale` | Text | yes | — | Audit note. |
+| `created_at` | timestamptz | no | `now()` | Row creation. |
+
+**Constraints / indexes**: PK `(a, b)` (`pk_candidate_links`); `CHECK ck_links_canonical_pair`
+`a < b` (canonical ordering avoids the mirror pair); `CHECK ck_links_method`,
+`CHECK ck_links_confidence` (`0..1`), `CHECK ck_links_status`; partial
+`idx_links_status WHERE status = 'suggested'`.
+
+This is deliberately non-destructive: the `identifiers` union-find *actually* merges on
+hard deterministic evidence, whereas a `candidate_links` row is only a reviewable
+suggestion. Merges do **not** rewrite these rows (their `a < b` UNIQUE would collide);
+tombstoned links are cleaned up later.
 
 ### `cvss_scores` — v3/v4, authoritative vs derived, multi-source
-Several rows per candidate. `UNIQUE(candidate_id, version, provenance, source)`
-(`uq_cvss_candidate_version_prov_source`).
+Several rows per candidate.
 
-- `version IN ('3.0','3.1','4.0')` (CHECK `ck_cvss_version`).
-- `vector` (verbatim or constructed), `base_score` (0..10), `base_severity`
-  (`NONE/LOW/MEDIUM/HIGH/CRITICAL`).
-- **`provenance IN ('authoritative','derived')`** (CHECK `ck_cvss_provenance`):
-  `authoritative` = vector extracted verbatim from the source text and scored
-  with the `cvss` library; `derived` = computed from the metrics inferred by
-  the LLM.
-- `source` — textual origin (`source-text`, `llm-derived`, …).
-- `inferred_metrics[]` and `confidence` — only for `derived`.
+| Column | Type | Null | Default | Purpose |
+|---|---|---|---|---|
+| `id` | BigInteger | no | autoincrement | Primary key. |
+| `candidate_id` | UUID | no | — | FK → `candidates.id` CASCADE. |
+| `version` | Text | no | — | `3.0` / `3.1` / `4.0`. |
+| `vector` | Text | no | — | CVSS vector (verbatim or constructed), uppercased. |
+| `base_score` | Float | yes | — | `0..10`. |
+| `base_severity` | Text | yes | — | `NONE/LOW/MEDIUM/HIGH/CRITICAL`. |
+| `provenance` | Text | no | — | `authoritative` / `derived`. |
+| `source` | Text | no | — | Origin tag (`source-text`, `llm-derived`, `osv`, …). |
+| `inferred_metrics` | ARRAY(Text) | yes | — | Metrics that came from LLM inference (derived only). |
+| `confidence` | Float | yes | — | `0..1` (derived rows). |
+| `recorded_at` | timestamptz | no | `now()` | When this score was written. |
 
-See `ENRICHMENT.md` for the selection precedence.
+**Constraints / indexes**
+- `UNIQUE(candidate_id, version, provenance, source)` (`uq_cvss_candidate_version_prov_source`)
+  — the upsert key; lets a candidate hold, e.g., an authoritative v3.1 from Red Hat and a
+  derived v3.1 from the LLM simultaneously.
+- `CHECK ck_cvss_version` (`3.0/3.1/4.0`), `CHECK ck_cvss_base_score` (`0..10 OR NULL`),
+  `CHECK ck_cvss_base_severity`, `CHECK ck_cvss_provenance`, `CHECK ck_cvss_confidence`.
+- `idx_cvss_candidate (candidate_id)`.
+
+**Authoritative vs derived.** `authoritative` rows come from a real CVSS vector found
+verbatim in source text (Red Hat, MSRC, CNA…) or from structured feeds (OSV
+`persist_cvss_vectors`, `source='osv'`), scored with the `cvss` library. `derived` rows
+are built from the 8 base metrics the LLM inferred, only when **all 8** are present
+(`derive_from_metrics`); otherwise no numeric score is written and a `severity_hint`
+is used instead. CVERadar never invents a number.
 
 ### `epss_scores` — history
-Composite PK `(cve_id, scored_date)` (`pk_epss_scores`) → each daily snapshot
-of the model is kept; the score evolution is visible. `score` and `percentile`
-0..1. **No FK to `published_cves`**: EPSS may refer to a CVE not yet ingested.
+FIRST.org exploit-prediction scores, kept as a full time series.
+
+| Column | Type | Null | Default | Purpose |
+|---|---|---|---|---|
+| `cve_id` | Text | no | — | CVE (part of composite PK). |
+| `score` | Float | no | — | EPSS probability `0..1`. |
+| `percentile` | Float | no | — | EPSS percentile `0..1`. |
+| `model_version` | Text | yes | — | EPSS model version. |
+| `scored_date` | Date | no | — | Model date (part of composite PK). |
+| `fetched_at` | timestamptz | no | `now()` | Fetch time. |
+
+**Constraints / indexes**: PK `(cve_id, scored_date)` (`pk_epss_scores`) → every daily
+snapshot is preserved, so the score's evolution is queryable; `CHECK ck_epss_score`,
+`CHECK ck_epss_percentile` (both `0..1`); `idx_epss_cve`, `idx_epss_date (scored_date DESC)`.
+**No FK to `published_cves`** — EPSS may reference a CVE not yet ingested.
 
 ---
 
 ## Software canonicalization (migration `0002`)
 
 ### `product_catalog`
-Canonical vocabulary (seeded from CPE-dict / OSV / manual). The "truth" against
-which dirty names are linked. Fields `vendor`, `product` (NOT NULL),
-`ecosystem` (PyPI/npm/Go…; NULL for classic software), `cpe23`, `purl`, `source`.
-`UNIQUE(vendor, product, ecosystem)` with **`NULLS NOT DISTINCT`** (PG15+): two
-rows with `ecosystem NULL` also dedup (without that clause, `NULL != NULL`
-would allow duplicates). Same in `affected_products.uq_affected_candidate_product`.
+Canonical vocabulary (seeded from CPE dictionary / OSV / manual) — the "truth" dirty
+names resolve against.
+
+| Column | Type | Null | Default | Purpose |
+|---|---|---|---|---|
+| `id` | BigInteger | no | autoincrement | Primary key. |
+| `vendor` | Text | yes | — | Vendor. |
+| `product` | Text | no | — | Product name. |
+| `ecosystem` | Text | yes | — | OSV ecosystem (PyPI/npm/Go…); NULL for classic software. |
+| `cpe23` | Text | yes | — | CPE 2.3 string. |
+| `purl` | Text | yes | — | Package URL. |
+| `source` | Text | yes | — | `cpe-dict` / `osv` / `manual`. |
+| `created_at` | timestamptz | no | `now()` | Row creation. |
+
+**Constraints / indexes**: `UNIQUE(vendor, product, ecosystem)` **`NULLS NOT DISTINCT`**
+(`uq_catalog_vendor_product_ecosystem`) — with the default `NULLS DISTINCT`, two rows
+whose `ecosystem`/`vendor` are `NULL` would *not* collide (SQL `NULL != NULL`) and would
+duplicate; PG16's `NULLS NOT DISTINCT` treats `NULL` as equal so the dedup actually
+holds. Indexes `idx_catalog_product`, `idx_catalog_vendor`, partial
+`idx_catalog_cpe23 WHERE cpe23 IS NOT NULL`.
 
 ### `product_aliases`
-Normalized key → canonical entry. `UNIQUE(alias_normalized)`: an alias
-resolves **deterministically** to ONE entry. It grows with what the
-LLM/human confirms; next time it resolves in Layer 1 without calling the LLM again.
-`source IN ('seed','llm','manual')`, `confidence` 0..1.
+Normalized alias key → one canonical catalog entry.
+
+| Column | Type | Null | Default | Purpose |
+|---|---|---|---|---|
+| `id` | BigInteger | no | autoincrement | Primary key. |
+| `alias_normalized` | Text | no | — | Lowercased/stripped key (`normalize_key`). |
+| `catalog_id` | BigInteger | no | — | FK → `product_catalog.id` CASCADE. |
+| `source` | Text | no | — | `seed` / `llm` / `manual`. |
+| `confidence` | Float | yes | — | `0..1`. |
+| `created_at` | timestamptz | no | `now()` | Row creation. |
+
+**Constraints / indexes**: `UNIQUE(alias_normalized)` (`uq_alias_normalized`) — an alias
+resolves **deterministically** to a single entry; `CHECK ck_alias_source`,
+`CHECK ck_alias_confidence`; `idx_alias_catalog (catalog_id)`.
+
+The table grows with what the LLM/human confirm; next time the same dirty name appears it
+resolves in Layer 1 (`_resolve_alias`) without calling the LLM again.
 
 ### `affected_products`
-Products affected per candidate (multi-row). Stores the **extracted raw**
-(`raw`, `product`, `vendor`, `ecosystem`, `cpe23`, `purl`, `exact_versions[]`,
-`default_status`) **plus** the canonical link `catalog_id` (FK
-`ON DELETE SET NULL`) and the canonicalization traceability:
-`normalization_method IN ('exact','alias','fuzzy','llm','unresolved')`,
-`normalization_confidence`. Partial index `idx_affected_unresolved WHERE
-catalog_id IS NULL` = queue of items pending resolution.
+Products affected by a candidate (multi-row). Keeps the extracted raw values **plus** the
+canonical link and full traceability of how it was resolved.
+
+| Column | Type | Null | Default | Purpose |
+|---|---|---|---|---|
+| `id` | BigInteger | no | autoincrement | Primary key. |
+| `candidate_id` | UUID | no | — | FK → `candidates.id` CASCADE. |
+| `catalog_id` | BigInteger | yes | — | FK → `product_catalog.id` `ON DELETE SET NULL`; NULL = unresolved. |
+| `vendor` | Text | yes | — | Extracted vendor. |
+| `product` | Text | no | — | Extracted product. |
+| `ecosystem` | Text | yes | — | Canonicalized ecosystem (`canonical_ecosystem`). |
+| `cpe23` | Text | yes | — | CPE 2.3. |
+| `purl` | Text | yes | — | Package URL (from OSV/structured feeds). |
+| `default_status` | Text | yes | — | `affected` / `unaffected` / `unknown`. |
+| `kind` | Text | yes | — | (`0005`) `product` / `distro` / `malware` (`classify_kind`). |
+| `exact_versions` | ARRAY(Text) | yes | — | Enumerated OSV `versions[]`. |
+| `raw` | Text | yes | — | Original product string. |
+| `normalization_method` | Text | yes | — | `exact` / `alias` / `fuzzy` / `llm` / `unresolved`. |
+| `normalization_confidence` | Float | yes | — | `0..1`. |
+| `source` | Text | yes | — | Where it came from (`structured`, `llm`, …). |
+| `confidence` | Float | yes | — | Extraction confidence `0..1`. |
+| `created_at` | timestamptz | no | `now()` | Row creation. |
+
+**Constraints / indexes**
+- `UNIQUE(candidate_id, vendor, product, ecosystem)` **`NULLS NOT DISTINCT`**
+  (`uq_affected_candidate_product`) — the upsert key; NULL vendor/ecosystem still dedup.
+- `CHECK ck_affected_status`, `CHECK ck_affected_norm_method`, `CHECK ck_affected_norm_conf`,
+  `CHECK ck_affected_conf`.
+- `idx_affected_candidate`, `idx_affected_catalog`, partial
+  `idx_affected_unresolved (id) WHERE catalog_id IS NULL` (queue of items pending
+  resolution); `idx_affected_kind` and `idx_affected_product_name` (added in `0005`).
 
 ### `affected_version_ranges`
-Structured ranges per affected product (OSV / CVE-5.0 style):
-`introduced`, `fixed` (exclusive), `last_affected` (inclusive), `version_type`
-(semver/rpm/custom…), `raw` (e.g. `< 7.4.3`). FK to `affected_products` CASCADE.
+Structured version ranges per affected product, OSV / CVE-5.0 style.
+
+| Column | Type | Null | Default | Purpose |
+|---|---|---|---|---|
+| `id` | BigInteger | no | autoincrement | Primary key. |
+| `affected_product_id` | BigInteger | no | — | FK → `affected_products.id` CASCADE. |
+| `introduced` | Text | yes | — | `0` or first affected version. |
+| `fixed` | Text | yes | — | Fixed version (exclusive). |
+| `last_affected` | Text | yes | — | Last affected version (inclusive). |
+| `version_type` | Text | yes | — | `semver` / `custom` / `rpm` / … |
+| `raw` | Text | yes | — | Original range string, e.g. `< 7.4.3`. |
+
+**Index**: `idx_ranges_affected_product (affected_product_id)`. `persist_affected()`
+replaces a product's ranges wholesale on upsert (delete-then-insert) to stay idempotent.
 
 ---
 
-## Convenience views
+## Convenience views (defined in `0001_initial_schema.py`)
 
-Defined in `0001_initial_schema.py`:
-
-- **`epss_current`** — `DISTINCT ON (cve_id) … ORDER BY cve_id, scored_date DESC`:
-  the most recent EPSS snapshot per CVE over the history.
-- **`cvss_selected`** — `DISTINCT ON (candidate_id)` with precedence order:
-  `provenance = 'authoritative'` first, then highest version
-  (`4.0 > 3.1 > 3.0`), then `base_score DESC NULLS LAST`. Selects the "best"
-  CVSS per candidate.
-- **`radar`** — main consumption view: `candidates` LEFT JOIN
-  `cvss_selected` LEFT JOIN `epss_current`, filtering
-  `status IN ('candidate','emerging','published') AND merged_into IS NULL`.
-  Exposes `days_ahead_vs_nvd_present` and `days_ahead_vs_nvd_analyzed`, the selected
-  CVSS, `severity_hint` and the current EPSS.
+- **`epss_current`** — `SELECT DISTINCT ON (cve_id) … ORDER BY cve_id, scored_date DESC`:
+  the latest EPSS snapshot per CVE from the full history.
+- **`cvss_selected`** — `SELECT DISTINCT ON (candidate_id) …` with the precedence
+  `ORDER BY candidate_id, (provenance = 'authoritative') DESC,
+  CASE version WHEN '4.0' THEN 3 WHEN '3.1' THEN 2 ELSE 1 END DESC,
+  base_score DESC NULLS LAST`: picks the single "best" CVSS per candidate —
+  authoritative beats derived, then newer version wins, then higher score.
+- **`radar`** — the main consumption view: `candidates c LEFT JOIN cvss_selected cs ON
+  cs.candidate_id = c.id LEFT JOIN epss_current e ON e.cve_id = c.cve_id`, filtered to
+  `status IN ('candidate','emerging','published') AND merged_into IS NULL`. It exposes the
+  identity/aggregate columns, `days_ahead_vs_nvd_present` and `days_ahead_vs_nvd_analyzed`,
+  the selected CVSS (`version`, `base_score`, `base_severity`, `provenance`),
+  `severity_hint`, and the current EPSS (`score`, `percentile`).

@@ -1,148 +1,223 @@
 # Enrichment (Layer 3)
 
-Enrichment consolidates a candidate's mentions and extracts structured metadata:
-vulnerability type, attack vector, PoC, affected products and **CVSS**.
-Orchestrated by `app/enrichment/service.py::enrich_candidate()` (requires an open
-session, does **not** commit).
+Enrichment (`app/enrichment/`) consolidates a candidate's mentions and derives
+structured metadata: vulnerability type, attack vector, auth/interaction
+requirements, PoC availability, affected products, CVSS scores, and a qualitative
+`severity_hint`. Entry point: `enrich_candidate(session, candidate_id)` in
+`app/enrichment/service.py` (open session, no commit).
+
+The guiding principle: **never invent a CVSS number.** The LLM extracts *base
+metrics*, and the score is computed deterministically with the `cvss` library.
 
 ---
 
-## Principle: the LLM extracts METRICS, not a CVSS number
+## 1. `enrich_candidate` flow (`service.py`)
 
-The LLM **never** returns a numeric CVSS score. It returns the CVSS v3.1 **base
-metrics** (validated by `app/enrichment/schema.py::CVSSMetricsOut`), and the
-score is **computed** deterministically with the `cvss` library. This makes the
-result reproducible and auditable, with no "guessed" number. See
-`DESIGN_DECISIONS.md`.
-
-`EnrichmentOut` (validated LLM output, Pydantic `extra="forbid"`):
-`affected_products[]`, `vuln_type`, `attack_vector`, `requires_auth`,
-`requires_interaction`, `has_public_poc`, `poc_urls[]`, `cvss_metrics`,
-`summary`, `confidence` (0..1). `CVSSMetricsOut` carries the 8 base metrics:
-`attack_vector`, `attack_complexity`, `privileges_required`, `user_interaction`,
-`scope`, `confidentiality`, `integrity`, `availability`.
-
----
-
-## 3-level CVSS precedence (`app/enrichment/cvss.py`)
-
-The service never invents a number. There are three paths, in order of
-preference:
-
-### 1. Authoritative — `parse_authoritative(text)`
-Extracts by **regex** the CVSS vectors present **verbatim** in the source text
-(Red Hat, MSRC, CNA…): `CVSS:(3.0|3.1|4.0)/…`. Scores each vector with the
-`cvss` library (`CVSS3`/`CVSS4`). Persisted as `provenance='authoritative'`,
-`source='source-text'`, `confidence=1.0`. An invalid vector is discarded (no
-score).
-
-### 2. Derived — `derive_from_metrics(metrics)`
-From the 8 base metrics inferred by the LLM it builds a `CVSS:3.1/…` vector and
-scores it. **Only if all 8 metrics are present**; if any is missing, it returns
-`None` (an incomplete vector is not forced). Persisted as `provenance='derived'`,
-`source='llm-derived'`, with `inferred_metrics` and `confidence = out.confidence`.
-
-### 3. Qualitative `severity_hint` — `severity_hint(...)`
-When **there is no numeric score at all** (neither authoritative nor derived), a
-qualitative label (`likely-critical/high/medium/low`) is computed from cheap
-proxies: `vuln_type` weight (`_TYPE_WEIGHT`: rce=4, deserialization=4,
-sqli/auth-bypass/lpe=3…), `attack_vector` (network +2, adjacent +1) and
-`has_public_poc` (+1). **This is not CVSS** — it is an estimate.
-
-In `enrich_candidate`, after persisting CVSS, `severity_hint` is set **only** if
-there is no `cvss_scores` row with a non-null `base_score` for the candidate.
-
-The `cvss_selected` view (see `DATA_MODEL.md`) picks the best CVSS per candidate,
-prioritizing `authoritative` over `derived`, the highest version and the highest
-score.
-
----
-
-## LLM providers (`app/enrichment/llm.py`)
-
-A **provider-neutral** design over `httpx` (not coupled to any SDK). It is chosen
-with `get_provider()` based on `CVERADAR_LLM_PROVIDER`:
-
-| `llm_provider` | Class | Endpoint |
-|---|---|---|
-| `mock` (default) | `MockProvider` | No network. Deterministic heuristic regex extraction; `confidence=0.35`. Useful without an API key and in tests. |
-| `openai` | `OpenAIProvider` | `{base}/chat/completions` with `response_format=json_object`. |
-| `anthropic` | `AnthropicProvider` | `{base}/v1/messages` (`anthropic-version: 2023-06-01`). |
-| `ollama` | `OllamaProvider` | `{base}/api/chat` with `format=json`, local. |
-
-Environment variables (prefix `CVERADAR_`): `LLM_PROVIDER`, `LLM_MODEL`
-(default `mock-model`), `LLM_API_KEY`, `LLM_BASE_URL` (e.g. Ollama
-`http://ollama:11434`), `LLM_MAX_TOKENS` (default `1024`).
-
-`enrich(cve_id, snippets)` builds the prompt (`app/enrichment/prompts.py`:
-`SYSTEM_PROMPT` + `build_user_prompt`), calls the provider, extracts the JSON
-(`_extract_json` tolerates markdown wrappers) and validates it against
-`EnrichmentOut`. It returns `(result, method)` where `method = "{provider}:{model}"`
-(stored in `candidates.enrichment_method`).
-
----
-
-## Product canonicalization via deterministic alias
-
-Affected products are canonicalized by linking the "dirty" name against the
-canonical vocabulary (`product_catalog`) in **layers**, from cheap to expensive.
-The LLM is used **only as a constrained *linker*** (choosing among existing
-candidates), never as a free-text corrector: this avoids hallucinating products
-and keeps the result reproducible.
-
-`app/enrichment/normalize.py::ProductNormalizer.resolve(raw)`:
-
-1. **exact/alias** — `normalize_key(raw)` (lowercase, no accents, collapses
-   separators) against `product_aliases`. Deterministic → `confidence=1.0`.
-2. **fuzzy** — top-K candidates from the catalog (trigram/embedding).
-3. **llm** — the LLM chooses among those K or "none"; if it exceeds
-   `AUTO_ACCEPT_THRESHOLD = 0.85`, it **learns**: it writes the alias into
-   `product_aliases` so that next time it resolves in Layer 1 without the LLM.
-4. **unresolved** — low confidence → review queue, the `raw` value is kept.
-
-> Note: `ProductNormalizer` (layers 2–3) is a skeleton with ports
-> (`AliasRepo`/`CatalogSearch`/`LLMLinker`) to be implemented against the real
-> DB. The operational path **today** is the deterministic Layer 1 in the service:
-> `_resolve_alias` does `normalize_key(f"{vendor} {product}")` → lookup in
-> `product_aliases`; on a hit, `normalization_method='alias'`, otherwise
-> `'unresolved'` (it stays in the `idx_affected_unresolved` queue).
-
----
-
-## `enrich_candidate` flow
-
-1. `gather_snippets` collects `title + snippet` from all of the candidate's
-   mentions; if there are none, it does not enrich.
-2. **Authoritative CVSS**: `parse_authoritative(blob)` → `_upsert_cvss` for each
-   vector found.
-3. **LLM**: `enrich(cve_id, snippets)` → `EnrichmentOut`.
-4. **Derived CVSS**: `derive_from_metrics(out.cvss_metrics)` (if all 8) →
-   `_upsert_cvss`.
-5. Writes fields onto the candidate: `vuln_type`, `attack_vector`,
-   `requires_auth`, `requires_interaction`, `has_public_poc`, `poc_urls`,
-   `affected_product` / `affected_versions` (from the first product),
+1. **Gather snippets** (`gather_snippets`): for each mention, join
+   `title + snippet` into a text blob; also returns `candidate.cve_id`. No
+   snippets → return `False` (nothing to enrich).
+2. **Authoritative CVSS** (§3.1): `parse_authoritative(blob)` extracts CVSS
+   vectors verbatim from the source text and upserts them as
+   `provenance="authoritative", source="source-text", confidence=1.0`.
+3. **LLM extraction** (§2): `out, method = await enrich(cve_id, snippets)` →
+   validated `EnrichmentOut`.
+4. **Derived CVSS** (§3.2): `derive_from_metrics(out.cvss_metrics)` — only if all
+   8 base metrics are present — upserts as `provenance="derived",
+   source="llm-derived", inferred_metrics=[...], confidence=out.confidence`.
+5. **Candidate fields**: `vuln_type`, `attack_vector`, `requires_auth`,
+   `requires_interaction`, `has_public_poc`, `poc_urls`. If any affected products
+   were extracted, the first fills the denormalized `affected_product`
+   (`vendor/product` or `product`) and `affected_versions`. Also
    `enrichment_confidence`, `enrichment_method`, `enrichment_updated_at`.
-6. `severity_hint` only if there is no numeric score.
-7. Structured `affected_products` → `_upsert_affected` (with alias
-   canonicalization).
+6. **`severity_hint`** (§4): computed **only if no numeric score exists** (no
+   authoritative or derived `base_score` on the candidate); otherwise `None`.
+7. **Affected products** (§5): each `AffectedProductOut` is upserted with
+   deterministic alias canonicalization (`source="llm"`).
 
-The upserts use `ON CONFLICT` on the unique constraints
-(`uq_cvss_candidate_version_prov_source`, `uq_affected_candidate_product`) → so
-re-enrichment updates instead of duplicating.
+`_upsert_cvss` and `_upsert_affected` use Postgres `ON CONFLICT` on the same
+UNIQUE constraints as the ingest path (`uq_cvss_candidate_version_prov_source`,
+`uq_affected_candidate_product`), so ingest-time and enrich-time writes coexist
+without duplication.
 
 ---
 
-## Re-enrichment — `should_reenrich`
+## 2. The LLM extracts metrics, not a number
+
+### 2.1 Output schema (`schema.py`)
+
+`EnrichmentOut` (Pydantic, `extra="forbid"`):
+
+- `affected_products: list[AffectedProductOut]` — `{vendor?, product,
+  ecosystem?, versions_raw?, fixed_version?}`.
+- `vuln_type`, `attack_vector` (`network|adjacent|local|physical`),
+  `requires_auth`, `requires_interaction`, `has_public_poc`, `poc_urls`,
+  `summary`.
+- `cvss_metrics: CVSSMetricsOut | None` — the **8 base metrics**
+  (`attack_vector`, `attack_complexity`, `privileges_required`,
+  `user_interaction`, `scope`, `confidentiality`, `integrity`, `availability`),
+  each nullable.
+- `confidence: float ∈ [0, 1]`.
+
+The LLM **never returns a CVSS score**; it returns `cvss_metrics`, from which the
+score is computed. Authoritative vectors come from regex over the source text,
+not from the LLM.
+
+### 2.2 Prompt (`prompts.py`)
+
+`SYSTEM_PROMPT` instructs the model to return **only** strict JSON (no markdown),
+to fill `cvss_metrics` when inferable (else null), never to invent a numeric
+score, to use `null`/empty for unknowns, and to set `confidence`.
+`build_user_prompt(cve_id, snippets)` prepends the CVE header (or "not yet
+assigned") and joins the snippets with `---` separators.
+
+### 2.3 Providers (`llm.py`)
+
+`get_provider()` dispatches on `settings.llm_provider`:
+
+| Provider | Endpoint | Key env / notes |
+|----------|----------|-----------------|
+| `mock` (default) | none | Deterministic heuristic, no network — for dev/tests. |
+| `openai` | `{llm_base_url or https://api.openai.com/v1}/chat/completions` | `Authorization: Bearer {llm_api_key}`, `response_format={"type":"json_object"}`. |
+| `anthropic` | `{llm_base_url or https://api.anthropic.com}/v1/messages` | `x-api-key: {llm_api_key}`, `anthropic-version: 2023-06-01`; reads first `text` block. |
+| `ollama` | `{llm_base_url or http://localhost:11434}/api/chat` | `format: "json"`, `stream: false`, local. |
+
+Relevant settings: `llm_provider`, `llm_model`, `llm_api_key`, `llm_base_url`,
+`llm_max_tokens` (1024).
+
+**`MockProvider`** is a deterministic, network-free heuristic: regex flags
+`vuln_type` (RCE / AuthBypass / SQLi / XSS), `has_public_poc`, `attack_vector`
+(`network` on remote/network/unauthenticated), `requires_auth=False` on
+"unauthenticated", extracts up to 5 URLs, and reports `confidence: 0.35` (low —
+it is heuristic, not a real LLM). `cvss_metrics` is `None`.
+
+`enrich(...)` builds the prompts, calls `provider.complete(...)`, parses the
+first JSON object (`_extract_json` tolerates ```` ``` ```` fences and a
+`{...}` substring fallback), validates against `EnrichmentOut`, and returns
+`(result, method="{provider}:{model}")`.
+
+---
+
+## 3. CVSS precedence — three levels (`cvss.py`)
+
+Scores are never guessed. There are three levels of decreasing authority:
+
+### 3.1 Authoritative (regex over source text)
+
+`parse_authoritative(text)` finds every CVSS vector embedded verbatim
+(`_VECTOR_RE`: `CVSS:(3.[01]|4.0)/...`), dedupes, and scores each with
+`_score_severity`. Result: `provenance="authoritative"`. This is the trusted
+path (Red Hat, MSRC, CNA, OSV `severity`). `_score_severity(vector, version)`
+uses `CVSS4` for v4 and `CVSS3` for v3.x from the `cvss` library, returning
+`(base_score, severity.upper())`; an invalid vector yields `(None, None)`.
+
+The ingest path writes authoritative scores from **structured** vectors
+(`persist_cvss_vectors` in `app/ingest/affected.py`), and the enrichment path
+writes them from **regex over text** — same `provenance`, both scored with the
+same library.
+
+### 3.2 Derived (LLM base metrics → computed score)
+
+`derive_from_metrics(metrics)` builds a CVSS v3.1 vector from the 8 base
+metrics, mapping each enum to its letter (`_AV`, `_AC`, `_PR`, `_UI`, `_S`,
+`_CIA`). **All 8 must be present** — if any maps to `None`, it returns `None`
+(insufficient metrics → fall back to `severity_hint`). Otherwise it scores the
+vector and returns `provenance="derived"` with
+`inferred_metrics=["AV","AC","PR","UI","S","C","I","A"]` (all from LLM
+inference).
+
+### 3.3 `severity_hint` (qualitative fallback)
+
+Only when there is **no numeric score at all**. See §4.
+
+Precedence in practice: authoritative scores are always written when present;
+derived is written when metrics allow; `severity_hint` is set **only if the
+candidate has no row with a non-null `base_score`** (checked against
+`cvss_scores`).
+
+---
+
+## 4. `severity_hint`
+
+`severity_hint(vuln_type, attack_vector, has_public_poc)` is a cheap qualitative
+estimate (explicitly **not** CVSS). Returns `None` if neither `vuln_type` nor
+`attack_vector` is known. Otherwise it sums weights:
+
+- `vuln_type` via `_TYPE_WEIGHT` (e.g. `rce`/`deserialization`=4, `auth
+  bypass`/`sqli`/`privilege escalation`=3, `ssrf`/`xss`/`dos`=2, `info leak`=1;
+  unknown type=1);
+- `attack_vector`: `network` +2, `adjacent` +1;
+- `has_public_poc`: +1.
+
+Buckets: `>=6` → `likely-critical`, `>=4` → `likely-high`, `>=2` →
+`likely-medium`, else `likely-low`.
+
+---
+
+## 5. Structured persistence helpers
+
+### 5.1 CVSS vectors → authoritative scores (`persist_cvss_vectors`, `affected.py`)
+
+Normalizes each vector to uppercase, detects the version by prefix
+(`CVSS:4` → 4.0, `CVSS:3.1` → 3.1, `CVSS:3.0` → 3.0; else skip), scores it, and
+upserts `cvss_scores` with `provenance="authoritative"` and the given `source`.
+
+### 5.2 Affected products (`persist_affected`, `affected.py`)
+
+Upserts `affected_products` on `uq_affected_candidate_product` with
+`source="structured"`, canonicalizing the ecosystem, then **replaces** the row's
+`affected_version_ranges` (delete existing by `affected_product_id`, insert the
+new ranges). Used by the ingest path (OSV structured data).
+
+The enrichment path's `_upsert_affected` writes `source="llm"`, resolving the
+alias to a `catalog_id` via `_resolve_alias` (§6) and storing `raw=versions_raw`
+and `normalization_method`.
+
+### 5.3 `classify_kind` / `canonical_ecosystem`
+
+- `classify_kind(ecosystem, is_malware)` → `"malware"` if `is_malware`;
+  `"distro"` if the ecosystem starts with a known distro name (`ubuntu`,
+  `debian`, `alpine`, `red hat`, `android`, …); else `"product"`.
+- `canonical_ecosystem(eco)` → lowercased, mapped through `ECO_ALIAS` (e.g.
+  `pip`→`pypi`, `cargo`/`rust`/`crates`→`crates.io`, `node`→`npm`,
+  `gem`→`rubygems`, `composer`→`packagist`, `golang`→`go`).
+
+---
+
+## 6. `normalize.py` — software canonicalization (skeleton)
+
+`normalize.py` describes a layered vendor/product canonicalizer that links a
+"dirty" name to the canonical vocabulary (`product_catalog`) cheapest-first:
+
+1. **exact/alias** — deterministic match against `product_aliases` (normalized
+   key);
+2. **fuzzy** — top-K catalog candidates (trigram/embedding);
+3. **llm** — LLM as a *constrained linker* (picks among the K candidates or
+   "none"), never a free-text corrector — this avoids hallucinating products and
+   keeps results reproducible;
+4. **unresolved** — low confidence → review queue, raw preserved.
+
+**Honest status**: this module is a **skeleton**. `normalize_key(raw)` (Layer 1's
+deterministic normalization: NFKD ASCII fold, lowercase, collapse non-alphanum to
+single spaces) is **real and in use** — `service._resolve_alias` calls it to look
+up `product_aliases` and resolve a `catalog_id`, so **Layer 1 (deterministic
+alias resolution) is operational** in the enrichment service. `ProductNormalizer`
+and its ports (`AliasRepo`, `CatalogSearch`, `LLMLinker`) are **placeholders**:
+the fuzzy (Layer 2) and LLM-linker (Layer 3) layers and their DB-backed
+persistence are **not yet implemented** — `AUTO_ACCEPT_THRESHOLD = 0.85` and the
+`resolve()` orchestration exist but are wired against interface stubs. Confirmed
+LLM/human resolutions are intended to be written back as `product_aliases` so
+future lookups hit Layer 1 without an LLM call.
+
+---
+
+## 7. Re-enrichment (`should_reenrich`)
 
 ```python
-def should_reenrich(candidate, *, reenrich_hours, min_new_mentions,
-                    mentions_since) -> bool:
-    if candidate.enrichment_updated_at is None:
-        return True                 # nunca enriquecido
-    age_h = (now - candidate.enrichment_updated_at) / 3600
-    return age_h >= reenrich_hours or mentions_since >= min_new_mentions
+should_reenrich(candidate, *, reenrich_hours, min_new_mentions, mentions_since) -> bool
 ```
 
-It re-enriches if it was never done, if enough time has passed
-(`CVERADAR_ENRICHMENT_REENRICH_HOURS`, default `24`) or if enough new mentions
-have arrived (`CVERADAR_ENRICHMENT_REENRICH_MIN_MENTIONS`, default `3`).
+Returns `True` if the candidate has never been enriched
+(`enrichment_updated_at is None`), or the enrichment is older than
+`reenrich_hours` (setting `enrichment_reenrich_hours`, default 24), or at least
+`min_new_mentions` new mentions arrived since (setting
+`enrichment_reenrich_min_mentions`, default 3).

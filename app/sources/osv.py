@@ -13,10 +13,7 @@ advisory extrae TODO lo aprovechable:
 
 from __future__ import annotations
 
-import contextlib
 import json
-import os
-import tempfile
 import zipfile
 from datetime import UTC, datetime, timedelta
 
@@ -27,6 +24,7 @@ from app.core.logging import get_logger
 from app.ingest.affected import AffectedInput, VersionRangeInput, classify_kind
 from app.ingest.service import FetchedMention
 from app.sources.base import BaseSource, FetchContext, register
+from app.sources.cache import cached_download
 
 log = get_logger(__name__)
 
@@ -122,36 +120,24 @@ class OsvSource(BaseSource):
 
     async def _scan_eco(self, ctx: FetchContext, eco: str, cutoff: datetime | None,
                         cap: int) -> list[FetchedMention]:
-        # Streaming a fichero temporal: los all.zip grandes (npm/Debian) pesan
-        # cientos de MB; bufferizarlos en RAM (resp.content + BytesIO) puede
-        # provocar OOM. ZipFile lee las entradas de forma perezosa desde disco.
+        # Descarga cacheada a disco (reusa el zip si es reciente; lo conserva para
+        # recreaciones). ZipFile lee las entradas de forma perezosa -> sin OOM.
         out: list[FetchedMention] = []
-        tmp_path = None
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
-                tmp_path = tmp.name
-                async with ctx.http.stream("GET", BUCKET.format(eco=eco),
-                                           timeout=300.0) as resp:
-                    resp.raise_for_status()
-                    async for chunk in resp.aiter_bytes():
-                        tmp.write(chunk)
-            with zipfile.ZipFile(tmp_path) as zf:
-                for name in zf.namelist():
-                    if not name.endswith(".json"):
-                        continue
-                    if cap > 0 and len(out) >= cap:
-                        break
-                    try:
-                        rec = json.loads(zf.read(name))
-                    except (json.JSONDecodeError, KeyError):
-                        continue
-                    m = self._to_mention(rec, cutoff)
-                    if m is not None:
-                        out.append(m)
-        finally:
-            if tmp_path:
-                with contextlib.suppress(OSError):
-                    os.unlink(tmp_path)
+        key = f"osv_{eco.replace('/', '_').replace(' ', '_')}.zip"
+        zip_path = await cached_download(ctx.http, BUCKET.format(eco=eco), key=key)
+        with zipfile.ZipFile(zip_path) as zf:
+            for name in zf.namelist():
+                if not name.endswith(".json"):
+                    continue
+                if cap > 0 and len(out) >= cap:
+                    break
+                try:
+                    rec = json.loads(zf.read(name))
+                except (json.JSONDecodeError, KeyError):
+                    continue
+                m = self._to_mention(rec, cutoff)
+                if m is not None:
+                    out.append(m)
         log.info("osv.eco_done", ecosystem=eco, mentions=len(out))
         return out
 

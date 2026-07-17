@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     raw_html_dir: str = Field(default="/data/raw")
     cvelist_repo_dir: str = Field(default="/data/cvelistV5")
 
+    # --- Cache de artefactos crudos (para recrear sin volver a la fuente) ---
+    cache_dir: str = Field(default="/data/cache")
+    cache_raw: bool = Field(default=True)          # archiva cada respuesta HTTP (write-through)
+    cache_reuse_ttl_seconds: int = Field(default=43200)  # reusar binarios grandes (OSV) si < 12h
+
     # --- Baseline ---
     cvelist_repo_url: str = Field(default="https://github.com/CVEProject/cvelistV5.git")
     cvelist_sync_seconds: int = Field(default=900)  # 15 min

@@ -74,4 +74,8 @@ async def get(client: httpx.AsyncClient, url: str, **kwargs: object) -> httpx.Re
         raise PermissionError(f"robots.txt prohíbe {url}")
     resp = await client.get(url, **kwargs)  # type: ignore[arg-type]
     resp.raise_for_status()
+    # Archiva la respuesta cruda (para recrear sin volver a la fuente).
+    from app.sources.cache import archive_response
+    archive_response(str(resp.url), resp.content,
+                     resp.headers.get("content-type"))
     return resp

@@ -1,26 +1,29 @@
 # CVERadar
 
-**Early vulnerability radar**: detects, correlates and enriches CVEs
-*before* MITRE/NVD publish them officially, measuring the "lead days"
-over NVD per source.
+**Early vulnerability radar**: detects, correlates and enriches vulnerabilities
+*before* MITRE/NVD publish them officially, and measures the **lead days** each source
+gains over NVD.
 
-This repository is the **data ingestion backend** (no UI): workers that
-ingest signal from public sources into a Postgres database, an
-ingestion/reconciliation pipeline, LLM + CVSS enrichment, and an operations CLI.
+This repository is the **data-ingestion backend** (no UI): worker processes that pull
+signal from public sources into a Postgres 16 database, an ingestion/reconciliation
+pipeline, LLM + CVSS enrichment, and an operations/query CLI.
+
+> **Framing.** MITRE (cvelistV5) and OSV are the finish line — the authoritative record of
+> what a vulnerability *is*. CVERadar doesn't replace them; it watches the **race** that
+> happens before they cross that line (reserved id, exploit template, security commit, KEV
+> entry) and timestamps everyone's position. See
+> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#what-cveradar-answers-that-mitreosv-cannot).
 
 ---
 
 ## Core idea
 
-The tracking unit is the **`candidate`**, which **can exist before there is a
-CVE**. A ZDI advisory (`ZDI-CAN-…`), a CERT/CC note (`VU#…`) or a security commit
-in a popular repo (`GHCOMMIT:owner/repo@sha`) create a candidate that is later
-**reconciled** with the CVE when it appears. On top of that we compute the flagship
-KPI: **`days_ahead_vs_nvd_present`** — how much earlier we saw the signal versus the
-first time *we* observed the CVE in NVD (robust against NVD date backfill).
-
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and
-[`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md).
+The tracking unit is the **`candidate`**, which **can exist before there is a CVE**. A ZDI
+reservation (`ZDI-CAN-…`), a CERT/CC note (`VU#…`), an OSV advisory (`PYSEC-…`, `MAL-…`) or
+a security commit in a popular repo (`GHCOMMIT:owner/repo@sha`) all create a candidate that
+is later **reconciled** with the CVE when it appears. On top of that we compute the flagship
+KPI **`days_ahead_vs_nvd_present`** — how much earlier we saw the signal versus the first
+time *we* observed the CVE in NVD (robust against NVD date backfill).
 
 ## Architecture (docker-compose)
 
@@ -28,9 +31,9 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and
 |---|---|
 | `postgres` | Postgres 16 — canonical state and signal |
 | `redis` | cache / rate-limit |
-| `migrate` | applies Alembic migrations and exits (workers wait for it to finish) |
-| `baseline-worker` | syncs cvelistV5 + NVD 2.0 + EPSS |
-| `sources-worker` | runs the fetchers on their cadences and ingests the mentions |
+| `migrate` | applies Alembic migrations and exits (workers wait for it) |
+| `baseline-worker` | syncs cvelistV5 + NVD 2.0 delta + EPSS on schedule |
+| `sources-worker` | runs the 11 fetchers on their cadences (hot reconcile) and ingests the mentions |
 
 ```mermaid
 flowchart LR
@@ -81,83 +84,169 @@ Detailed component diagram in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 ## Quickstart
 
 ```bash
-# Bring everything up: postgres + redis + migrations + workers
+# Bring everything up: postgres + redis + migrations + both workers
 docker compose up --build
 
 # Infrastructure only, for development
 docker compose up -d postgres redis
-docker compose run --rm migrate            # apply migrations
+docker compose run --rm migrate            # apply Alembic migrations
 ```
 
-Operation with the CLI (`cveradar`, inside any project image):
+Configuration is 12-factor via environment variables (prefix `CVERADAR_`, plus
+`DATABASE_URL` / `REDIS_URL`), read from the environment or a local `.env`. Defaults point
+at the docker-compose stack. Common ones:
 
 ```bash
-cveradar sources sync                       # registers the fetchers in the DB
-cveradar sources list                       # source status
-cveradar sources run redhat_csaf            # run a fetcher once
-cveradar baseline sync                      # force cvelist+NVD+EPSS sync
-cveradar emerging list --since 24h --tier 1 --min-mentions 2
-cveradar cve show CVE-2026-12345            # timeline + enrichment
-cveradar enrich CVE-2026-12345              # LLM + CVSS
-cveradar stats                              # lead days per source
-cveradar pending --kind product             # vulns tied to software with NO official CVE yet
-                                            # (kind: product | distro | malware | all)
-cveradar trend --kind product               # pending vulns by month/year (growth / hockey-stick)
+CVERADAR_LLM_PROVIDER=mock            # mock | openai | anthropic | ollama
+CVERADAR_LLM_MODEL=mock-model
+CVERADAR_LLM_API_KEY=                 # for openai/anthropic
+CVERADAR_NVD_API_KEY=                 # raises NVD rate limit
+CVERADAR_GITHUB_TOKEN=                # PAT -> 5000 req/h
+CVERADAR_GITHUB_TOP_N=10000           # popular repos to watch (scales to 100k+)
+CVERADAR_GITHUB_REPOS_PER_RUN=150     # incremental crawl batch size
+CVERADAR_VULNCHECK_TOKEN=             # free token from vulncheck.com
+CVERADAR_OSV_ECOSYSTEMS=PyPI,Go,crates.io,RubyGems,Packagist
 ```
 
-The **flagship question** this project answers — *"how many identified,
-software-associated vulnerabilities have no official public CVE, and which
-software has the most pending?"* — is `cveradar pending`:
+## CLI (`cveradar`)
+
+The `cveradar` entry point (`app/cli.py`, Typer) is available inside any project image.
+Query commands accept `--format table|json|csv` (`-f`).
+
+### `db` — migrations
+```bash
+cveradar db init                           # alembic upgrade head
+```
+
+### `sources` — fetcher management
+```bash
+cveradar sources sync                      # register code fetchers into the sources table
+cveradar sources list                      # status: tier, method, enabled, cadence, last run/error
+cveradar sources enable  <name>            # enable a source (picked up live within ~60s)
+cveradar sources disable <name>            # disable a source (removed from scheduler live)
+cveradar sources run     <name>            # run one fetcher once and print {fetched,created,duplicate,errors}
+```
+
+### `baseline` — canonical state
+```bash
+cveradar baseline sync                     # force cvelistV5 + NVD + EPSS now
+cveradar baseline sync --nvd-hours 6       # widen the NVD delta window (default 3)
+cveradar baseline sync --full-cvelist      # reprocess the whole cvelistV5 clone
+```
+
+### `emerging` — emerging candidates
+```bash
+cveradar emerging list --since 24h --tier 1 --min-mentions 2
+cveradar emerging list --source osv --limit 100 --format json
+#   --since 24h|7d|2w   --source <name>   --tier <1..5>
+#   --min-mentions <n>  --limit <n>       --format table|json|csv
+```
+
+### `cve` — timeline + enrichment
+```bash
+cveradar cve show CVE-2026-12345           # ids, CVSS rows, EPSS, and the full mention timeline
+cveradar cve show <candidate-uuid>         # also accepts a candidate id (for pre-CVE candidates)
+```
+
+### `enrich` — LLM + CVSS
+```bash
+cveradar enrich CVE-2026-12345             # run Layer-3 enrichment on a candidate (by CVE or uuid)
+```
+
+### `stats` — lead days per source
+```bash
+cveradar stats                             # avg days_ahead_vs_nvd_present per source + promotion rate
+cveradar stats --format json
+```
+
+### `pending` — the flagship question
+```bash
+cveradar pending --kind product --top 20   # software with the most vulns lacking an official CVE
+#   --kind product|distro|malware|all   --top <n>   --format table|json|csv
+```
+
+### `trend` — pending vulns over time
+```bash
+cveradar trend --kind product --months 12 --granularity month
+#   --kind product|distro|malware|all   --granularity month|year
+#   --months <n>   --format table|json|csv
+# Buckets candidates by first_seen_at (earliest radar signal) to reveal growth / hockey-stick.
+```
+
+### `backfill-products` — derive affected software for old candidates
+```bash
+cveradar backfill-products                 # fill affected_products where missing
+cveradar backfill-products --batch 2000    # commit every N candidates (default 1000)
+# Derives software from GHCOMMIT repo / 'affected:' snippet / owner/repo title prefix.
+# Idempotent; OSV already populates this at ingest time, so this covers the rest.
+```
+
+**The flagship question** this project answers — *"how many identified,
+software-associated vulnerabilities have no official public CVE, and which software has the
+most pending?"* — is `cveradar pending`:
 
 ```text
-CVEs without official publication: 14630 (14614 with identifiable software)
-  breakdown: 13597 without cve_id (pre-CVE) · 1033 with reserved/unpublished cve_id
- software                     cves_pending
- npm:openclaw                 216
- langchain-ai/langgraph       26
- ...
+              Top software (kind=product)
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┓
+┃ software                   ┃ cves_pendientes ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━┩
+│ openclaw                   │ 216             │
+│ langchain-ai/langgraph     │ 26              │
+│ ...                        │ ...             │
+└────────────────────────────┴─────────────────┘
+total=14630  con_software=14614  product=13100  distro=920  malware=594  kind=product
 ```
+
+The `meta` footer (`total`, `con_software`, `product`, `distro`, `malware`) counts
+candidates that are merged-tombstone-free and either have no `cve_id` or whose `cve_id` is
+not yet `PUBLISHED` in `published_cves`. Numbers above are illustrative.
 
 ## Implemented sources (11)
 
 | Source | Tier | Method | Signal |
 |---|---|---|---|
-| `cisa_kev` | 1 | api | CISA Known Exploited Vulnerabilities — flags candidates with `in_kev` |
-| `vulncheck_kev` | 1 | api | VulnCheck KEV (broader/earlier exploited catalog; needs free token) |
-| `certcc_vu` | 1 | rss | CERT/CC Vulnerability Notes (VU#) |
-| `redhat_csaf` | 2 | api | Red Hat Security Data (authoritative CVSS) |
-| `nessus` | 3 | scrape | Tenable plugins (reserved CVE cited by scanner; needs browser profile) |
-| `nuclei_templates` | 3 | api | ProjectDiscovery nuclei-templates commits (exploit template = early signal) |
-| `metasploit` | 3 | api | Rapid7 metasploit-framework commits (new exploit module) |
-| `github_advisories` | 4 | api | GitHub Security Advisories (GHSA + packages, paginated) |
-| `github_commits` | 4 | api | **Top-N repos + N-month changelog** (reserved CVE / pre-CVE security fix) |
-| `osv` | 4 | api | OSV.dev ecosystem advisories (PyPI, Go, crates.io, RubyGems, Packagist…) |
+| `cisa_kev` | 1 | api | CISA Known Exploited Vulnerabilities — sets `in_kev` (exploited in the wild) |
+| `vulncheck_kev` | 1 | api | VulnCheck KEV — broader/earlier exploited catalog (needs a free token) |
+| `certcc_vu` | 1 | rss | CERT/CC Vulnerability Notes (`VU#…`) |
+| `redhat_csaf` | 2 | api | Red Hat Security Data — authoritative CVSS vectors |
+| `nessus` | 3 | scrape | Tenable Nessus plugin feed (reserved CVE cited by the scanner) |
+| `nuclei_templates` | 3 | api | ProjectDiscovery `nuclei-templates` commit scan (detection/exploit template = early signal) |
+| `metasploit` | 3 | api | Rapid7 `metasploit-framework` commit scan (new exploit module) |
+| `github_advisories` | 4 | api | GitHub Security Advisories (GHSA + affected packages, paginated) |
+| `github_commits` | 4 | api | **Top-N repos + N-month changelog** commit scan (reserved CVE / pre-CVE security fix) |
+| `osv` | 4 | api | OSV.dev ecosystem advisories (`all.zip`; PyPI, Go, crates.io, RubyGems, Packagist…) |
 | `thehackernews` | 5 | rss | Active-exploitation news |
 
-`cisa_kev` / `vulncheck_kev` don't just create mentions: they set `in_kev` on the
-candidate (exploited-in-the-wild signal, and ground truth for the prediction
-layer). See [`docs/SOURCES.md`](docs/SOURCES.md).
-
-`github_commits` watches the **top-N repos** (`CVERADAR_GITHUB_TOP_N`, default
-10,000, scalable to 100,000+) and scans their commits from the last N months. It is
-**cached and incremental**: the repo list is cached (weekly rebuild), processed
-in batches with a rotating cursor, and each repo keeps a *watermark*
-(last scanned commit date). It detects commits that cite a CVE (often
-reserved) and security fixes without a CVE, which become pre-CVE candidates.
-See [`docs/SOURCES.md`](docs/SOURCES.md).
+`cisa_kev` / `vulncheck_kev` don't just create mentions — they flag the candidate with
+`in_kev` / `kev_date` / `kev_source` (exploited-in-the-wild signal, and ground truth for a
+future prediction layer). `nuclei_templates` / `metasploit` catch **exploit/detection
+artifacts before the CVE is public**. `github_commits` watches the top-N repos
+(`CVERADAR_GITHUB_TOP_N`, default 10,000, scalable to 100,000+), scans their last
+`CVERADAR_GITHUB_COMMITS_MONTHS` months of commits incrementally (cached repo list, rotating
+cursor, per-repo watermark), and can synthesize `GHCOMMIT` candidates for security fixes
+that cite no CVE. See [`docs/SOURCES.md`](docs/SOURCES.md).
 
 ## Enrichment (Layer 3)
 
-The LLM (configurable: `mock`/`openai`/`anthropic`/`ollama`, mock by default without
-an API key) extracts **structured metadata, not a CVSS number**. CVSS follows a
-3-level precedence: **authoritative** (vector extracted from the source text) →
-**derived** (computed from metrics with the `cvss` library) →
-qualitative **`severity_hint`**. See [`docs/ENRICHMENT.md`](docs/ENRICHMENT.md).
+The LLM (configurable `mock`/`openai`/`anthropic`/`ollama`, mock by default without an API
+key) extracts **structured metadata, not a CVSS number**. CVSS follows a strict 3-level
+precedence:
+
+1. **authoritative** — a CVSS vector found verbatim in the source text (or a structured
+   feed like OSV), scored with the `cvss` library;
+2. **derived** — computed from the 8 base metrics the LLM inferred, only when *all 8* are
+   present;
+3. qualitative **`severity_hint`** (`likely-critical/high/medium/low`) when no numeric score
+   exists.
+
+The `cvss_selected` view picks the best per candidate (authoritative > derived, then newer
+version, then higher score). Product names are canonicalized against `product_catalog` via
+deterministic aliases before hitting the LLM. See [`docs/ENRICHMENT.md`](docs/ENRICHMENT.md).
 
 ## Tests
 
 ```bash
-# 49 tests (unit + integration against a real Postgres)
+# 55 tests (unit + integration against a real Postgres)
 docker compose up -d postgres && docker compose run --rm migrate
 docker compose run --rm --no-deps \
   -e DATABASE_URL=postgresql+psycopg://cveradar:cveradar@postgres:5432/cveradar \
@@ -167,8 +256,8 @@ docker compose run --rm --no-deps \
 
 ## Documentation
 
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — overview and data flow
-- [`docs/DATA_MODEL.md`](docs/DATA_MODEL.md) — schema and per-table decisions
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — processes, data flow, and what CVERadar answers that MITRE/OSV cannot
+- [`docs/DATA_MODEL.md`](docs/DATA_MODEL.md) — every table, column, constraint, index and view
 - [`docs/INGESTION.md`](docs/INGESTION.md) — ingestion and reconciliation pipeline
 - [`docs/SOURCES.md`](docs/SOURCES.md) — fetchers and how to add one
 - [`docs/ENRICHMENT.md`](docs/ENRICHMENT.md) — LLM + CVSS + normalization
@@ -179,5 +268,7 @@ docker compose run --rm --no-deps \
 
 ## Stack
 
-Python 3.12, SQLModel/SQLAlchemy 2, Alembic, Postgres 16, Redis, httpx, feedparser,
-selectolax, APScheduler, Playwright (optional), Typer, structlog. Docker + docker-compose.
+Python 3.12 · SQLModel / SQLAlchemy 2 · Alembic · Postgres 16 · Redis · httpx · feedparser ·
+selectolax · tenacity · APScheduler · `cvss` · Playwright (optional, `browser` extra) ·
+Typer + rich · structlog · pydantic / pydantic-settings. Packaged with `uv` / hatchling;
+Docker + docker-compose.
