@@ -1,0 +1,77 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: cveradar
+      POSTGRES_PASSWORD: cveradar
+      POSTGRES_DB: cveradar
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cveradar -d cveradar"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # Aplica las migraciones Alembic y termina. El resto de servicios
+  # esperan a que este acabe con éxito (service_completed_successfully).
+  migrate:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://cveradar:cveradar@postgres:5432/cveradar
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
+
+  # ---- Workers de carga de datos (sin UI) ----
+  baseline-worker:
+    build: { context: ., dockerfile: docker/Dockerfile }
+    environment:
+      DATABASE_URL: postgresql+psycopg://cveradar:cveradar@postgres:5432/cveradar
+      REDIS_URL: redis://redis:6379/0
+      CVERADAR_DATA_DIR: /data
+      CVERADAR_RAW_HTML_DIR: /data/raw
+      CVERADAR_CVELIST_REPO_DIR: /data/cvelistV5
+      CVERADAR_NVD_API_KEY: ${CVERADAR_NVD_API_KEY:-}
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    volumes:
+      - data:/data
+    command: ["python", "-m", "app.baseline"]
+    restart: unless-stopped
+
+  sources-worker:
+    build: { context: ., dockerfile: docker/Dockerfile }
+    environment:
+      DATABASE_URL: postgresql+psycopg://cveradar:cveradar@postgres:5432/cveradar
+      REDIS_URL: redis://redis:6379/0
+      CVERADAR_DATA_DIR: /data
+      CVERADAR_RAW_HTML_DIR: /data/raw
+      CVERADAR_LLM_PROVIDER: ${CVERADAR_LLM_PROVIDER:-mock}
+      CVERADAR_LLM_API_KEY: ${CVERADAR_LLM_API_KEY:-}
+      CVERADAR_LLM_MODEL: ${CVERADAR_LLM_MODEL:-mock-model}
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    volumes:
+      - data:/data
+    command: ["python", "-m", "app.sources"]
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  data:

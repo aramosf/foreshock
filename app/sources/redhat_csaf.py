@@ -1,0 +1,54 @@
+"""Tier 2 — Red Hat Security Data API (CVE JSON).
+
+Devuelve CVEs recientes con descripción, severidad y vector CVSS v3 cuando lo
+hay. Alta señal y formato estructurado: el CVSS aquí es AUTORITATIVO.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+from app.sources.base import BaseSource, FetchContext, register
+from app.sources.http import get
+from app.ingest.service import FetchedMention
+
+API = "https://access.redhat.com/hydra/rest/securitydata/cve.json"
+
+
+@register
+class RedHatCSAFSource(BaseSource):
+    name = "redhat_csaf"
+    kind = "Red Hat Security Data API (CVE JSON)"
+    method = "api"
+    tier = 2
+    cadence_seconds = 3600
+
+    #: días hacia atrás a consultar en cada ejecución
+    lookback_days = 3
+
+    async def fetch(self, ctx: FetchContext) -> list[FetchedMention]:
+        after = (datetime.now(UTC) - timedelta(days=self.lookback_days)).strftime("%Y-%m-%d")
+        resp = await get(ctx.http, API, params={"after": after, "per_page": 100})
+        data = resp.json()
+        out: list[FetchedMention] = []
+        for item in data:
+            cve = item.get("CVE")
+            if not cve:
+                continue
+            desc = item.get("bugzilla_description") or ""
+            severity = item.get("severity")
+            vector = item.get("cvss3_scoring_vector") or item.get("cvss_scoring_vector")
+            snippet = desc
+            if severity:
+                snippet = f"[{severity}] {desc}"
+            if vector:
+                snippet = f"{snippet} | CVSS: {vector}"
+            out.append(
+                FetchedMention(
+                    url=item.get("resource_url"),
+                    title=desc[:200] if desc else cve,
+                    snippet=snippet[:2000] if snippet else None,
+                    cve_id=cve,
+                )
+            )
+        return out

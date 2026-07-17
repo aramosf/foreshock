@@ -1,0 +1,57 @@
+"""Tier 3 — Tenable Nessus plugins (scrape del listado 'newest').
+
+Premisa de señal temprana: un plugin de Nessus puede referenciar un CVE que
+está solo RESERVADO en MITRE (ID existe, sin info pública). Se scrapea el
+listado HTML de plugins más recientes y se extraen los CVE citados.
+
+Scraping educado: respeta robots.txt, UA identificable, sin rotar IP.
+El HTML crudo se persiste (raw_html) para re-parseo sin volver a la fuente.
+"""
+
+from __future__ import annotations
+
+from selectolax.parser import HTMLParser
+
+from app.sources.base import BaseSource, FetchContext, register
+from app.sources.http import get
+from app.ingest.service import FetchedMention
+
+LISTING = "https://www.tenable.com/plugins/nessus/newest"
+BASE = "https://www.tenable.com"
+
+
+@register
+class NessusSource(BaseSource):
+    name = "nessus"
+    kind = "Tenable Nessus plugin feed (newest)"
+    method = "scrape"
+    tier = 3
+    cadence_seconds = 7200
+
+    async def fetch(self, ctx: FetchContext) -> list[FetchedMention]:
+        resp = await get(ctx.http, LISTING)
+        html = resp.text
+        tree = HTMLParser(html)
+        out: list[FetchedMention] = []
+        # Cada plugin es una fila con enlace a /plugins/nessus/<id> y un título.
+        for row in tree.css("tr"):
+            link = row.css_first("a[href^='/plugins/nessus/']")
+            if link is None:
+                continue
+            href = link.attributes.get("href", "")
+            title = link.text(strip=True)
+            snippet = row.text(separator=" ", strip=True)
+            # Solo filas que citen un CVE (la ingesta extrae el ID del texto).
+            if "CVE-" not in snippet.upper() and "CVE-" not in title.upper():
+                continue
+            out.append(
+                FetchedMention(
+                    url=f"{BASE}{href}" if href.startswith("/") else href,
+                    title=title or None,
+                    snippet=snippet[:2000] if snippet else None,
+                    # raw por-fila se omite para no duplicar el listado completo N veces;
+                    # el detalle del plugin se capturaría en un fetch de segundo nivel.
+                    raw_html=None,
+                )
+            )
+        return out

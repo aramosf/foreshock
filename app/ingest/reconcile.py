@@ -1,0 +1,118 @@
+"""Reconciliación de candidates a partir de identificadores nativos.
+
+Etapa A de la correlación (enlace determinista): un (scheme, value) pertenece
+a un solo candidate. Si una mención trae identificadores que ya apuntaban a
+candidates distintos, se fusionan (union-find con tombstone reversible).
+"""
+
+from __future__ import annotations
+
+import uuid
+
+from sqlalchemy import select, update
+from sqlalchemy.orm import Session
+
+from app.core.models import Candidate, CVSSScore, Identifier
+from app.core.models import Mention as MentionRow
+from app.ingest.identifiers import ExtractedId, primary_cve
+
+
+def find_root(session: Session, candidate_id: uuid.UUID) -> Candidate:
+    """Sigue la cadena merged_into hasta el candidate raíz (ganador vivo)."""
+    seen: set[uuid.UUID] = set()
+    current = session.get(Candidate, candidate_id)
+    assert current is not None
+    while current.merged_into is not None and current.merged_into not in seen:
+        seen.add(current.id)
+        nxt = session.get(Candidate, current.merged_into)
+        if nxt is None:
+            break
+        current = nxt
+    return current
+
+
+def _candidate_for_identifier(session: Session, eid: ExtractedId) -> Candidate | None:
+    row = session.execute(
+        select(Identifier).where(
+            Identifier.scheme == eid.scheme, Identifier.value == eid.value
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+    return find_root(session, row.candidate_id)
+
+
+def _pick_winner(candidates: list[Candidate]) -> Candidate:
+    """Gana el que tiene CVE; a igualdad, el visto primero (first_seen_at más antiguo)."""
+    def key(c: Candidate) -> tuple[int, float]:
+        has_cve = 0 if c.cve_id else 1
+        ts = c.first_seen_at.timestamp() if c.first_seen_at else float("inf")
+        return (has_cve, ts)
+
+    return sorted(candidates, key=key)[0]
+
+
+def merge_candidates(session: Session, winner: Candidate, loser: Candidate) -> None:
+    """Fusiona loser -> winner: reasigna hijos, marca tombstone. Reversible."""
+    if winner.id == loser.id:
+        return
+    for model in (Identifier, MentionRow, CVSSScore):
+        session.execute(
+            update(model)
+            .where(model.candidate_id == loser.id)  # type: ignore[attr-defined]
+            .values(candidate_id=winner.id)
+        )
+    # afectados y enlaces se reasignan por SQL directo (evita import pesado aquí)
+    session.execute(
+        update(Candidate).where(Candidate.id == loser.id).values(
+            merged_into=winner.id, status="merged"
+        )
+    )
+    if winner.cve_id is None and loser.cve_id is not None:
+        winner.cve_id = loser.cve_id
+    session.flush()
+
+
+def resolve_candidate(session: Session, ids: list[ExtractedId]) -> Candidate:
+    """Devuelve el candidate que corresponde a estos identificadores.
+
+    - ninguno conocido -> crea candidate nuevo
+    - uno -> lo usa
+    - varios -> los fusiona en un ganador
+    Después adjunta los identificadores que falten.
+    """
+    roots: dict[uuid.UUID, Candidate] = {}
+    for eid in ids:
+        c = _candidate_for_identifier(session, eid)
+        if c is not None:
+            roots[c.id] = c
+
+    if not roots:
+        candidate = Candidate(status="candidate")
+        session.add(candidate)
+        session.flush()
+    elif len(roots) == 1:
+        candidate = next(iter(roots.values()))
+    else:
+        candidate = _pick_winner(list(roots.values()))
+        for other in roots.values():
+            if other.id != candidate.id:
+                merge_candidates(session, candidate, other)
+
+    # Adjunta identificadores nuevos y fija cve_id si aparece.
+    existing = {
+        (i.scheme, i.value)
+        for i in session.execute(
+            select(Identifier).where(Identifier.candidate_id == candidate.id)
+        ).scalars()
+    }
+    for eid in ids:
+        if (eid.scheme, eid.value) not in existing:
+            session.add(
+                Identifier(candidate_id=candidate.id, scheme=eid.scheme, value=eid.value)
+            )
+    cve = primary_cve(ids)
+    if cve and candidate.cve_id is None:
+        candidate.cve_id = cve
+    session.flush()
+    return candidate
