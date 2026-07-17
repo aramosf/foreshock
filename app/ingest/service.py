@@ -40,6 +40,9 @@ class FetchedMention:
     snippet: str | None = None
     cve_id: str | None = None          # si el fetcher ya lo conoce
     native_id: str | None = None       # p.ej. ZDI-CAN-nnnn
+    # Ids DECLARADOS adicionales (p.ej. aliases de un mismo advisory OSV): forman
+    # parte de la identidad y SÍ fusionan. NO usar para CVEs sueltos citados en prosa.
+    extra_ids: list[str] | None = None
     raw_html: str | None = None        # contenido crudo a persistir
     seen_at: datetime | None = None
     # flags a aplicar al candidate (whitelist en _apply_flags), p.ej. KEV.
@@ -160,7 +163,17 @@ def ingest_mention(session: Session, source_id: int, m: FetchedMention) -> Inges
     if seen_at.tzinfo is None:            # normaliza a UTC-aware (evita mezcla naive/aware)
         seen_at = seen_at.replace(tzinfo=UTC)
 
-    ids = extract_identifiers(m.cve_id, m.native_id, m.title, m.snippet, m.url)
+    # IDENTIDAD: solo los ids que la fuente DECLARA (cve_id/native_id/extra_ids).
+    # Estos anclan y fusionan (union-find). Los CVEs sueltos citados en la prosa
+    # (título/snippet) NO se usan para fusionar: un commit "arregla 21 CVEs" o una
+    # noticia que enumera varios NO deben colapsar vulns distintas en un candidate.
+    declared = extract_identifiers(m.cve_id, m.native_id, *(m.extra_ids or []))
+    if declared:
+        ids = declared
+    else:
+        # Fuente sin id declarado (RSS/scrape): ancla al PRIMER id del texto, no a todos.
+        text_ids = extract_identifiers(m.title, m.snippet, m.url)
+        ids = text_ids[:1]
     if not ids:
         # Sin identificador no podemos anclar la mención a nada útil.
         log.debug("ingest.skip_no_identifier", source_id=source_id, url=m.url)

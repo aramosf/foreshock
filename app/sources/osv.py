@@ -172,6 +172,8 @@ class OsvSource(BaseSource):
             title=(summary[:200] or cve or osv_id),
             snippet=snippet[:2000] if snippet else None,
             cve_id=cve, native_id=osv_id, seen_at=seen,
+            # aliases del MISMO advisory -> identidad declarada (fusionan correctamente).
+            extra_ids=[a for a in aliases if a != cve] or None,
             affected=affected or None,
             cvss_vectors=_cvss_vectors(rec) or None,
             cwe_ids=_cwe_ids(rec) or None,

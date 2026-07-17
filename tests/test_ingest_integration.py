@@ -76,6 +76,36 @@ def test_days_ahead_computed_against_nvd_observation(session):
     assert cand.status == "published"
 
 
+def test_prose_cves_do_not_overmerge(session):
+    """Un commit/noticia que CITA varios CVEs en el texto NO debe fusionarlos:
+    solo los ids DECLARADOS (cve_id/native_id/extra_ids) forman identidad."""
+    sid = _sid(session, "github_commits")
+    snippet = "batch security update: " + " ".join(f"CVE-2026-{2000 + i}" for i in range(8))
+    res = ingest_mention(session, sid, FetchedMention(
+        title="acme/app: batch update", snippet=snippet,
+        cve_id="CVE-2026-2000", native_id="GHCOMMIT:acme/app@abc1234def",
+        url="https://gh/c/bulk"))
+    from app.core.models import Identifier
+    ids = {v for _s, v in session.execute(
+        select(Identifier.scheme, Identifier.value)
+        .where(Identifier.candidate_id == res.candidate_id))}
+    assert ids == {"CVE-2026-2000", "GHCOMMIT:acme/app@abc1234def"}  # NO los otros 7
+
+
+def test_osv_aliases_do_merge(session):
+    """Los aliases del MISMO advisory (OSV extra_ids) SÍ deben fusionar (misma vuln)."""
+    sid = _sid(session, "osv")
+    res = ingest_mention(session, sid, FetchedMention(
+        title="pkg vuln", snippet="advisory", cve_id="CVE-2026-3000",
+        native_id="GHSA-aaaa-bbbb-cccc", extra_ids=["CVE-2026-3001"],
+        url="https://osv/1"))
+    from app.core.models import Identifier
+    ids = {v for _s, v in session.execute(
+        select(Identifier.scheme, Identifier.value)
+        .where(Identifier.candidate_id == res.candidate_id))}
+    assert {"CVE-2026-3000", "GHSA-aaaa-bbbb-cccc", "CVE-2026-3001"} <= ids
+
+
 def test_merge_resolves_unique_collisions(session):
     """Fusionar dos candidates con filas cvss/affected colisionantes no debe
     violar UNIQUE, y debe reasignar los affected_products del loser."""
