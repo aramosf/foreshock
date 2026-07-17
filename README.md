@@ -100,6 +100,21 @@ cveradar emerging list --since 24h --tier 1 --min-mentions 2
 cveradar cve show CVE-2026-12345            # timeline + enrichment
 cveradar enrich CVE-2026-12345              # LLM + CVSS
 cveradar stats                              # lead days per source
+cveradar pending                            # vulns tied to software with NO official CVE yet,
+                                            # and which software has the most pending
+```
+
+The **flagship question** this project answers — *"how many identified,
+software-associated vulnerabilities have no official public CVE, and which
+software has the most pending?"* — is `cveradar pending`:
+
+```text
+CVEs without official publication: 14630 (14614 with identifiable software)
+  breakdown: 13597 without cve_id (pre-CVE) · 1033 with reserved/unpublished cve_id
+ software                     cves_pending
+ npm:openclaw                 216
+ langchain-ai/langgraph       26
+ ...
 ```
 
 ## Implemented sources (11)

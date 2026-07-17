@@ -23,7 +23,7 @@ from datetime import UTC, datetime, timedelta
 import typer
 from rich.console import Console
 from rich.table import Table
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from app.core.db import get_session, session_scope
 from app.core.logging import configure_logging
@@ -301,6 +301,72 @@ def stats() -> None:
         for name, avg, cnt in rows:
             t.add_row(name, f"{float(avg):.1f}" if avg is not None else "-", str(cnt))
         console.print(t)
+
+
+# ----------------------------------------------------------------- pending
+# CTE compartido: candidates SIN CVE público oficial (pre-CVE o CVE no PUBLISHED),
+# con el software derivado (repo GHCOMMIT -> paquete 'affected:' -> prefijo owner/repo).
+_PENDING_SW_CTE = """
+WITH pending AS (
+  SELECT c.id, c.cve_id
+  FROM candidates c
+  WHERE c.merged_into IS NULL
+    AND ( c.cve_id IS NULL
+       OR NOT EXISTS (SELECT 1 FROM published_cves p
+                      WHERE p.id = c.cve_id AND p.state = 'PUBLISHED') )
+),
+sw AS (
+  SELECT p.id, p.cve_id,
+    COALESCE(
+      (SELECT regexp_replace(i.value,'^GHCOMMIT:(.*)@.*$','\\1')
+         FROM identifiers i WHERE i.candidate_id=p.id AND i.scheme='GHCOMMIT' LIMIT 1),
+      (SELECT substring(m.snippet from 'affected: (\\S+)')
+         FROM mentions m WHERE m.candidate_id=p.id AND m.snippet LIKE '%affected:%' LIMIT 1),
+      (SELECT substring(m.title from '^([^:]+/[^:]+):')
+         FROM mentions m WHERE m.candidate_id=p.id AND m.title LIKE '%/%:%' LIMIT 1)
+    ) AS software
+  FROM pending p
+)
+"""
+
+
+@app.command("pending")
+def pending(
+    top: int = typer.Option(20, help="nº de software en el ranking"),
+    reserved_only: bool = typer.Option(
+        False, help="solo los que ya tienen un cve_id (reservado, no publicado)"),
+) -> None:
+    """CVEs identificados asociados a software SIN publicación oficial en NVD/MITRE,
+    y ranking del software con más pendientes de publicar."""
+    where_reserved = "WHERE cve_id IS NOT NULL" if reserved_only else ""
+    counts_sql = text(_PENDING_SW_CTE + f"""
+        SELECT
+          (SELECT count(*) FROM sw {where_reserved}) AS total,
+          (SELECT count(*) FROM sw {where_reserved}
+             {'AND' if reserved_only else 'WHERE'} software IS NOT NULL) AS con_sw,
+          (SELECT count(*) FROM sw WHERE cve_id IS NULL) AS sin_cve_id,
+          (SELECT count(*) FROM sw WHERE cve_id IS NOT NULL) AS cve_reservado;
+    """)
+    top_sql = text(_PENDING_SW_CTE + f"""
+        SELECT trim(software) AS software, count(*) AS n
+        FROM sw WHERE software IS NOT NULL {'AND cve_id IS NOT NULL' if reserved_only else ''}
+        GROUP BY trim(software) ORDER BY 2 DESC LIMIT :top;
+    """)
+    with get_session() as session:
+        r = session.execute(counts_sql).one()
+        console.print(
+            f"[bold]CVEs sin publicación oficial:[/bold] {r.total} "
+            f"([green]{r.con_sw}[/green] con software identificable)"
+        )
+        console.print(
+            f"  desglose: {r.sin_cve_id} sin cve_id (pre-CVE) · "
+            f"{r.cve_reservado} con cve_id reservado/no-publicado"
+        )
+        rows = session.execute(top_sql, {"top": top}).all()
+        table = Table("software", "cves_pendientes")
+        for name, n in rows:
+            table.add_row(name, str(n))
+        console.print(table)
 
 
 if __name__ == "__main__":
