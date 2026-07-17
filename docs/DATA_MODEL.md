@@ -1,177 +1,177 @@
-# Modelo de datos
+# Data model
 
-Las **migraciones Alembic escritas a mano son la fuente de verdad del esquema**
+The **hand-written Alembic migrations are the source of truth for the schema**
 (`migrations/versions/0001_initial_schema.py`, `0002_affected_products.py`,
-`0003_soft_cve_ref.py`). `app/core/models.py` es un mapeo ORM (SQLModel) sobre
-esas tablas; `env.py` usa `target_metadata=None`, de modo que los modelos nunca
-autogeneran ni crean tablas por su cuenta.
+`0003_soft_cve_ref.py`). `app/core/models.py` is an ORM mapping (SQLModel) over
+those tables; `env.py` uses `target_metadata=None`, so the models never
+autogenerate or create tables on their own.
 
-Postgres 16. Se aprovechan `gen_random_uuid()`, `TIMESTAMP WITH TIME ZONE`,
-`JSONB`, `ARRAY(Text)` e índices parciales.
+Postgres 16. It leverages `gen_random_uuid()`, `TIMESTAMP WITH TIME ZONE`,
+`JSONB`, `ARRAY(Text)` and partial indexes.
 
 ---
 
 ## Baseline
 
 ### `published_cves`
-Estado canónico de cada CVE (cvelistV5 + NVD 2.0). PK `id` = `CVE-YYYY-NNNN`
+Canonical state of each CVE (cvelistV5 + NVD 2.0). PK `id` = `CVE-YYYY-NNNN`
 (`Text`).
 
-| Columna | Tipo | Notas |
+| Column | Type | Notes |
 |---|---|---|
 | `id` | Text PK | `CVE-YYYY-NNNN` |
 | `state` | Text | `RESERVED` / `PUBLISHED` / `REJECTED` (CHECK `ck_pubcves_state`) |
-| `cvelist_published_at`, `cvelist_updated_at` | timestamptz | Fechas auto-reportadas por cvelistV5. |
-| `nvd_published_at`, `nvd_last_modified_at` | timestamptz | Fechas auto-reportadas por NVD (**pueden venir con backfill**). |
-| `nvd_vuln_status` | Text | p.ej. `Analyzed`, `Awaiting Analysis`. |
-| `nvd_first_observed_at` | timestamptz | **Observación propia**: cuándo lo vimos por primera vez en NVD (inmune a backfill). |
-| `nvd_first_analyzed_observed_at` | timestamptz | Cuándo lo vimos por primera vez en estado `Analyzed`. |
-| `cna`, `assigner_short_name` | Text | Autoría del registro. |
-| `raw_json` | JSONB | Registro CVE 5.x original. |
+| `cvelist_published_at`, `cvelist_updated_at` | timestamptz | Dates self-reported by cvelistV5. |
+| `nvd_published_at`, `nvd_last_modified_at` | timestamptz | Dates self-reported by NVD (**may come with backfill**). |
+| `nvd_vuln_status` | Text | e.g. `Analyzed`, `Awaiting Analysis`. |
+| `nvd_first_observed_at` | timestamptz | **Own observation**: when we first saw it in NVD (immune to backfill). |
+| `nvd_first_analyzed_observed_at` | timestamptz | When we first saw it in `Analyzed` state. |
+| `cna`, `assigner_short_name` | Text | Authorship of the record. |
+| `raw_json` | JSONB | Original CVE 5.x record. |
 | `ingested_at` | timestamptz | `server_default now()`. |
 
-Los campos `cvelist_*` los rellena `app/baseline/cvelist.py`; los `nvd_*`,
-`app/baseline/nvd.py`. Ninguno pisa al otro (upserts disjuntos por columnas).
-Las columnas `nvd_first_*` se sellan una sola vez vía `COALESCE` — son el
-**ground truth de observación** que hace robusta la métrica `days_ahead_present`.
+The `cvelist_*` fields are filled by `app/baseline/cvelist.py`; the `nvd_*` ones by
+`app/baseline/nvd.py`. Neither overwrites the other (disjoint upserts by columns).
+The `nvd_first_*` columns are sealed once via `COALESCE` — they are the
+**observation ground truth** that makes the `days_ahead_present` metric robust.
 
 ### `sources`
-Registro de fetchers. `name` único; `method IN ('api','rss','scrape','browser')`
+Registry of fetchers. `name` unique; `method IN ('api','rss','scrape','browser')`
 (CHECK `ck_sources_method`); `tier BETWEEN 1 AND 5` (CHECK `ck_sources_tier`).
-Guarda `enabled`, `cadence_seconds`, `last_success_at`, `last_error`,
-`last_error_at`. Índice parcial `idx_sources_enabled WHERE enabled`.
+Stores `enabled`, `cadence_seconds`, `last_success_at`, `last_error`,
+`last_error_at`. Partial index `idx_sources_enabled WHERE enabled`.
 
 ---
 
-## Rastreo
+## Tracking
 
-### `candidates` — la unidad de rastreo
-Un candidate existe **con o sin CVE**. PK `id` UUID (`gen_random_uuid()`).
+### `candidates` — the tracking unit
+A candidate exists **with or without a CVE**. PK `id` UUID (`gen_random_uuid()`).
 
 - `status` — `candidate` / `emerging` / `published` / `rejected` / `merged`
   (CHECK `ck_cand_status`).
-- **`cve_id` (Text) — referencia BLANDA, SIN FK.** La migración `0003` elimina
-  el constraint `candidates_cve_id_fkey`. Motivo: un candidate puede referenciar
-  un CVE solo RESERVADO y aún no ingerido por el baseline (o que MITRE/NVD no
-  publican todavía). Forzar el FK impediría registrar la señal temprana, que es
-  la premisa de CVERadar. La reconciliación se hace por *lookup*
-  (`compute_days_ahead` hace `session.get(PublishedCVE, cve_id)`), no por
-  integridad referencial. Índice `idx_cand_cve`.
-- `merged_into` — self-FK para el union-find de fusiones (tombstone). Índice
-  parcial `idx_cand_merged_into WHERE merged_into IS NOT NULL`.
-- `cluster_fingerprint` — huella para dedup difuso.
-- Agregados de menciones: `first_seen_at`, `last_seen_at`, `mention_count`,
-  `source_count` (recalculados por `_refresh_aggregates`).
-- Reconciliación con NVD: `promoted_at`, `days_ahead_vs_nvd_published`,
+- **`cve_id` (Text) — SOFT reference, NO FK.** The `0003` migration drops
+  the `candidates_cve_id_fkey` constraint. Reason: a candidate may reference
+  a CVE that is only RESERVED and not yet ingested by the baseline (or that MITRE/NVD
+  have not published yet). Enforcing the FK would prevent recording the early
+  signal, which is CVERadar's premise. Reconciliation is done by *lookup*
+  (`compute_days_ahead` does `session.get(PublishedCVE, cve_id)`), not by
+  referential integrity. Index `idx_cand_cve`.
+- `merged_into` — self-FK for the merge union-find (tombstone). Partial
+  index `idx_cand_merged_into WHERE merged_into IS NOT NULL`.
+- `cluster_fingerprint` — fingerprint for fuzzy dedup.
+- Mention aggregates: `first_seen_at`, `last_seen_at`, `mention_count`,
+  `source_count` (recomputed by `_refresh_aggregates`).
+- Reconciliation with NVD: `promoted_at`, `days_ahead_vs_nvd_published`,
   `days_ahead_vs_nvd_present`, `days_ahead_vs_nvd_analyzed`.
-- Enriquecimiento (Capa 3): `affected_product`, `affected_versions`,
+- Enrichment (Layer 3): `affected_product`, `affected_versions`,
   `vuln_type`, `attack_vector` (CHECK `network/adjacent/local/physical`),
   `requires_auth`, `requires_interaction`, `has_public_poc`, `poc_urls[]`,
   `severity_hint` (CHECK `likely-critical/high/medium/low`),
   `enrichment_confidence` (CHECK 0..1), `enrichment_method`,
   `enrichment_updated_at`.
 
-### `identifiers` — enlace determinista
-Cada `(scheme, value)` ancla a **un solo** candidate.
-`UNIQUE(scheme, value)` (`uq_identifiers_scheme_value`) es la clave del enlace
-determinista (Etapa A de la correlación). FK `candidate_id` con
-`ON DELETE CASCADE`. Esquemas: `CVE`, `ZDI-CAN`, `ZDI`, `VU`, `GHSA`, `MSRC`,
-`GHCOMMIT` (ver `INGESTION.md`).
+### `identifiers` — deterministic link
+Each `(scheme, value)` anchors to **a single** candidate.
+`UNIQUE(scheme, value)` (`uq_identifiers_scheme_value`) is the key of the
+deterministic link (Stage A of the correlation). FK `candidate_id` with
+`ON DELETE CASCADE`. Schemes: `CVE`, `ZDI-CAN`, `ZDI`, `VU`, `GHSA`, `MSRC`,
+`GHCOMMIT` (see `INGESTION.md`).
 
-### `mentions` — observaciones crudas
-Cada aparición de una vulnerabilidad en una fuente. FKs a `candidates`
-(CASCADE) y `sources`.
+### `mentions` — raw observations
+Each appearance of a vulnerability in a source. FKs to `candidates`
+(CASCADE) and `sources`.
 
-- **Idempotencia por `content_hash`**: `UNIQUE(source_id, content_hash)`
-  (`uq_mentions_source_hash`). El hash se calcula sobre el **extracto semántico**
-  (CVE + nativo + título + snippet + URL canónica normalizados), **no** sobre el
-  HTML crudo. Un re-listado idéntico → mismo hash → no duplica; un cambio real
-  de contenido → hash nuevo → mención nueva legítima en el timeline. Ver
-  `app/ingest/hashing.py`. La identidad del CVE va **dentro** del hash, por eso
-  la restricción no incluye `cve_id`.
+- **Idempotency by `content_hash`**: `UNIQUE(source_id, content_hash)`
+  (`uq_mentions_source_hash`). The hash is computed over the **semantic excerpt**
+  (normalized CVE + native + title + snippet + canonical URL), **not** over the
+  raw HTML. An identical re-listing → same hash → no duplicate; a real
+  content change → new hash → legitimate new mention in the timeline. See
+  `app/ingest/hashing.py`. The CVE identity goes **inside** the hash, which is why
+  the constraint does not include `cve_id`.
 - `extracted_cve`, `extracted_native`, `url`, `title`, `snippet`,
-  `raw_html_path` (ruta en disco al HTML crudo persistido), `seen_at`.
+  `raw_html_path` (on-disk path to the persisted raw HTML), `seen_at`.
 
-### `candidate_links` — dedup difuso PROPUESTO, no destructivo
-Enlaces difusos entre candidates que **se sugieren pero no fusionan**. PK
-compuesta `(a, b)` con CHECK `a < b` (par canónico, `ck_links_canonical_pair`).
+### `candidate_links` — PROPOSED fuzzy dedup, non-destructive
+Fuzzy links between candidates that **are suggested but not merged**. Composite
+PK `(a, b)` with CHECK `a < b` (canonical pair, `ck_links_canonical_pair`).
 
 - `method IN ('fingerprint','embedding','llm')` (CHECK `ck_links_method`).
 - `confidence` 0..1; `status IN ('suggested','confirmed','rejected')`
   (default `suggested`).
-- `rationale` para auditoría. Índice parcial
+- `rationale` for auditing. Partial index
   `idx_links_status WHERE status = 'suggested'`.
 
-Es no destructivo: a diferencia del union-find de `identifiers` (que fusiona de
-verdad por evidencia determinista), aquí solo se propone un enlace para revisión.
+It is non-destructive: unlike the `identifiers` union-find (which really merges
+by deterministic evidence), here a link is only proposed for review.
 
-### `cvss_scores` — v3/v4, autoritativo vs derivado, multi-fuente
-Varias filas por candidate. `UNIQUE(candidate_id, version, provenance, source)`
+### `cvss_scores` — v3/v4, authoritative vs derived, multi-source
+Several rows per candidate. `UNIQUE(candidate_id, version, provenance, source)`
 (`uq_cvss_candidate_version_prov_source`).
 
 - `version IN ('3.0','3.1','4.0')` (CHECK `ck_cvss_version`).
-- `vector` (verbatim o construido), `base_score` (0..10), `base_severity`
+- `vector` (verbatim or constructed), `base_score` (0..10), `base_severity`
   (`NONE/LOW/MEDIUM/HIGH/CRITICAL`).
 - **`provenance IN ('authoritative','derived')`** (CHECK `ck_cvss_provenance`):
-  `authoritative` = vector extraído verbatim del texto de la fuente y puntuado
-  con la librería `cvss`; `derived` = calculado desde las métricas inferidas por
-  el LLM.
-- `source` — origen textual (`source-text`, `llm-derived`, …).
-- `inferred_metrics[]` y `confidence` — solo para `derived`.
+  `authoritative` = vector extracted verbatim from the source text and scored
+  with the `cvss` library; `derived` = computed from the metrics inferred by
+  the LLM.
+- `source` — textual origin (`source-text`, `llm-derived`, …).
+- `inferred_metrics[]` and `confidence` — only for `derived`.
 
-Ver `ENRICHMENT.md` para la precedencia de selección.
+See `ENRICHMENT.md` for the selection precedence.
 
-### `epss_scores` — histórico
-PK compuesta `(cve_id, scored_date)` (`pk_epss_scores`) → cada snapshot diario
-del modelo se conserva; se ve la evolución del score. `score` y `percentile`
-0..1. **Sin FK a `published_cves`**: EPSS puede referir un CVE aún no ingerido.
+### `epss_scores` — history
+Composite PK `(cve_id, scored_date)` (`pk_epss_scores`) → each daily snapshot
+of the model is kept; the score evolution is visible. `score` and `percentile`
+0..1. **No FK to `published_cves`**: EPSS may refer to a CVE not yet ingested.
 
 ---
 
-## Canonicalización de software (migración `0002`)
+## Software canonicalization (migration `0002`)
 
 ### `product_catalog`
-Vocabulario canónico (sembrado de CPE-dict / OSV / manual). La "verdad" contra
-la que se enlazan los nombres sucios. Campos `vendor`, `product` (NOT NULL),
-`ecosystem` (PyPI/npm/Go…; NULL en software clásico), `cpe23`, `purl`, `source`.
-`UNIQUE(vendor, product, ecosystem)` con **`NULLS NOT DISTINCT`** (PG15+): dos
-filas con `ecosystem NULL` también deduplican (sin esa cláusula, `NULL != NULL`
-permitiría duplicados). Igual en `affected_products.uq_affected_candidate_product`.
+Canonical vocabulary (seeded from CPE-dict / OSV / manual). The "truth" against
+which dirty names are linked. Fields `vendor`, `product` (NOT NULL),
+`ecosystem` (PyPI/npm/Go…; NULL for classic software), `cpe23`, `purl`, `source`.
+`UNIQUE(vendor, product, ecosystem)` with **`NULLS NOT DISTINCT`** (PG15+): two
+rows with `ecosystem NULL` also dedup (without that clause, `NULL != NULL`
+would allow duplicates). Same in `affected_products.uq_affected_candidate_product`.
 
 ### `product_aliases`
-Clave normalizada → entrada canónica. `UNIQUE(alias_normalized)`: un alias
-resuelve de forma **determinista** a UNA entrada. Crece con lo que confirma el
-LLM/humano; la próxima vez resuelve en Capa 1 sin volver a llamar al LLM.
+Normalized key → canonical entry. `UNIQUE(alias_normalized)`: an alias
+resolves **deterministically** to ONE entry. It grows with what the
+LLM/human confirms; next time it resolves in Layer 1 without calling the LLM again.
 `source IN ('seed','llm','manual')`, `confidence` 0..1.
 
 ### `affected_products`
-Productos afectados por candidate (multi-fila). Guarda el **raw extraído**
+Products affected per candidate (multi-row). Stores the **extracted raw**
 (`raw`, `product`, `vendor`, `ecosystem`, `cpe23`, `purl`, `exact_versions[]`,
-`default_status`) **más** el enlace canónico `catalog_id` (FK
-`ON DELETE SET NULL`) y la trazabilidad de la canonicalización:
+`default_status`) **plus** the canonical link `catalog_id` (FK
+`ON DELETE SET NULL`) and the canonicalization traceability:
 `normalization_method IN ('exact','alias','fuzzy','llm','unresolved')`,
-`normalization_confidence`. Índice parcial `idx_affected_unresolved WHERE
-catalog_id IS NULL` = cola de pendientes de resolver.
+`normalization_confidence`. Partial index `idx_affected_unresolved WHERE
+catalog_id IS NULL` = queue of items pending resolution.
 
 ### `affected_version_ranges`
-Rangos estructurados por producto afectado (estilo OSV / CVE-5.0):
-`introduced`, `fixed` (exclusivo), `last_affected` (inclusivo), `version_type`
-(semver/rpm/custom…), `raw` (p.ej. `< 7.4.3`). FK a `affected_products` CASCADE.
+Structured ranges per affected product (OSV / CVE-5.0 style):
+`introduced`, `fixed` (exclusive), `last_affected` (inclusive), `version_type`
+(semver/rpm/custom…), `raw` (e.g. `< 7.4.3`). FK to `affected_products` CASCADE.
 
 ---
 
-## Vistas de conveniencia
+## Convenience views
 
-Definidas en `0001_initial_schema.py`:
+Defined in `0001_initial_schema.py`:
 
 - **`epss_current`** — `DISTINCT ON (cve_id) … ORDER BY cve_id, scored_date DESC`:
-  el snapshot EPSS más reciente por CVE sobre el histórico.
-- **`cvss_selected`** — `DISTINCT ON (candidate_id)` con orden de precedencia:
-  `provenance = 'authoritative'` primero, luego versión más alta
-  (`4.0 > 3.1 > 3.0`), luego `base_score DESC NULLS LAST`. Selecciona el "mejor"
-  CVSS por candidate.
-- **`radar`** — vista principal de consumo: `candidates` LEFT JOIN
-  `cvss_selected` LEFT JOIN `epss_current`, filtrando
+  the most recent EPSS snapshot per CVE over the history.
+- **`cvss_selected`** — `DISTINCT ON (candidate_id)` with precedence order:
+  `provenance = 'authoritative'` first, then highest version
+  (`4.0 > 3.1 > 3.0`), then `base_score DESC NULLS LAST`. Selects the "best"
+  CVSS per candidate.
+- **`radar`** — main consumption view: `candidates` LEFT JOIN
+  `cvss_selected` LEFT JOIN `epss_current`, filtering
   `status IN ('candidate','emerging','published') AND merged_into IS NULL`.
-  Expone `days_ahead_vs_nvd_present` y `days_ahead_vs_nvd_analyzed`, el CVSS
-  seleccionado, `severity_hint` y el EPSS actual.
+  Exposes `days_ahead_vs_nvd_present` and `days_ahead_vs_nvd_analyzed`, the selected
+  CVSS, `severity_hint` and the current EPSS.

@@ -1,21 +1,21 @@
-# Arquitectura de CVERadar
+# CVERadar Architecture
 
-CVERadar es un **radar temprano de vulnerabilidades**: un backend de carga de
-datos (sin UI) que capta señales de que una vulnerabilidad existe **antes** de
-que su CVE esté publicado y analizado en NVD, y mide cuántos días de ventaja
-obtiene cada fuente.
+CVERadar is an **early vulnerability radar**: a data ingestion backend
+(no UI) that picks up signals that a vulnerability exists **before**
+its CVE is published and analyzed in NVD, and measures how many lead days
+each source gains.
 
-Todo el código vive en el paquete `app/` y se ejecuta como procesos Python
-sobre Postgres 16 + Redis. No hay servidor web ni frontend.
+All code lives in the `app/` package and runs as Python processes
+over Postgres 16 + Redis. There is no web server and no frontend.
 
 ---
 
-## Diagrama de componentes
+## Component diagram
 
 ```mermaid
 flowchart LR
     %% ---------------- Fuentes externas ----------------
-    subgraph EXT["Fuentes externas (públicas)"]
+    subgraph EXT["External sources (public)"]
         direction TB
         CVELIST["cvelistV5<br/>(git shallow)"]
         NVD["NVD 2.0<br/>delta feed"]
@@ -42,8 +42,8 @@ flowchart LR
     subgraph SW["sources-worker (APScheduler)"]
         direction TB
         FETCH["BaseSource.fetch()<br/>6 fetchers"]
-        INGEST["ingest_mention()<br/>1 extract_identifiers<br/>2 resolve_candidate (union-find)<br/>3 content_hash (idempotencia)<br/>4 persist raw + mention<br/>5 aggregates + days_ahead"]
-        ENRICH["enrich_candidate()<br/>LLM extrae métricas<br/>CVSS autoritativo+derivado<br/>severity_hint · afectados"]
+        INGEST["ingest_mention()<br/>1 extract_identifiers<br/>2 resolve_candidate (union-find)<br/>3 content_hash (idempotency)<br/>4 persist raw + mention<br/>5 aggregates + days_ahead"]
+        ENRICH["enrich_candidate()<br/>LLM extracts metrics<br/>authoritative+derived CVSS<br/>severity_hint · affected"]
         FETCH --> INGEST --> ENRICH
     end
     T1 --> FETCH
@@ -53,32 +53,32 @@ flowchart LR
     T5 --> FETCH
 
     %% ---------------- LLM ----------------
-    LLM["Proveedor LLM<br/>mock/openai/anthropic/ollama"]
+    LLM["LLM provider<br/>mock/openai/anthropic/ollama"]
     ENRICH <--> LLM
 
     %% ---------------- Postgres ----------------
     subgraph PG["Postgres 16"]
         direction TB
-        PUB["published_cves<br/>(canónico + obs. propia NVD)"]
-        EPSST["epss_scores (histórico)"]
+        PUB["published_cves<br/>(canonical + own NVD obs.)"]
+        EPSST["epss_scores (history)"]
         CAND["candidates"]
         IDN["identifiers"]
         MEN["mentions"]
         CVSST["cvss_scores (v3/v4)"]
         AFF["affected_products<br/>+ product_catalog/aliases"]
-        VIEW["vistas: radar · cvss_selected · epss_current"]
+        VIEW["views: radar · cvss_selected · epss_current"]
     end
     JB1 --> PUB
     JB2 --> PUB
     JB3 --> EPSST
     INGEST --> CAND & IDN & MEN
     ENRICH --> CVSST & AFF
-    PUB -. "reconciliación por cve_id (lookup, sin FK)" .-> CAND
+    PUB -. "reconciliation by cve_id (lookup, no FK)" .-> CAND
     CAND --- VIEW
 
     %% ---------------- Infra / operación ----------------
     REDIS["Redis<br/>cache · rate-limit"]
-    VOL["Volumen data:/data<br/>raw_html · clon cvelistV5 · cachés GitHub"]
+    VOL["Volume data:/data<br/>raw_html · cvelistV5 clone · GitHub caches"]
     MIG["migrate<br/>alembic upgrade head"]
     CLI["CLI cveradar<br/>sources · baseline · emerging · cve · enrich · stats"]
 
@@ -96,129 +96,130 @@ flowchart LR
     class BW,SW,JB1,JB2,JB3,FETCH,INGEST,ENRICH proc;
 ```
 
-Leyenda: **azul** = fuentes externas · **rojo** = procesos/lógica ·
-**verde** = almacenamiento. Flechas continuas = flujo de datos; punteadas =
-infraestructura de apoyo; la punteada etiquetada = reconciliación blanda por
+Legend: **blue** = external sources · **red** = processes/logic ·
+**green** = storage. Solid arrows = data flow; dotted = supporting
+infrastructure; the labeled dotted arrow = soft reconciliation by
 `cve_id`.
 
 ---
 
-## Los tres procesos de `docker-compose.yml`
+## The three `docker-compose.yml` processes
 
-`docker-compose.yml` levanta infraestructura (`postgres`, `redis`) y tres
-procesos de aplicación construidos con la misma imagen (`docker/Dockerfile`):
+`docker-compose.yml` brings up infrastructure (`postgres`, `redis`) and three
+application processes built from the same image (`docker/Dockerfile`):
 
-| Servicio | Comando | Rol |
+| Service | Command | Role |
 |---|---|---|
-| `migrate` | `alembic upgrade head` | Aplica las migraciones y termina. El resto espera a que acabe con éxito (`service_completed_successfully`). |
-| `baseline-worker` | `python -m app.baseline` | Sincroniza el estado canónico (cvelistV5 + delta NVD 2.0 + EPSS) en bucle con APScheduler. |
-| `sources-worker` | `python -m app.sources` | Ejecuta los fetchers habilitados en sus cadencias; ingesta menciones y enriquece candidates. |
+| `migrate` | `alembic upgrade head` | Applies the migrations and exits. Everything else waits for it to finish successfully (`service_completed_successfully`). |
+| `baseline-worker` | `python -m app.baseline` | Syncs the canonical state (cvelistV5 + NVD 2.0 delta + EPSS) in a loop with APScheduler. |
+| `sources-worker` | `python -m app.sources` | Runs the enabled fetchers on their cadences; ingests mentions and enriches candidates. |
 
-`migrate` es un job efímero de un solo uso; los dos workers son procesos de
-larga duración (`restart: unless-stopped`). Ambos workers y `migrate`
-comparten el volumen `data:/data` (HTML crudo, clon de cvelistV5, cachés de
-GitHub) y apuntan al mismo `DATABASE_URL`.
+`migrate` is an ephemeral, single-use job; the two workers are long-running
+processes (`restart: unless-stopped`). Both workers and `migrate`
+share the `data:/data` volume (raw HTML, cvelistV5 clone, GitHub
+caches) and point to the same `DATABASE_URL`.
 
-- **`app/baseline/__main__.py`** — `AsyncIOScheduler` con tres jobs
-  (`_cvelist_job`, `_nvd_job`, `_epss_job`) a las cadencias de `Settings`
+- **`app/baseline/__main__.py`** — `AsyncIOScheduler` with three jobs
+  (`_cvelist_job`, `_nvd_job`, `_epss_job`) at the cadences from `Settings`
   (`cvelist_sync_seconds=900`, `nvd_delta_seconds=7200`,
-  `epss_sync_seconds=86400`). Hace una pasada inicial inmediata al arrancar.
-- **`app/sources/__main__.py`** — al arrancar llama a `sync_registry_to_db()`
-  (registra los fetchers del código en la tabla `sources`) y programa cada
-  fuente `enabled` con su `cadence_seconds` (con `jitter=30`,
+  `epss_sync_seconds=86400`). Runs an immediate first pass on startup.
+- **`app/sources/__main__.py`** — on startup it calls `sync_registry_to_db()`
+  (registers the code's fetchers in the `sources` table) and schedules each
+  `enabled` source at its `cadence_seconds` (with `jitter=30`,
   `max_instances=1`).
 
 ---
 
-## Flujo de datos: fuente → ingesta → candidate → enriquecimiento
+## Data flow: source → ingestion → candidate → enrichment
 
 ```
                  ┌──────────────────── baseline-worker ─────────────────────┐
                  │  cvelistV5 (git shallow)  NVD 2.0 delta   EPSS (FIRST)    │
                  │        │                      │              │            │
                  │        └──────────► published_cves ◄─────────┘            │
-                 │            (estado canónico + observación propia NVD)     │
+                 │            (canonical state + own NVD observation)        │
                  └───────────────────────────┬──────────────────────────────┘
-                                             │ reconciliación por cve_id (lookup, sin FK)
+                                             │ reconciliation by cve_id (lookup, no FK)
                                              ▼
  ┌──────────────────── sources-worker ───────────────────────────────────────┐
  │                                                                            │
- │  BaseSource.fetch(ctx) ──► list[FetchedMention]   (Capa 2: captación)      │
+ │  BaseSource.fetch(ctx) ──► list[FetchedMention]   (Layer 2: capture)       │
  │  certcc_vu · redhat_csaf · nessus · github_advisories · thehackernews ·    │
  │  github_commits                                                            │
  │        │                                                                   │
  │        ▼  ingest_mention()   (app/ingest/service.py)                       │
  │   1. extract_identifiers()  (regex: CVE, ZDI-CAN, VU#, GHSA, GHCOMMIT…)    │
- │   2. resolve_candidate()    (union-find sobre identifiers)                 │
- │   3. content_hash()         (idempotencia por extracto, no por HTML crudo) │
+ │   2. resolve_candidate()    (union-find over identifiers)                  │
+ │   3. content_hash()         (idempotency by excerpt, not raw HTML)         │
  │   4. persist raw_html + INSERT mention                                     │
  │   5. _refresh_aggregates() + compute_days_ahead()                          │
  │        │                                                                   │
  │        ▼                                                                   │
  │   candidates ◄── identifiers ◄── mentions                                  │
  │        │                                                                   │
- │        ▼  enrich_candidate()  (Capa 3: app/enrichment/service.py)          │
- │   LLM extrae MÉTRICAS ─► cvss_scores (autoritativo + derivado)             │
- │                       ─► affected_products (canonicalización por alias)    │
+ │        ▼  enrich_candidate()  (Layer 3: app/enrichment/service.py)         │
+ │   LLM extracts METRICS ─► cvss_scores (authoritative + derived)            │
+ │                       ─► affected_products (canonicalization by alias)     │
  └────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Las **capas** del sistema:
+The system's **layers**:
 
-- **Capa 1 — Baseline**: `published_cves`, `epss_scores` (verdad canónica).
-- **Capa 2 — Captación e ingesta**: fuentes → `mentions` → `candidates` /
+- **Layer 1 — Baseline**: `published_cves`, `epss_scores` (canonical truth).
+- **Layer 2 — Capture and ingestion**: sources → `mentions` → `candidates` /
   `identifiers`.
-- **Capa 3 — Enriquecimiento**: LLM + CVSS + canonicalización de producto.
+- **Layer 3 — Enrichment**: LLM + CVSS + product canonicalization.
 
 ---
 
-## El concepto CLAVE: `candidate` desacoplado del CVE
+## The KEY concept: `candidate` decoupled from the CVE
 
-La unidad de rastreo **no es el CVE, es el `candidate`** (tabla `candidates`).
-Un candidate puede existir **antes** de que exista un CVE, anclado por un
-**identificador nativo** distinto del CVE:
+The tracking unit **is not the CVE, it is the `candidate`** (`candidates` table).
+A candidate can exist **before** a CVE exists, anchored by a
+**native identifier** other than the CVE:
 
-- `ZDI-CAN-nnnnn` — reserva interna de la Zero Day Initiative, previa al CVE.
-- `VU#nnnnnn` — nota de CERT/CC.
-- `GHCOMMIT:owner/repo@sha` — identificador **sintético** que ancla un fix de
-  seguridad sin CVE detectado en commits de GitHub (ver `SOURCES.md`).
+- `ZDI-CAN-nnnnn` — internal Zero Day Initiative reservation, prior to the CVE.
+- `VU#nnnnnn` — CERT/CC note.
+- `GHCOMMIT:owner/repo@sha` — **synthetic** identifier that anchors a security
+  fix without a detected CVE from GitHub commits (see `SOURCES.md`).
 
-Cuando más tarde aparece el CVE (en otra mención, o en el baseline), la
-**reconciliación** (`app/ingest/reconcile.py`) fusiona por union-find los
-candidates que comparten identificadores, y el campo `candidates.cve_id` se
-rellena por *lookup* — **no** por integridad referencial. Por eso `cve_id` es
-una **referencia blanda** (la migración `0003_soft_cve_ref.py` elimina el FK a
-`published_cves`): un CVE puede estar solo RESERVADO y no ingerido todavía, y
-aun así queremos registrar la señal. Ver `DESIGN_DECISIONS.md`.
+When the CVE later appears (in another mention, or in the baseline), the
+**reconciliation** (`app/ingest/reconcile.py`) merges via union-find the
+candidates that share identifiers, and the `candidates.cve_id` field is
+filled by *lookup* — **not** by referential integrity. That is why `cve_id` is
+a **soft reference** (the `0003_soft_cve_ref.py` migration drops the FK to
+`published_cves`): a CVE may be only RESERVED and not ingested yet, and
+we still want to record the signal. See `DESIGN_DECISIONS.md`.
 
-Ciclo de vida del `status` de un candidate:
-`candidate` → `emerging` (≥1 mención) → `published` (el CVE aparece PUBLISHED en
-el baseline) — con `merged` para los tombstones de fusión y `rejected` como
-estado terminal posible.
+Lifecycle of a candidate's `status`:
+`candidate` → `emerging` (≥1 mention) → `published` (the CVE appears PUBLISHED in
+the baseline) — with `merged` for merge tombstones and `rejected` as a possible
+terminal state.
 
 ---
 
-## Los tres `days_ahead` y por qué `present` es la métrica robusta
+## The three `days_ahead` and why `present` is the robust metric
 
-Al reconciliar un candidate con su CVE, `compute_days_ahead()`
-(`app/ingest/service.py`) calcula tres deltas entre la **primera vez que
-CVERadar vio la señal** (`candidate.first_seen_at`) y tres hitos de NVD:
+When reconciling a candidate with its CVE, `compute_days_ahead()`
+(`app/ingest/service.py`) computes three deltas between the **first time
+CVERadar saw the signal** (`candidate.first_seen_at`) and three NVD
+milestones:
 
-| Columna | Contra qué timestamp de NVD | Naturaleza |
+| Column | Against which NVD timestamp | Nature |
 |---|---|---|
-| `days_ahead_vs_nvd_published` | `nvd_published_at` | Fecha **auto-reportada** por NVD. Sensible a *backfill*. |
-| `days_ahead_vs_nvd_present` | `nvd_first_observed_at` | **Observación propia**: cuándo lo vimos por primera vez en NVD. |
-| `days_ahead_vs_nvd_analyzed` | `nvd_first_analyzed_observed_at` | Cuándo lo vimos por primera vez en estado `Analyzed`. |
+| `days_ahead_vs_nvd_published` | `nvd_published_at` | Date **self-reported** by NVD. Sensitive to *backfill*. |
+| `days_ahead_vs_nvd_present` | `nvd_first_observed_at` | **Own observation**: when we first saw it in NVD. |
+| `days_ahead_vs_nvd_analyzed` | `nvd_first_analyzed_observed_at` | When we first saw it in `Analyzed` state. |
 
-El problema del *backfill*: NVD puede publicar hoy un CVE con un
-`published` fechado en el pasado, o reescribir fechas retroactivamente. Un
-delta calculado contra `nvd_published_at` puede quedar distorsionado o incluso
-negativo por esos reajustes.
+The *backfill* problem: NVD may publish a CVE today with a
+`published` date set in the past, or rewrite dates retroactively. A
+delta computed against `nvd_published_at` may end up distorted or even
+negative because of those adjustments.
 
-`nvd_first_observed_at` es **ground truth propio**: lo fija el módulo NVD
-(`app/baseline/nvd.py`) con `COALESCE(existing, observed_at)` la **primera** vez
-que CVERadar ve el CVE en el delta feed, y **nunca se pisa** en observaciones
-posteriores. Es inmune al backfill porque mide un hecho de nuestro propio reloj:
-"a esta hora, este CVE ya estaba en NVD para nosotros". Por eso
-`days_ahead_vs_nvd_present` es la métrica de ventaja robusta, y es la que la CLI
-(`emerging`, `stats`) y la vista `radar` muestran por defecto.
+`nvd_first_observed_at` is **our own ground truth**: it is set by the NVD module
+(`app/baseline/nvd.py`) with `COALESCE(existing, observed_at)` the **first** time
+CVERadar sees the CVE in the delta feed, and is **never overwritten** in later
+observations. It is immune to backfill because it measures a fact from our own clock:
+"at this time, this CVE was already in NVD for us". That is why
+`days_ahead_vs_nvd_present` is the robust lead metric, and it is the one the CLI
+(`emerging`, `stats`) and the `radar` view show by default.

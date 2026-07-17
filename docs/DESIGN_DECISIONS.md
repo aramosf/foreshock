@@ -1,156 +1,155 @@
-# Decisiones de diseño
+# Design decisions
 
-Registro de las decisiones no obvias de CVERadar y su porqué. Cada una remite al
-código que la implementa.
-
----
-
-## 1. El `candidate` está desacoplado del CVE
-
-**Decisión**: la unidad de rastreo es `candidates`, no el CVE. Un candidate
-puede existir **antes** de que exista su CVE, anclado por un identificador
-nativo (`ZDI-CAN`, `VU#`, `GHCOMMIT`, …).
-
-**Por qué**: la premisa del radar es captar la señal temprana. Muchas señales
-(reservas ZDI, notas de CERT/CC, fixes en commits) preceden a la asignación
-pública del CVE. Si la clave primaria fuera el CVE, no habría dónde registrar esa
-ventana. Cuando el CVE aparece, la reconciliación fusiona los candidates.
-
-*Código*: `app/core/models.py::Candidate`, `app/ingest/reconcile.py`.
+A record of CVERadar's non-obvious decisions and their rationale. Each one points
+to the code that implements it.
 
 ---
 
-## 2. `content_hash` sobre el extracto, no sobre el HTML crudo
+## 1. The `candidate` is decoupled from the CVE
 
-**Decisión**: la idempotencia de menciones (`UNIQUE(source_id, content_hash)`)
-se calcula hasheando `cve + native + title + snippet + url canónica`
-normalizados, **no** el HTML de la página.
+**Decision**: the tracking unit is `candidates`, not the CVE. A candidate can
+exist **before** its CVE exists, anchored by a native identifier (`ZDI-CAN`,
+`VU#`, `GHCOMMIT`, …).
 
-**Por qué**: el HTML crudo cambia en cada fetch (timestamps, anuncios, tokens
-CSRF), lo que crearía una mención nueva cada vez. El extracto semántico es
-estable ante re-listados idénticos y solo cambia cuando cambia el contenido
-real, que sí merece una entrada nueva en el timeline.
+**Why**: the radar's premise is to capture the early signal. Many signals (ZDI
+reservations, CERT/CC notes, commit fixes) precede the public CVE assignment. If
+the primary key were the CVE, there would be nowhere to record that window. When
+the CVE appears, reconciliation merges the candidates.
 
-*Código*: `app/ingest/hashing.py`.
+*Code*: `app/core/models.py::Candidate`, `app/ingest/reconcile.py`.
 
 ---
 
-## 3. El CVSS se calcula, no se adivina
+## 2. `content_hash` over the extract, not the raw HTML
 
-**Decisión**: el LLM devuelve las **métricas base** CVSS; el score se calcula con
-la librería `cvss`. Los vectores autoritativos se extraen por regex del texto de
-la fuente. Nunca se pide al LLM un número.
+**Decision**: mention idempotency (`UNIQUE(source_id, content_hash)`) is computed
+by hashing `cve + native + title + snippet + canonical url` normalized, **not**
+the page HTML.
 
-**Por qué**: un score CVSS es determinista dado su vector. Pedir el número al LLM
-introduce alucinación y hace irreproducible el resultado. Separar "extraer
-métricas" (juicio) de "calcular score" (aritmética) da resultados auditables:
-`provenance='authoritative'` (vector verbatim) o `'derived'` (métricas LLM), y un
-`severity_hint` cualitativo solo cuando no hay número.
+**Why**: raw HTML changes on every fetch (timestamps, ads, CSRF tokens), which
+would create a new mention every time. The semantic extract is stable across
+identical re-listings and only changes when the real content changes, which does
+deserve a new timeline entry.
 
-*Código*: `app/enrichment/cvss.py`, `app/enrichment/schema.py`,
+*Code*: `app/ingest/hashing.py`.
+
+---
+
+## 3. CVSS is computed, not guessed
+
+**Decision**: the LLM returns the CVSS **base metrics**; the score is computed
+with the `cvss` library. Authoritative vectors are extracted by regex from the
+source text. The LLM is never asked for a number.
+
+**Why**: a CVSS score is deterministic given its vector. Asking the LLM for the
+number introduces hallucination and makes the result irreproducible. Separating
+"extract metrics" (judgment) from "compute score" (arithmetic) yields auditable
+results: `provenance='authoritative'` (verbatim vector) or `'derived'` (LLM
+metrics), and a qualitative `severity_hint` only when there is no number.
+
+*Code*: `app/enrichment/cvss.py`, `app/enrichment/schema.py`,
 `app/enrichment/service.py`.
 
 ---
 
-## 4. `days_ahead` vs observación propia (`present`)
+## 4. `days_ahead` vs own observation (`present`)
 
-**Decisión**: se guardan tres deltas de ventaja, pero la métrica de referencia es
-`days_ahead_vs_nvd_present`, medida contra `nvd_first_observed_at` (cuándo
-CVERadar vio por primera vez el CVE en NVD), no contra `nvd_published_at`.
+**Decision**: three edge deltas are stored, but the reference metric is
+`days_ahead_vs_nvd_present`, measured against `nvd_first_observed_at` (when
+CVERadar first saw the CVE in NVD), not against `nvd_published_at`.
 
-**Por qué**: NVD hace *backfill* — publica CVEs con fechas retroactivas o
-reescribe timestamps. Un delta contra `nvd_published_at` queda distorsionado.
-`nvd_first_observed_at` es ground truth de nuestro propio reloj, se sella una
-sola vez con `COALESCE` y es inmune al backfill.
+**Why**: NVD does *backfill* — it publishes CVEs with retroactive dates or
+rewrites timestamps. A delta against `nvd_published_at` would be distorted.
+`nvd_first_observed_at` is ground truth from our own clock, sealed a single time
+with `COALESCE` and immune to backfill.
 
-*Código*: `app/baseline/nvd.py::upsert_nvd`,
+*Code*: `app/baseline/nvd.py::upsert_nvd`,
 `app/ingest/service.py::compute_days_ahead`.
 
 ---
 
-## 5. Canonicalización: el LLM como *linker*, no como corrector
+## 5. Canonicalization: the LLM as a *linker*, not a corrector
 
-**Decisión**: para canonicalizar nombres de producto, el LLM **elige entre
-candidatos existentes** del catálogo (o "ninguno"); nunca reescribe texto libre.
-Las resoluciones confirmadas se guardan como `product_aliases` para resolver de
-forma determinista la próxima vez.
+**Decision**: to canonicalize product names, the LLM **chooses among existing
+candidates** from the catalog (or "none"); it never rewrites free text. Confirmed
+resolutions are stored as `product_aliases` so they resolve deterministically
+next time.
 
-**Por qué**: un LLM corrigiendo nombres alucina productos inexistentes y produce
-salidas no reproducibles, veneno para el dedup y el `cluster_fingerprint`.
-Restringirlo a una elección acotada mantiene el resultado determinista y hace que
-el sistema **aprenda** (cada acierto se convierte en un alias barato de Capa 1).
+**Why**: an LLM correcting names hallucinates nonexistent products and produces
+non-reproducible outputs, poison for the dedup and the `cluster_fingerprint`.
+Constraining it to a bounded choice keeps the result deterministic and makes the
+system **learn** (each hit becomes a cheap Layer 1 alias).
 
-*Código*: `app/enrichment/normalize.py`, `app/enrichment/service.py::_resolve_alias`,
-migración `0002` (`product_catalog`, `product_aliases`).
-
----
-
-## 6. FK blanda de `candidates.cve_id`
-
-**Decisión**: `candidates.cve_id` **no** tiene FK a `published_cves`. La
-migración `0003_soft_cve_ref.py` elimina el constraint
-`candidates_cve_id_fkey`.
-
-**Por qué**: un candidate puede referenciar un CVE solo RESERVADO y aún no
-ingerido por el baseline (o que MITRE/NVD no publican todavía). Un FK duro
-rechazaría el INSERT y bloquearía justo la señal temprana que es la razón de ser
-del proyecto. La reconciliación se hace por *lookup*
-(`session.get(PublishedCVE, cve_id)`), no por integridad referencial. El índice
-`idx_cand_cve` sostiene ese lookup.
-
-*Código*: `migrations/versions/0003_soft_cve_ref.py`.
+*Code*: `app/enrichment/normalize.py`, `app/enrichment/service.py::_resolve_alias`,
+migration `0002` (`product_catalog`, `product_aliases`).
 
 ---
 
-## 7. Fusión reversible (union-find con tombstone) vs enlace difuso propuesto
+## 6. Soft FK on `candidates.cve_id`
 
-**Decisión**: dos mecanismos de correlación distintos.
-- **Determinista** (mismo `(scheme, value)`): fusión real por union-find; el
-  perdedor queda como *tombstone* (`merged_into`, `status='merged'`), **no se
-  borra** → reversible.
-- **Difuso** (nombres/huellas parecidas): `candidate_links` solo **propone** un
-  enlace (`status='suggested'`), no fusiona nada.
+**Decision**: `candidates.cve_id` has **no** FK to `published_cves`. The
+migration `0003_soft_cve_ref.py` drops the `candidates_cve_id_fkey` constraint.
 
-**Por qué**: la evidencia determinista (un identificador compartido) justifica
-fusionar; la similitud difusa no, porque un falso positivo mezclaría dos vulns
-distintas de forma difícil de deshacer. Mantener la fusión reversible y separar
-lo difuso como sugerencia protege la integridad de los datos.
+**Why**: a candidate may reference a CVE that is only RESERVED and not yet
+ingested by the baseline (or that MITRE/NVD have not published yet). A hard FK
+would reject the INSERT and block precisely the early signal that is the
+project's reason to exist. Reconciliation is done via *lookup*
+(`session.get(PublishedCVE, cve_id)`), not via referential integrity. The
+`idx_cand_cve` index backs that lookup.
 
-*Código*: `app/ingest/reconcile.py::merge_candidates`, migración `0001`
+*Code*: `migrations/versions/0003_soft_cve_ref.py`.
+
+---
+
+## 7. Reversible merge (union-find with tombstone) vs proposed fuzzy link
+
+**Decision**: two different correlation mechanisms.
+- **Deterministic** (same `(scheme, value)`): a real union-find merge; the loser
+  is kept as a *tombstone* (`merged_into`, `status='merged'`), **not deleted** →
+  reversible.
+- **Fuzzy** (similar names/fingerprints): `candidate_links` only **proposes** a
+  link (`status='suggested'`), it merges nothing.
+
+**Why**: deterministic evidence (a shared identifier) justifies a merge; fuzzy
+similarity does not, because a false positive would blend two distinct vulns in a
+way that is hard to undo. Keeping the merge reversible and separating the fuzzy
+part as a suggestion protects data integrity.
+
+*Code*: `app/ingest/reconcile.py::merge_candidates`, migration `0001`
 (`candidate_links`).
 
 ---
 
-## 8. Migraciones reversibles y escritas a mano
+## 8. Reversible, hand-written migrations
 
-**Decisión**: las migraciones Alembic son la **fuente de verdad** del esquema,
-escritas a mano, con `downgrade()` completo. `env.py` usa
-`target_metadata=None` (sin autogenerate). Los modelos SQLModel son solo un
-mapeo ORM.
+**Decision**: the Alembic migrations are the schema's **source of truth**,
+written by hand, with a complete `downgrade()`. `env.py` uses
+`target_metadata=None` (no autogenerate). The SQLModel models are just an ORM
+mapping.
 
-**Por qué**: escribir el DDL a mano permite features de Postgres que el
-autogenerate no maneja bien (índices parciales, `NULLS NOT DISTINCT`, vistas,
-CHECKs con expresiones). Que los modelos no dirijan el esquema evita que un
-cambio accidental en el ORM "cree" o altere tablas. Cada migración es reversible
-para poder hacer rollback limpio.
+**Why**: writing the DDL by hand allows Postgres features that autogenerate does
+not handle well (partial indexes, `NULLS NOT DISTINCT`, views, CHECKs with
+expressions). Having the models not drive the schema prevents an accidental ORM
+change from "creating" or altering tables. Each migration is reversible so a
+clean rollback is possible.
 
-*Código*: `migrations/versions/*.py`, `migrations/env.py`,
+*Code*: `migrations/versions/*.py`, `migrations/env.py`,
 `app/core/models.py` (docstring).
 
 ---
 
-## 9. Aislamiento de fallos de fetchers y fuentes
+## 9. Isolation of fetcher and source failures
 
-**Decisión**: un fetcher que lanza excepción **no tumba el worker**. `run_source`
-captura la excepción del `fetch`, la loguea, registra `last_error`/`last_error_at`
-en `sources` y devuelve métricas vacías. El baseline aísla igual sus tres
-fuentes; el scan de github aísla por repo.
+**Decision**: a fetcher that raises an exception **does not take down the
+worker**. `run_source` catches the `fetch` exception, logs it, records
+`last_error`/`last_error_at` in `sources` and returns empty metrics. The baseline
+isolates its three sources the same way; the github scan isolates per repo.
 
-**Por qué**: con muchas fuentes heterogéneas (APIs que cambian, HTML que se
-rompe, rate limits), el fallo de una no debe interrumpir la recolección del
-resto. El worker sigue vivo y la fuente rota queda marcada para diagnóstico.
+**Why**: with many heterogeneous sources (APIs that change, HTML that breaks,
+rate limits), the failure of one must not interrupt collection of the rest. The
+worker stays alive and the broken source is flagged for diagnosis.
 
-*Código*: `app/sources/runner.py::run_source`,
+*Code*: `app/sources/runner.py::run_source`,
 `app/baseline/service.py::run_baseline_async`,
-`app/sources/github_commits.py` (try/except por repo),
-`app/sources/__main__.py` (doble red de seguridad).
+`app/sources/github_commits.py` (try/except per repo),
+`app/sources/__main__.py` (double safety net).

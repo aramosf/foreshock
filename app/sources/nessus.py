@@ -29,7 +29,12 @@ class NessusSource(BaseSource):
     cadence_seconds = 7200
 
     async def fetch(self, ctx: FetchContext) -> list[FetchedMention]:
-        resp = await get(ctx.http, LISTING)
+        # Tenable rechaza GETs "desnudos" (400); enviamos cabeceras de navegador.
+        headers = {
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        resp = await get(ctx.http, LISTING, headers=headers)
         html = resp.text
         tree = HTMLParser(html)
         out: list[FetchedMention] = []

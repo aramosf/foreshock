@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     github_commits_months: int = Field(default=5)     # ventana de changelog a escanear
     github_repos_per_run: int = Field(default=150)    # repos por ejecución (crawl incremental)
     github_synthesize_candidates: bool = Field(default=True)  # candidate pre-CVE en fixes sin CVE
+    github_advisories_max_pages: int = Field(default=30)  # paginación GHSA (100/pág -> ~3000)
 
     # --- Fetchers / scraping educado ---
     user_agent: str = Field(

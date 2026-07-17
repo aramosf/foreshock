@@ -1,39 +1,39 @@
 # CLI — `cveradar`
 
-CLI de operación y consulta (Typer + Rich), definida en `app/cli.py` y expuesta
-como script `cveradar` (`pyproject.toml [project.scripts]`). Dentro del
-contenedor se invoca igual (`cveradar …`) o con `python -m app.cli`.
+Operations and query CLI (Typer + Rich), defined in `app/cli.py` and exposed as
+the `cveradar` script (`pyproject.toml [project.scripts]`). Inside the container
+it is invoked the same way (`cveradar …`) or with `python -m app.cli`.
 
-Estructura de subcomandos: `db`, `sources`, `baseline`, más los comandos de
-consulta de primer nivel `emerging`, `cve`, `enrich`, `stats`.
+Subcommand structure: `db`, `sources`, `baseline`, plus the top-level query
+commands `emerging`, `cve`, `enrich`, `stats`.
 
 ---
 
-## `db` — base de datos / migraciones
+## `db` — database / migrations
 
 ```bash
 cveradar db init          # alembic upgrade head
 ```
 
-`db init` ejecuta `alembic upgrade head` y propaga el código de salida.
+`db init` runs `alembic upgrade head` and propagates the exit code.
 
 ---
 
-## `sources` — gestión de fuentes
+## `sources` — source management
 
 ```bash
-cveradar sources sync                 # registra los fetchers del código en la tabla sources
-cveradar sources list                 # lista fuentes y su estado
-cveradar sources enable <name>        # activa una fuente
-cveradar sources disable <name>       # desactiva una fuente
-cveradar sources run <name>           # ejecuta un fetcher una vez e imprime métricas
+cveradar sources sync                 # registers the code's fetchers into the sources table
+cveradar sources list                 # lists sources and their state
+cveradar sources enable <name>        # enables a source
+cveradar sources disable <name>       # disables a source
+cveradar sources run <name>           # runs a fetcher once and prints metrics
 ```
 
-- `sources sync` → `sync_registry_to_db()` (crea/actualiza filas; no pisa
-  `cadence_seconds`).
-- `sources list` muestra `name / tier / method / enabled / cadence /
+- `sources sync` → `sync_registry_to_db()` (creates/updates rows; does not
+  overwrite `cadence_seconds`).
+- `sources list` shows `name / tier / method / enabled / cadence /
   last_success / last_error`.
-- `sources run` → `run_source(name)` (async) e imprime
+- `sources run` → `run_source(name)` (async) and prints
   `{"fetched", "created", "duplicate"}`.
 
 ```bash
@@ -43,20 +43,20 @@ cveradar sources run redhat_csaf
 
 ---
 
-## `baseline` — sincronización del estado canónico
+## `baseline` — canonical state synchronization
 
 ```bash
-cveradar baseline sync                        # cvelistV5 + NVD + EPSS, una pasada
-cveradar baseline sync --nvd-hours 6          # ventana del delta NVD (default 3)
-cveradar baseline sync --full-cvelist         # reprocesa todo cvelistV5 (default False)
+cveradar baseline sync                        # cvelistV5 + NVD + EPSS, one pass
+cveradar baseline sync --nvd-hours 6          # NVD delta window (default 3)
+cveradar baseline sync --full-cvelist         # reprocess all of cvelistV5 (default False)
 ```
 
-Llama a `run_baseline_once(nvd_hours=…, force_full_cvelist=…)` e imprime las
-métricas por fuente.
+Calls `run_baseline_once(nvd_hours=…, force_full_cvelist=…)` and prints the
+per-source metrics.
 
 ---
 
-## `emerging` — candidates emergentes (con filtros)
+## `emerging` — emerging candidates (with filters)
 
 ```bash
 cveradar emerging list
@@ -64,59 +64,59 @@ cveradar emerging list --since 24h --tier 1 --min-mentions 2
 cveradar emerging list --source certcc_vu --limit 100
 ```
 
-| Opción | Efecto |
+| Option | Effect |
 |---|---|
-| `--since` | Ventana relativa `Nh`/`Nd`/`Nw` (p.ej. `24h`, `7d`, `2w`) sobre `last_seen_at`. |
-| `--source` | Filtra por `sources.name` (join con `mentions`). |
-| `--tier` | Filtra por `sources.tier`. |
-| `--min-mentions` | Mínimo de `mention_count` (default `1`). |
-| `--limit` | Máximo de filas (default `50`). |
+| `--since` | Relative window `Nh`/`Nd`/`Nw` (e.g. `24h`, `7d`, `2w`) over `last_seen_at`. |
+| `--source` | Filters by `sources.name` (join with `mentions`). |
+| `--tier` | Filters by `sources.tier`. |
+| `--min-mentions` | Minimum `mention_count` (default `1`). |
+| `--limit` | Maximum number of rows (default `50`). |
 
-Solo lista candidates vivos (`merged_into IS NULL`), ordenados por
-`last_seen_at DESC`. Columnas: `cve/id`, `status`, `vuln`, `sev` (mejor
-`base_score` o `severity_hint`), `mentions`, `sources`, `days_ahead`
+Only lists live candidates (`merged_into IS NULL`), ordered by `last_seen_at
+DESC`. Columns: `cve/id`, `status`, `vuln`, `sev` (best `base_score` or
+`severity_hint`), `mentions`, `sources`, `days_ahead`
 (`days_ahead_vs_nvd_present`), `last_seen`.
 
-> Nota: el argumento posicional `action` solo acepta `list`.
+> Note: the positional argument `action` only accepts `list`.
 
 ---
 
-## `cve show` — timeline y enriquecimiento
+## `cve show` — timeline and enrichment
 
 ```bash
 cveradar cve show CVE-2026-12345
-cveradar cve show 3f8e...-uuid        # también acepta un UUID de candidate
+cveradar cve show 3f8e...-uuid        # also accepts a candidate UUID
 ```
 
-`_find_candidate` busca por `cve_id` (uppercased) y, si no, interpreta la clave
-como UUID de candidate. Imprime: status, enriquecimiento (`vuln`, `vector`,
-`poc`, `hint`), `days_ahead` present/analyzed, lista de `identifiers`, tabla de
-`cvss_scores` (version/score/sev/provenance/source), último EPSS y el
-**timeline** de menciones (`seen_at`, source, title, url).
+`_find_candidate` looks up by `cve_id` (uppercased) and, failing that,
+interprets the key as a candidate UUID. It prints: status, enrichment (`vuln`,
+`vector`, `poc`, `hint`), `days_ahead` present/analyzed, the list of
+`identifiers`, a `cvss_scores` table (version/score/sev/provenance/source), the
+latest EPSS and the mentions **timeline** (`seen_at`, source, title, url).
 
 ---
 
-## `enrich` — enriquecer un candidate
+## `enrich` — enrich a candidate
 
 ```bash
 cveradar enrich CVE-2026-12345
 cveradar enrich <uuid-candidate>
 ```
 
-Localiza el candidate y ejecuta `enrich_candidate` (LLM + CVSS). Imprime
-`enriquecido` o `sin datos`. El proveedor LLM depende de `CVERADAR_LLM_PROVIDER`
-(default `mock`, sin red).
+Locates the candidate and runs `enrich_candidate` (LLM + CVSS). Prints
+`enriquecido` or `sin datos`. The LLM provider depends on
+`CVERADAR_LLM_PROVIDER` (default `mock`, no network).
 
 ---
 
-## `stats` — métricas de ventaja
+## `stats` — edge metrics
 
 ```bash
 cveradar stats
 ```
 
-Imprime:
-- Total de candidates, promovidos (`status='published'`) y tasa de promoción.
-- **Días de ventaja medios por fuente** (vs NVD *present*): `AVG(
-  days_ahead_vs_nvd_present)` agrupado por `sources.name`, ordenado
-  descendente, con el nº de candidates distintos por fuente.
+Prints:
+- Total candidates, promoted (`status='published'`) and promotion rate.
+- **Average days of edge per source** (vs NVD *present*):
+  `AVG(days_ahead_vs_nvd_present)` grouped by `sources.name`, sorted descending,
+  with the number of distinct candidates per source.

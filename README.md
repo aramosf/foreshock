@@ -1,41 +1,40 @@
 # CVERadar
 
-**Radar temprano de vulnerabilidades**: detecta, correlaciona y enriquece CVEs
-*antes* de que MITRE/NVD los publiquen oficialmente, midiendo los "días de
-ventaja" sobre NVD por fuente.
+**Early vulnerability radar**: detects, correlates and enriches CVEs
+*before* MITRE/NVD publish them officially, measuring the "lead days"
+over NVD per source.
 
-Este repositorio es el **backend de carga de datos** (sin UI): workers que
-ingieren señal de fuentes públicas a una base de datos Postgres, un pipeline de
-ingesta/reconciliación, enriquecimiento por LLM + CVSS, y una CLI de operación.
+This repository is the **data ingestion backend** (no UI): workers that
+ingest signal from public sources into a Postgres database, an
+ingestion/reconciliation pipeline, LLM + CVSS enrichment, and an operations CLI.
 
 ---
 
-## Idea central
+## Core idea
 
-La unidad de rastreo es el **`candidate`**, que **puede existir antes de que haya
-un CVE**. Un aviso de ZDI (`ZDI-CAN-…`), una nota de CERT/CC (`VU#…`) o un commit
-de seguridad en un repo popular (`GHCOMMIT:owner/repo@sha`) crean un candidate
-que luego se **reconcilia** con el CVE cuando este aparece. Sobre esa base se
-calcula el KPI estrella: **`days_ahead_vs_nvd_present`** — cuánto antes vimos la
-señal frente a la primera vez que *nosotros* observamos el CVE en NVD (robusto
-frente al backfill de fechas de NVD).
+The tracking unit is the **`candidate`**, which **can exist before there is a
+CVE**. A ZDI advisory (`ZDI-CAN-…`), a CERT/CC note (`VU#…`) or a security commit
+in a popular repo (`GHCOMMIT:owner/repo@sha`) create a candidate that is later
+**reconciled** with the CVE when it appears. On top of that we compute the flagship
+KPI: **`days_ahead_vs_nvd_present`** — how much earlier we saw the signal versus the
+first time *we* observed the CVE in NVD (robust against NVD date backfill).
 
-Ver [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) y
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and
 [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md).
 
-## Arquitectura (docker-compose)
+## Architecture (docker-compose)
 
-| Servicio | Rol |
+| Service | Role |
 |---|---|
-| `postgres` | Postgres 16 — estado canónico y señal |
+| `postgres` | Postgres 16 — canonical state and signal |
 | `redis` | cache / rate-limit |
-| `migrate` | aplica migraciones Alembic y termina (los workers esperan a que acabe) |
-| `baseline-worker` | sincroniza cvelistV5 + NVD 2.0 + EPSS |
-| `sources-worker` | ejecuta los fetchers en sus cadencias e ingiere las menciones |
+| `migrate` | applies Alembic migrations and exits (workers wait for it to finish) |
+| `baseline-worker` | syncs cvelistV5 + NVD 2.0 + EPSS |
+| `sources-worker` | runs the fetchers on their cadences and ingests the mentions |
 
 ```mermaid
 flowchart LR
-    subgraph EXT["Fuentes externas"]
+    subgraph EXT["External sources"]
         direction TB
         CVELIST["cvelistV5"]
         NVD["NVD 2.0 delta"]
@@ -54,7 +53,7 @@ flowchart LR
         direction TB
         PUB["published_cves"]
         DATA["candidates · identifiers · mentions<br/>cvss_scores · epss_scores · affected_products"]
-        VIEW["vistas: radar · cvss_selected · epss_current"]
+        VIEW["views: radar · cvss_selected · epss_current"]
     end
     CLI["CLI cveradar"]
     CVELIST --> JOBS
@@ -65,7 +64,7 @@ flowchart LR
     INGEST --> DATA
     ENRICH --> DATA
     ENRICH <--> LLM
-    PUB -. "reconciliación cve_id (sin FK)" .-> DATA
+    PUB -. "cve_id reconciliation (no FK)" .-> DATA
     DATA --- VIEW
     CLI --> PG
 
@@ -77,63 +76,63 @@ flowchart LR
     class BW,SW,JOBS,FETCH,INGEST,ENRICH proc;
 ```
 
-Diagrama de componentes detallado en [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+Detailed component diagram in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Quickstart
 
 ```bash
-# Levanta todo: postgres + redis + migraciones + workers
+# Bring everything up: postgres + redis + migrations + workers
 docker compose up --build
 
-# Solo infraestructura para desarrollo
+# Infrastructure only, for development
 docker compose up -d postgres redis
-docker compose run --rm migrate            # aplica migraciones
+docker compose run --rm migrate            # apply migrations
 ```
 
-Operación con la CLI (`cveradar`, dentro de cualquier imagen del proyecto):
+Operation with the CLI (`cveradar`, inside any project image):
 
 ```bash
-cveradar sources sync                       # registra los fetchers en la BD
-cveradar sources list                       # estado de las fuentes
-cveradar sources run redhat_csaf            # ejecuta un fetcher una vez
-cveradar baseline sync                      # fuerza sync cvelist+NVD+EPSS
+cveradar sources sync                       # registers the fetchers in the DB
+cveradar sources list                       # source status
+cveradar sources run redhat_csaf            # run a fetcher once
+cveradar baseline sync                      # force cvelist+NVD+EPSS sync
 cveradar emerging list --since 24h --tier 1 --min-mentions 2
-cveradar cve show CVE-2026-12345            # timeline + enriquecimiento
+cveradar cve show CVE-2026-12345            # timeline + enrichment
 cveradar enrich CVE-2026-12345              # LLM + CVSS
-cveradar stats                              # días de ventaja por fuente
+cveradar stats                              # lead days per source
 ```
 
-## Fuentes implementadas (una por tier + GitHub commits)
+## Implemented sources (one per tier + GitHub commits)
 
-| Fuente | Tier | Método | Señal |
+| Source | Tier | Method | Signal |
 |---|---|---|---|
 | `certcc_vu` | 1 | rss | CERT/CC Vulnerability Notes (VU#) |
-| `redhat_csaf` | 2 | api | Red Hat Security Data (CVSS autoritativo) |
-| `nessus` | 3 | scrape | Tenable plugins (CVE reservado citado por scanner) |
-| `github_advisories` | 4 | api | GitHub Security Advisories (GHSA + paquetes) |
-| `github_commits` | 4 | api | **Top-N repos + changelog N meses** (CVE reservado / fix de seguridad pre-CVE) |
-| `thehackernews` | 5 | rss | Noticias de explotación activa |
+| `redhat_csaf` | 2 | api | Red Hat Security Data (authoritative CVSS) |
+| `nessus` | 3 | scrape | Tenable plugins (reserved CVE cited by scanner) |
+| `github_advisories` | 4 | api | GitHub Security Advisories (GHSA + packages) |
+| `github_commits` | 4 | api | **Top-N repos + N-month changelog** (reserved CVE / pre-CVE security fix) |
+| `thehackernews` | 5 | rss | Active-exploitation news |
 
-`github_commits` vigila los **top-N repos** (`CVERADAR_GITHUB_TOP_N`, por defecto
-10.000, escalable a 100.000+) y escanea sus commits de los últimos N meses. Es
-**cacheado e incremental**: la lista de repos se cachea (rebuild semanal), se
-procesan por lotes con un cursor rotatorio, y cada repo mantiene un *watermark*
-(última fecha de commit escaneada). Detecta commits que citan un CVE (a menudo
-reservado) y fixes de seguridad sin CVE, que quedan como candidates pre-CVE.
-Ver [`docs/SOURCES.md`](docs/SOURCES.md).
+`github_commits` watches the **top-N repos** (`CVERADAR_GITHUB_TOP_N`, default
+10,000, scalable to 100,000+) and scans their commits from the last N months. It is
+**cached and incremental**: the repo list is cached (weekly rebuild), processed
+in batches with a rotating cursor, and each repo keeps a *watermark*
+(last scanned commit date). It detects commits that cite a CVE (often
+reserved) and security fixes without a CVE, which become pre-CVE candidates.
+See [`docs/SOURCES.md`](docs/SOURCES.md).
 
-## Enriquecimiento (Capa 3)
+## Enrichment (Layer 3)
 
-El LLM (configurable: `mock`/`openai`/`anthropic`/`ollama`, mock por defecto sin
-API key) extrae **metadatos estructurados, no un número CVSS**. El CVSS sigue una
-precedencia de 3 niveles: **autoritativo** (vector extraído del texto de la
-fuente) → **derivado** (calculado desde métricas con la librería `cvss`) →
-**`severity_hint`** cualitativo. Ver [`docs/ENRICHMENT.md`](docs/ENRICHMENT.md).
+The LLM (configurable: `mock`/`openai`/`anthropic`/`ollama`, mock by default without
+an API key) extracts **structured metadata, not a CVSS number**. CVSS follows a
+3-level precedence: **authoritative** (vector extracted from the source text) →
+**derived** (computed from metrics with the `cvss` library) →
+qualitative **`severity_hint`**. See [`docs/ENRICHMENT.md`](docs/ENRICHMENT.md).
 
 ## Tests
 
 ```bash
-# 49 tests (unit + integración contra Postgres real)
+# 49 tests (unit + integration against a real Postgres)
 docker compose up -d postgres && docker compose run --rm migrate
 docker compose run --rm --no-deps \
   -e DATABASE_URL=postgresql+psycopg://cveradar:cveradar@postgres:5432/cveradar \
@@ -141,19 +140,19 @@ docker compose run --rm --no-deps \
   bash -lc "uv pip install --system -q pytest pytest-asyncio respx && pytest -q"
 ```
 
-## Documentación
+## Documentation
 
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — visión global y flujo de datos
-- [`docs/DATA_MODEL.md`](docs/DATA_MODEL.md) — esquema y decisiones por tabla
-- [`docs/INGESTION.md`](docs/INGESTION.md) — pipeline de ingesta y reconciliación
-- [`docs/SOURCES.md`](docs/SOURCES.md) — fetchers y cómo añadir uno
-- [`docs/ENRICHMENT.md`](docs/ENRICHMENT.md) — LLM + CVSS + normalización
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — overview and data flow
+- [`docs/DATA_MODEL.md`](docs/DATA_MODEL.md) — schema and per-table decisions
+- [`docs/INGESTION.md`](docs/INGESTION.md) — ingestion and reconciliation pipeline
+- [`docs/SOURCES.md`](docs/SOURCES.md) — fetchers and how to add one
+- [`docs/ENRICHMENT.md`](docs/ENRICHMENT.md) — LLM + CVSS + normalization
 - [`docs/BASELINE.md`](docs/BASELINE.md) — cvelistV5 + NVD + EPSS
-- [`docs/CLI.md`](docs/CLI.md) — referencia de comandos
-- [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — despliegue y operación
-- [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) — decisiones no obvias
+- [`docs/CLI.md`](docs/CLI.md) — command reference
+- [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — deployment and operation
+- [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) — non-obvious decisions
 
 ## Stack
 
 Python 3.12, SQLModel/SQLAlchemy 2, Alembic, Postgres 16, Redis, httpx, feedparser,
-selectolax, APScheduler, Playwright (opcional), Typer, structlog. Docker + docker-compose.
+selectolax, APScheduler, Playwright (optional), Typer, structlog. Docker + docker-compose.

@@ -7,11 +7,17 @@ rangos de versión -> alimenta affected_products de forma estructurada.
 
 from __future__ import annotations
 
+import re
+
+from app.core.config import get_settings
 from app.sources.base import BaseSource, FetchContext, register
 from app.sources.http import get
 from app.ingest.service import FetchedMention
 
 API = "https://api.github.com/advisories"
+
+# Extrae la URL de la página siguiente del header Link (paginación por cursor).
+_NEXT = re.compile(r'<([^>]+)>;\s*rel="next"')
 
 
 @register
@@ -23,14 +29,29 @@ class GitHubAdvisoriesSource(BaseSource):
     cadence_seconds = 3600
 
     async def fetch(self, ctx: FetchContext) -> list[FetchedMention]:
+        settings = get_settings()
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-        resp = await get(
-            ctx.http,
-            API,
-            params={"per_page": 100, "sort": "published", "direction": "desc"},
-            headers=headers,
-        )
-        data = resp.json()
+        if settings.github_token:
+            headers["Authorization"] = f"Bearer {settings.github_token}"
+
+        out: list[FetchedMention] = []
+        url: str | None = API
+        params: dict[str, object] | None = {
+            "per_page": 100, "sort": "published", "direction": "desc"
+        }
+        pages = 0
+        # Paginación por header Link hasta github_advisories_max_pages.
+        while url and pages < settings.github_advisories_max_pages:
+            resp = await get(ctx.http, url, params=params, headers=headers)
+            out.extend(self._parse(resp.json()))
+            pages += 1
+            m = _NEXT.search(resp.headers.get("Link", ""))
+            url = m.group(1) if m else None
+            params = None  # la URL 'next' ya lleva el cursor
+        return out
+
+    @staticmethod
+    def _parse(data: list[dict]) -> list[FetchedMention]:
         out: list[FetchedMention] = []
         for adv in data:
             ghsa = adv.get("ghsa_id")

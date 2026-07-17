@@ -1,31 +1,32 @@
-# Operación
+# Operations
 
-Backend de carga de datos sin UI. Todo se ejecuta con `docker compose` sobre
-Postgres 16 + Redis 7. Imagen común en `docker/Dockerfile` (Python 3.12-slim +
-`git` + deps con `uv`).
+Headless data-loading backend, no UI. Everything runs with `docker compose` on
+top of Postgres 16 + Redis 7. Common image in `docker/Dockerfile` (Python
+3.12-slim + `git` + deps via `uv`).
 
 ---
 
 ## Quickstart
 
 ```bash
-docker compose up            # levanta postgres, redis, migrate, y los 2 workers
+docker compose up            # brings up postgres, redis, migrate, and the 2 workers
 ```
 
-Orden de arranque (definido en `docker-compose.yml`):
+Startup order (defined in `docker-compose.yml`):
 
-1. `postgres` y `redis` arrancan y pasan su healthcheck.
-2. `migrate` corre `alembic upgrade head` y **termina**.
-3. `baseline-worker` (`python -m app.baseline`) y `sources-worker`
-   (`python -m app.sources`) arrancan solo cuando `migrate` acaba con éxito
-   (`service_completed_successfully`) y quedan en bucle (`restart:
+1. `postgres` and `redis` start and pass their healthcheck.
+2. `migrate` runs `alembic upgrade head` and **exits**.
+3. `baseline-worker` (`python -m app.baseline`) and `sources-worker`
+   (`python -m app.sources`) start only when `migrate` finishes successfully
+   (`service_completed_successfully`) and stay in a loop (`restart:
    unless-stopped`).
 
-El `baseline-worker` hace una pasada inicial inmediata y luego programa
-cvelist/NVD/EPSS a sus cadencias. El `sources-worker` registra los fetchers en
-la tabla `sources` (`sync_registry_to_db`) y programa cada fuente habilitada.
+The `baseline-worker` makes an immediate initial pass and then schedules
+cvelist/NVD/EPSS at their cadences. The `sources-worker` registers the fetchers
+into the `sources` table (`sync_registry_to_db`) and schedules each enabled
+source.
 
-Para operar manualmente dentro de un contenedor:
+To operate manually inside a container:
 
 ```bash
 docker compose run --rm baseline-worker cveradar sources list
@@ -35,20 +36,20 @@ docker compose run --rm baseline-worker cveradar emerging list --since 24h --tie
 
 ---
 
-## Variables de entorno
+## Environment variables
 
-Config centralizada en `app/core/config.py` (`pydantic-settings`, prefijo
-`CVERADAR_`, salvo las de infra con `validation_alias`). Defaults apuntan al
-compose local; nunca se hardcodean secretos.
+Configuration is centralized in `app/core/config.py` (`pydantic-settings`,
+prefix `CVERADAR_`, except the infra ones with `validation_alias`). Defaults
+point at the local compose; secrets are never hardcoded.
 
 ### Infra
-| Var | Default | Uso |
+| Var | Default | Use |
 |---|---|---|
-| `DATABASE_URL` | `postgresql+psycopg://cveradar:cveradar@localhost:5432/cveradar` | Conexión Postgres (driver psycopg3 sync). |
+| `DATABASE_URL` | `postgresql+psycopg://cveradar:cveradar@localhost:5432/cveradar` | Postgres connection (psycopg3 sync driver). |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis. |
-| `CVERADAR_DATA_DIR` | `/data` | Raíz de datos (raw HTML, cachés, contextos browser). |
-| `CVERADAR_RAW_HTML_DIR` | `/data/raw` | HTML crudo de menciones. |
-| `CVERADAR_CVELIST_REPO_DIR` | `/data/cvelistV5` | Clon de cvelistV5. |
+| `CVERADAR_DATA_DIR` | `/data` | Data root (raw HTML, caches, browser contexts). |
+| `CVERADAR_RAW_HTML_DIR` | `/data/raw` | Raw mention HTML. |
+| `CVERADAR_CVELIST_REPO_DIR` | `/data/cvelistV5` | cvelistV5 clone. |
 
 ### Baseline
 | Var | Default |
@@ -57,21 +58,21 @@ compose local; nunca se hardcodean secretos.
 | `CVERADAR_CVELIST_SYNC_SECONDS` | `900` |
 | `CVERADAR_NVD_DELTA_SECONDS` | `7200` |
 | `CVERADAR_NVD_API_BASE` | `https://services.nvd.nist.gov/rest/json/cves/2.0` |
-| `CVERADAR_NVD_API_KEY` | `None` (sin key → pausa 6 s/página) |
+| `CVERADAR_NVD_API_KEY` | `None` (no key → 6 s/page pause) |
 | `CVERADAR_EPSS_SYNC_SECONDS` | `86400` |
 | `CVERADAR_EPSS_API_BASE` | `https://api.first.org/data/v1/epss` |
 
 ### GitHub commits
-| Var | Default | Uso |
+| Var | Default | Use |
 |---|---|---|
 | `CVERADAR_GITHUB_API_BASE` | `https://api.github.com` | |
 | `CVERADAR_GITHUB_TOKEN` | `None` | PAT → 5000 req/h. |
-| `CVERADAR_GITHUB_TOP_N` | `10000` | Repos top a vigilar. |
-| `CVERADAR_GITHUB_COMMITS_MONTHS` | `5` | Ventana de changelog. |
-| `CVERADAR_GITHUB_REPOS_PER_RUN` | `150` | Repos por ejecución (crawl rotatorio). |
-| `CVERADAR_GITHUB_SYNTHESIZE_CANDIDATES` | `True` | Candidate pre-CVE en fixes sin CVE. |
+| `CVERADAR_GITHUB_TOP_N` | `10000` | Top repos to watch. |
+| `CVERADAR_GITHUB_COMMITS_MONTHS` | `5` | Changelog window. |
+| `CVERADAR_GITHUB_REPOS_PER_RUN` | `150` | Repos per run (rotating crawl). |
+| `CVERADAR_GITHUB_SYNTHESIZE_CANDIDATES` | `True` | Pre-CVE candidate for fixes without a CVE. |
 
-### Fetchers / scraping educado
+### Fetchers / polite scraping
 | Var | Default |
 |---|---|
 | `CVERADAR_USER_AGENT` | `CVERadar/0.1 (+…; early-CVE research)` |
@@ -81,36 +82,36 @@ compose local; nunca se hardcodean secretos.
 | `CVERADAR_BROWSER_MAX_CONCURRENT` | `3` |
 | `CVERADAR_BROWSER_RECYCLE_AFTER` | `50` |
 
-### Enriquecimiento LLM
+### LLM enrichment
 | Var | Default |
 |---|---|
 | `CVERADAR_LLM_PROVIDER` | `mock` (`mock`/`openai`/`anthropic`/`ollama`) |
 | `CVERADAR_LLM_MODEL` | `mock-model` |
 | `CVERADAR_LLM_API_KEY` | `None` |
-| `CVERADAR_LLM_BASE_URL` | `None` (p.ej. Ollama `http://ollama:11434`) |
+| `CVERADAR_LLM_BASE_URL` | `None` (e.g. Ollama `http://ollama:11434`) |
 | `CVERADAR_LLM_MAX_TOKENS` | `1024` |
 | `CVERADAR_ENRICHMENT_REENRICH_HOURS` | `24` |
 | `CVERADAR_ENRICHMENT_REENRICH_MIN_MENTIONS` | `3` |
 
-### Otros
+### Others
 `CVERADAR_EMERGING_MIN_MENTIONS` (`1`), `CVERADAR_LOG_LEVEL` (`INFO`),
 `CVERADAR_LOG_JSON` (`True`).
 
-`docker-compose.yml` pasa `CVERADAR_NVD_API_KEY`, `CVERADAR_LLM_PROVIDER`,
-`CVERADAR_LLM_API_KEY`, `CVERADAR_LLM_MODEL` desde el entorno del host
-(interpolación `${VAR:-default}`), típicamente via un fichero `.env`.
+`docker-compose.yml` passes `CVERADAR_NVD_API_KEY`, `CVERADAR_LLM_PROVIDER`,
+`CVERADAR_LLM_API_KEY`, `CVERADAR_LLM_MODEL` from the host environment
+(`${VAR:-default}` interpolation), typically via a `.env` file.
 
 ---
 
-## Volúmenes
+## Volumes
 
-| Volumen | Montaje | Contenido |
+| Volume | Mount | Contents |
 |---|---|---|
-| `pgdata` | `postgres:/var/lib/postgresql/data` | Datos de Postgres. |
-| `data` | `baseline-worker` y `sources-worker` en `/data` | HTML crudo (`/data/raw/<source_id>/<hash>.html`), clon `cvelistV5`, cachés de github (`github_top_repos.json`, `github_commits_cursor.txt`, `github_repo_state.json`), contextos Playwright (`/data/browser/<source>`). |
+| `pgdata` | `postgres:/var/lib/postgresql/data` | Postgres data. |
+| `data` | `baseline-worker` and `sources-worker` at `/data` | Raw HTML (`/data/raw/<source_id>/<hash>.html`), `cvelistV5` clone, github caches (`github_top_repos.json`, `github_commits_cursor.txt`, `github_repo_state.json`), Playwright contexts (`/data/browser/<source>`). |
 
-El volumen `data` es **compartido** por ambos workers, de ahí que las cachés de
-GitHub y el HTML crudo sean visibles para ambos.
+The `data` volume is **shared** by both workers, which is why the GitHub caches
+and the raw HTML are visible to both.
 
 ---
 
@@ -118,31 +119,31 @@ GitHub y el HTML crudo sean visibles para ambos.
 
 - `postgres`: `pg_isready -U cveradar -d cveradar` (interval 3s, retries 20).
 - `redis`: `redis-cli ping` (interval 3s, retries 20).
-- `migrate` no tiene healthcheck: es un job que corre y sale con éxito; los
-  workers dependen de su `service_completed_successfully`.
+- `migrate` has no healthcheck: it is a job that runs and exits successfully;
+  the workers depend on its `service_completed_successfully`.
 
 ---
 
 ## Tests
 
-Los tests corren con `pytest` **dentro del contenedor** contra un Postgres
-**migrado** (`alembic upgrade head` antes). `tests/conftest.py`:
+Tests run with `pytest` **inside the container** against a **migrated** Postgres
+(`alembic upgrade head` beforehand). `tests/conftest.py`:
 
-- La fixture `db` hace `TRUNCATE … RESTART IDENTITY CASCADE` de todas las tablas
-  de datos antes de cada test de integración (usa `DATABASE_URL` del entorno).
-- `sources_seeded` garantiza que la tabla `sources` tenga los fetchers.
-- Los tests unitarios (hashing, identifiers, cvss, normalize) no requieren BD.
+- The `db` fixture does `TRUNCATE … RESTART IDENTITY CASCADE` of all data tables
+  before each integration test (uses `DATABASE_URL` from the environment).
+- `sources_seeded` guarantees the `sources` table has the fetchers.
+- The unit tests (hashing, identifiers, cvss, normalize) do not require a DB.
 
-`pyproject.toml`: `asyncio_mode = "auto"`, `testpaths = ["tests"]`. Deps de test
-en el grupo `dev` (pytest, pytest-asyncio, pytest-cov, respx, ruff, mypy).
+`pyproject.toml`: `asyncio_mode = "auto"`, `testpaths = ["tests"]`. Test deps in
+the `dev` group (pytest, pytest-asyncio, pytest-cov, respx, ruff, mypy).
 
 ```bash
-# con la infra levantada y el esquema migrado:
+# with the infra up and the schema migrated:
 docker compose run --rm \
   -e DATABASE_URL=postgresql+psycopg://cveradar:cveradar@postgres:5432/cveradar \
   baseline-worker sh -c "uv pip install --system --no-cache pytest pytest-asyncio respx && pytest"
 ```
 
-> La imagen de producción no incluye las deps `dev`; instálalas en el contenedor
-> efímero o usa una imagen de desarrollo. Playwright (fetchers `browser`) es un
-> extra opcional (`.[browser]`).
+> The production image does not include the `dev` deps; install them in the
+> ephemeral container or use a development image. Playwright (`browser` fetchers)
+> is an optional extra (`.[browser]`).
