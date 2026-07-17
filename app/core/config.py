@@ -51,6 +51,16 @@ class Settings(BaseSettings):
     github_synthesize_candidates: bool = Field(default=True)  # candidate pre-CVE en fixes sin CVE
     github_advisories_max_pages: int = Field(default=30)  # paginación GHSA (100/pág -> ~3000)
 
+    # --- VulnCheck KEV (token gratis en vulncheck.com) ---
+    vulncheck_token: str | None = Field(default=None)
+    vulncheck_api_base: str = Field(default="https://api.vulncheck.com/v3")
+    vulncheck_max_pages: int = Field(default=50)
+
+    # --- OSV.dev (ecosistemas de paquetes) ---
+    osv_ecosystems: str = Field(default="PyPI,Go,crates.io,RubyGems,Packagist")
+    osv_months: int = Field(default=5)
+    osv_max_per_ecosystem: int = Field(default=3000)
+
     # --- Fetchers / scraping educado ---
     user_agent: str = Field(
         default="CVERadar/0.1 (+https://github.com/cveradar; early-CVE research)"

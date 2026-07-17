@@ -41,7 +41,7 @@ flowchart LR
     %% ---------------- sources-worker ----------------
     subgraph SW["sources-worker (APScheduler)"]
         direction TB
-        FETCH["BaseSource.fetch()<br/>6 fetchers"]
+        FETCH["BaseSource.fetch()<br/>11 fetchers"]
         INGEST["ingest_mention()<br/>1 extract_identifiers<br/>2 resolve_candidate (union-find)<br/>3 content_hash (idempotency)<br/>4 persist raw + mention<br/>5 aggregates + days_ahead"]
         ENRICH["enrich_candidate()<br/>LLM extracts metrics<br/>authoritative+derived CVSS<br/>severity_hint · affected"]
         FETCH --> INGEST --> ENRICH

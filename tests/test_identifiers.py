@@ -49,3 +49,14 @@ def test_no_identifiers():
 def test_native_none_when_only_cve():
     ids = extract_identifiers("CVE-2026-1234")
     assert primary_native(ids) is None
+
+
+def test_osv_scheme_pysec():
+    ids = extract_identifiers("PYSEC-2024-123 affects requests")
+    assert ("OSV", "PYSEC-2024-123") in [(i.scheme, i.value) for i in ids]
+
+
+def test_osv_scheme_rustsec_and_go():
+    ids = extract_identifiers("GO-2024-2611 and RUSTSEC-2024-0011")
+    vals = {i.value for i in ids if i.scheme == "OSV"}
+    assert {"GO-2024-2611", "RUSTSEC-2024-0011"} <= vals

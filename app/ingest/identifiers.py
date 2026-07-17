@@ -25,6 +25,10 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     # Identificador sintético para anclar candidates pre-CVE desde commits de
     # seguridad sin CVE asignado: GHCOMMIT:owner/repo@<sha7-40>.
     ("GHCOMMIT", re.compile(r"\bGHCOMMIT:[\w.-]+/[\w.-]+@[0-9a-fA-F]{7,40}\b")),
+    # IDs de OSV por ecosistema (anclan advisories que aún no tienen CVE).
+    ("OSV", re.compile(
+        r"\b(?:PYSEC-\d{4}-\d+|GO-\d{4}-\d+|RUSTSEC-\d{4}-\d{4}|"
+        r"GSD-\d{4}-\d+|MAL-\d{4}-\d+|OSV-\d{4}-\d+)\b", re.IGNORECASE)),
 ]
 
 

@@ -162,9 +162,16 @@ def _save_cursor(settings: Settings, cursor: int) -> None:
 
 
 async def _scan_repo(client: httpx.AsyncClient, settings: Settings, full: str,
-                     since_iso: str) -> tuple[list[FetchedMention], str | None]:
+                     since_iso: str, synthesize: bool | None = None
+                     ) -> tuple[list[FetchedMention], str | None]:
     """Escanea commits desde `since_iso`. Devuelve (menciones, ISO del commit más
-    reciente visto) para actualizar el watermark incremental del repo."""
+    reciente visto) para actualizar el watermark incremental del repo.
+
+    `synthesize`: si True, los commits de fix de seguridad SIN CVE generan un
+    candidate pre-CVE (GHCOMMIT). Por defecto usa el ajuste global; nuclei/metasploit
+    lo desactivan (solo interesan los commits que ya citan un CVE)."""
+    if synthesize is None:
+        synthesize = settings.github_synthesize_candidates
     owner_repo = full
     resp = await client.get(
         f"{settings.github_api_base}/repos/{full}/commits",
@@ -185,7 +192,7 @@ async def _scan_repo(client: httpx.AsyncClient, settings: Settings, full: str,
         if m:
             cve = m.group(0).upper()
         sec = bool(_SECFIX.search(msg))
-        if not cve and not (sec and settings.github_synthesize_candidates):
+        if not cve and not (sec and synthesize):
             continue
         sha = commit.get("sha", "")[:12]
         native = None
@@ -206,6 +213,17 @@ async def _scan_repo(client: httpx.AsyncClient, settings: Settings, full: str,
     return out, newest
 
 
+async def scan_single_repo(client: httpx.AsyncClient, full: str, *, months: int,
+                           synthesize: bool = False) -> list[FetchedMention]:
+    """Escanea el changelog de UN repo concreto (nuclei-templates, metasploit…).
+    `synthesize=False`: solo commits que citan un CVE (sin ruido de fixes sin CVE)."""
+    settings = get_settings()
+    cutoff = (datetime.now(UTC) - timedelta(days=30 * months))
+    since_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
+    mentions, _ = await _scan_repo(client, settings, full, since_iso, synthesize=synthesize)
+    return mentions
+
+
 @register
 class GitHubCommitsSource(BaseSource):
     name = "github_commits"
@@ -217,8 +235,11 @@ class GitHubCommitsSource(BaseSource):
     async def fetch(self, ctx: FetchContext) -> list[FetchedMention]:
         settings = get_settings()
         repos = _load_repo_list(settings)
-        if repos is None:
-            log.info("github.building_repo_list", top_n=settings.github_top_n)
+        # Reconstruye si no hay caché o si el top-N pedido superó la lista cacheada
+        # (permite subir CVERADAR_GITHUB_TOP_N sin borrar la caché a mano).
+        if repos is None or len(repos) < settings.github_top_n:
+            log.info("github.building_repo_list", top_n=settings.github_top_n,
+                     cached=len(repos) if repos else 0)
             repos = await _build_repo_list(ctx.http, settings)
             if repos:
                 _save_repo_list(settings, repos)

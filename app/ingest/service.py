@@ -41,6 +41,20 @@ class FetchedMention:
     native_id: str | None = None       # p.ej. ZDI-CAN-nnnn
     raw_html: str | None = None        # contenido crudo a persistir
     seen_at: datetime | None = None
+    # flags a aplicar al candidate (whitelist en _apply_flags), p.ej. KEV.
+    flags: dict[str, object] | None = None
+
+
+# Campos del candidate que un fetcher puede fijar vía FetchedMention.flags.
+_FLAG_WHITELIST = {"in_kev", "kev_date", "kev_source", "has_public_poc"}
+
+
+def _apply_flags(candidate: Candidate, flags: dict[str, object] | None) -> None:
+    if not flags:
+        return
+    for key, value in flags.items():
+        if key in _FLAG_WHITELIST and value is not None:
+            setattr(candidate, key, value)
 
 
 @dataclass
@@ -146,6 +160,7 @@ def ingest_mention(session: Session, source_id: int, m: FetchedMention) -> Inges
         )
 
     candidate = resolve_candidate(session, ids)
+    _apply_flags(candidate, m.flags)  # p.ej. in_kev (marca candidate existente o nuevo)
     raw_path = _persist_raw(source_id, chash, m.raw_html)
 
     row = MentionRow(

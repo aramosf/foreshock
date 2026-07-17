@@ -39,7 +39,7 @@ flowchart LR
         CVELIST["cvelistV5"]
         NVD["NVD 2.0 delta"]
         EPSSAPI["EPSS"]
-        SRC["6 fetchers<br/>Tier 1-5 + GitHub commits"]
+        SRC["11 fetchers<br/>Tier 1-5 + GitHub commits"]
     end
     subgraph BW["baseline-worker"]
         JOBS["cvelist · nvd · epss"]
@@ -102,16 +102,25 @@ cveradar enrich CVE-2026-12345              # LLM + CVSS
 cveradar stats                              # lead days per source
 ```
 
-## Implemented sources (one per tier + GitHub commits)
+## Implemented sources (11)
 
 | Source | Tier | Method | Signal |
 |---|---|---|---|
+| `cisa_kev` | 1 | api | CISA Known Exploited Vulnerabilities — flags candidates with `in_kev` |
+| `vulncheck_kev` | 1 | api | VulnCheck KEV (broader/earlier exploited catalog; needs free token) |
 | `certcc_vu` | 1 | rss | CERT/CC Vulnerability Notes (VU#) |
 | `redhat_csaf` | 2 | api | Red Hat Security Data (authoritative CVSS) |
-| `nessus` | 3 | scrape | Tenable plugins (reserved CVE cited by scanner) |
-| `github_advisories` | 4 | api | GitHub Security Advisories (GHSA + packages) |
+| `nessus` | 3 | scrape | Tenable plugins (reserved CVE cited by scanner; needs browser profile) |
+| `nuclei_templates` | 3 | api | ProjectDiscovery nuclei-templates commits (exploit template = early signal) |
+| `metasploit` | 3 | api | Rapid7 metasploit-framework commits (new exploit module) |
+| `github_advisories` | 4 | api | GitHub Security Advisories (GHSA + packages, paginated) |
 | `github_commits` | 4 | api | **Top-N repos + N-month changelog** (reserved CVE / pre-CVE security fix) |
+| `osv` | 4 | api | OSV.dev ecosystem advisories (PyPI, Go, crates.io, RubyGems, Packagist…) |
 | `thehackernews` | 5 | rss | Active-exploitation news |
+
+`cisa_kev` / `vulncheck_kev` don't just create mentions: they set `in_kev` on the
+candidate (exploited-in-the-wild signal, and ground truth for the prediction
+layer). See [`docs/SOURCES.md`](docs/SOURCES.md).
 
 `github_commits` watches the **top-N repos** (`CVERADAR_GITHUB_TOP_N`, default
 10,000, scalable to 100,000+) and scans their commits from the last N months. It is
