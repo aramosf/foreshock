@@ -23,6 +23,7 @@ from app.core.logging import get_logger
 from app.core.models import Candidate, Identifier
 from app.core.models import Mention as MentionRow
 from app.core.models import PublishedCVE
+from app.ingest.affected import AffectedInput, persist_affected, persist_cvss_vectors
 from app.ingest.hashing import content_hash
 from app.ingest.identifiers import extract_identifiers, primary_cve, primary_native
 from app.ingest.reconcile import resolve_candidate
@@ -43,6 +44,12 @@ class FetchedMention:
     seen_at: datetime | None = None
     # flags a aplicar al candidate (whitelist en _apply_flags), p.ej. KEV.
     flags: dict[str, object] | None = None
+    # datos estructurados (OSV, GHSA…) que se persisten al ingerir:
+    affected: list["AffectedInput"] | None = None   # -> affected_products + rangos
+    cvss_vectors: list[str] | None = None            # -> cvss_scores autoritativos
+    cwe_ids: list[str] | None = None                 # -> candidates.cwe_ids
+    reference_urls: list[str] | None = None          # -> candidates.reference_urls
+    withdrawn: bool | None = None                    # -> candidates.withdrawn
 
 
 # Campos del candidate que un fetcher puede fijar vía FetchedMention.flags.
@@ -161,6 +168,19 @@ def ingest_mention(session: Session, source_id: int, m: FetchedMention) -> Inges
 
     candidate = resolve_candidate(session, ids)
     _apply_flags(candidate, m.flags)  # p.ej. in_kev (marca candidate existente o nuevo)
+
+    # Datos estructurados (OSV/GHSA…): CVSS autoritativo, productos afectados y metadatos.
+    if m.cvss_vectors:
+        persist_cvss_vectors(session, candidate.id, m.cvss_vectors, source="osv")
+    if m.affected:
+        persist_affected(session, candidate.id, m.affected)
+    if m.cwe_ids:
+        candidate.cwe_ids = m.cwe_ids
+    if m.reference_urls:
+        candidate.reference_urls = m.reference_urls[:50]
+    if m.withdrawn is not None:
+        candidate.withdrawn = m.withdrawn
+
     raw_path = _persist_raw(source_id, chash, m.raw_html)
 
     row = MentionRow(

@@ -334,73 +334,22 @@ def stats(
 
 
 # ----------------------------------------------------- pending / trend
-# Filas por candidate SIN CVE público oficial (pre-CVE o CVE no PUBLISHED):
-# software derivado + señal de malware (OSV MAL-) + fecha real más temprana.
-_PENDING_ROWS_SQL = text("""
-WITH pending AS (
-  SELECT c.id, c.cve_id
-  FROM candidates c
-  WHERE c.merged_into IS NULL
-    AND ( c.cve_id IS NULL
-       OR NOT EXISTS (SELECT 1 FROM published_cves p
-                      WHERE p.id = c.cve_id AND p.state = 'PUBLISHED') )
-)
-SELECT p.id, p.cve_id,
-  COALESCE(
-    (SELECT regexp_replace(i.value,'^GHCOMMIT:(.*)@.*$','\\1')
-       FROM identifiers i WHERE i.candidate_id=p.id AND i.scheme='GHCOMMIT' LIMIT 1),
-    (SELECT substring(m.snippet from 'affected: (\\S+)')
-       FROM mentions m WHERE m.candidate_id=p.id AND m.snippet LIKE '%affected:%' LIMIT 1),
-    (SELECT substring(m.title from '^([^:]+/[^:]+):')
-       FROM mentions m WHERE m.candidate_id=p.id AND m.title LIKE '%/%:%' LIMIT 1)
-  ) AS software,
-  EXISTS(SELECT 1 FROM identifiers i WHERE i.candidate_id=p.id
-         AND i.scheme='OSV' AND i.value ILIKE 'MAL-%') AS is_malware,
-  (SELECT min(m.seen_at) FROM mentions m WHERE m.candidate_id=p.id) AS first_seen
-FROM pending p
+# Lee de affected_products (persistido). Una fila por (candidate, producto);
+# candidates sin producto salen con product/kind NULL.
+_PENDING_AP_SQL = text("""
+SELECT c.id, c.first_seen_at, a.product, a.kind
+FROM candidates c
+LEFT JOIN affected_products a ON a.candidate_id = c.id
+WHERE c.merged_into IS NULL
+  AND ( c.cve_id IS NULL
+     OR NOT EXISTS (SELECT 1 FROM published_cves p
+                    WHERE p.id = c.cve_id AND p.state = 'PUBLISHED') )
 """)
 
-# Canonicalización de ecosistema (une pip/PyPI, rust/cargo/crates, etc.).
-_ECO_ALIAS = {
-    "pip": "pypi", "pypi": "pypi",
-    "cargo": "crates.io", "rust": "crates.io", "crates": "crates.io", "crates.io": "crates.io",
-    "go": "go", "golang": "go",
-    "npm": "npm", "node": "npm",
-    "maven": "maven", "nuget": "nuget",
-    "gem": "rubygems", "rubygems": "rubygems",
-    "composer": "packagist", "packagist": "packagist",
-    "hex": "hex", "pub": "pub", "pub.dev": "pub", "hackage": "hackage",
-}
-_DISTRO = ("ubuntu", "debian", "alpine", "rocky", "almalinux", "suse", "opensuse",
-           "red hat", "redhat", "chainguard", "wolfi", "linux", "android", "bitnami",
-           "mageia", "photon", "gentoo", "oracle")
 
-
-def _classify(raw: str | None, is_malware: bool) -> tuple[str | None, str]:
-    """Devuelve (software_canónico, kind ∈ product|distro|malware|unknown)."""
-    if not raw:
-        return None, "unknown"
-    if is_malware:
-        return raw.strip().lower(), "malware"
-    s = raw.strip()
-    head = s.split("/", 1)[0]
-    if "/" in s and ":" not in head:               # repo GitHub owner/repo
-        return s.lower(), "product"
-    eco, _, name = s.partition(":")
-    ecol = eco.strip().lower()
-    if any(ecol.startswith(d) for d in _DISTRO):
-        return f"{ecol}:{name.split(':')[-1]}".lower().strip(":"), "distro"
-    canon = _ECO_ALIAS.get(ecol, ecol)
-    return f"{canon}:{name}".lower().strip(":"), "product"
-
-
-def _load_pending(session) -> list[tuple[str | None, str, object]]:
-    """Devuelve [(software_canónico, kind, first_seen)] por candidate pendiente."""
-    out = []
-    for _id, _cve, software, is_mal, first_seen in session.execute(_PENDING_ROWS_SQL):
-        canon, kind = _classify(software, is_mal)
-        out.append((canon, kind, first_seen))
-    return out
+def _load_pending(session) -> list[tuple]:
+    """[(candidate_id, first_seen, product, kind)] para candidates sin CVE oficial."""
+    return list(session.execute(_PENDING_AP_SQL))
 
 
 @app.command("pending")
@@ -417,15 +366,25 @@ def pending(
     with get_session() as session:
         rows = _load_pending(session)
 
-    by_kind = Counter(k for _, k, _ in rows)
-    counter: Counter = Counter()
-    for canon, k, _ in rows:
-        if canon and (kind == "all" or k == kind):
-            counter[canon] += 1
-    data = [(name, n) for name, n in counter.most_common(top)]
+    cands: dict = {}
+    for cand, _fs, product, k in rows:
+        prods = cands.setdefault(cand, set())
+        if product:
+            prods.add((product, k))
+    total = len(cands)
+    with_sw = sum(1 for prods in cands.values() if prods)
+    by_kind: Counter = Counter()
+    prodcount: Counter = Counter()
+    for prods in cands.values():
+        for k in {kk for _, kk in prods}:
+            by_kind[k] += 1
+        for product, k in prods:
+            if kind == "all" or k == kind:
+                prodcount[product] += 1
+    data = list(prodcount.most_common(top))
     meta = {
-        "total": len(rows), "product": by_kind["product"], "distro": by_kind["distro"],
-        "malware": by_kind["malware"], "sin_software": by_kind["unknown"], "kind": kind,
+        "total": total, "con_software": with_sw, "product": by_kind["product"],
+        "distro": by_kind["distro"], "malware": by_kind["malware"], "kind": kind,
     }
     _emit(fmt, ["software", "cves_pendientes"], data, meta=meta,
           title=f"Top software (kind={kind})")
@@ -446,9 +405,17 @@ def trend(
     cutoff = datetime.now(UTC) - timedelta(days=30 * months) if months > 0 else None
     with get_session() as session:
         rows = _load_pending(session)
+    cand_fs: dict = {}
+    cand_kinds: dict = {}
+    for cand, first_seen, _product, k in rows:
+        cand_fs[cand] = first_seen
+        if k:
+            cand_kinds.setdefault(cand, set()).add(k)
     buckets: Counter = Counter()
-    for _canon, k, first_seen in rows:
-        if first_seen is None or (kind != "all" and k != kind):
+    for cand, first_seen in cand_fs.items():
+        if first_seen is None:
+            continue
+        if kind != "all" and kind not in cand_kinds.get(cand, set()):
             continue
         if cutoff is not None and first_seen < cutoff:
             continue
@@ -465,6 +432,62 @@ def trend(
     else:
         _emit(fmt, ["periodo", "pendientes"], [(p, buckets[p]) for p in periods],
               meta={"kind": kind, "months": months})
+
+
+@app.command("backfill-products")
+def backfill_products(
+    batch: int = typer.Option(1000, help="commit cada N candidates"),
+) -> None:
+    """Rellena affected_products para candidates que aún no lo tienen, derivando el
+    software de sus menciones (repo GHCOMMIT / paquete 'affected:' / prefijo owner/repo).
+    Idempotente. OSV ya lo puebla al ingerir; esto cubre el resto de fuentes."""
+    from app.ingest.affected import AffectedInput, classify_kind, persist_affected
+
+    sql = text("""
+      SELECT c.id,
+        COALESCE(
+          (SELECT regexp_replace(i.value,'^GHCOMMIT:(.*)@.*$','\\1')
+             FROM identifiers i WHERE i.candidate_id=c.id AND i.scheme='GHCOMMIT' LIMIT 1),
+          (SELECT substring(m.snippet from 'affected: (\\S+)')
+             FROM mentions m WHERE m.candidate_id=c.id AND m.snippet LIKE '%affected:%' LIMIT 1),
+          (SELECT substring(m.title from '^([^:]+/[^:]+):')
+             FROM mentions m WHERE m.candidate_id=c.id AND m.title LIKE '%/%:%' LIMIT 1)
+        ) AS software,
+        EXISTS(SELECT 1 FROM identifiers i WHERE i.candidate_id=c.id
+               AND i.scheme='OSV' AND i.value ILIKE 'MAL-%') AS is_malware
+      FROM candidates c
+      WHERE c.merged_into IS NULL
+        AND NOT EXISTS (SELECT 1 FROM affected_products ap WHERE ap.candidate_id=c.id)
+    """)
+
+    def to_affected(raw: str | None, is_mal: bool) -> "AffectedInput | None":
+        if not raw:
+            return None
+        s = raw.strip()
+        kind = "malware" if is_mal else None
+        if "/" in s and ":" not in s.split("/", 1)[0]:
+            return AffectedInput(product=s.lower(), ecosystem="github",
+                                 kind=kind or "product")
+        eco, _, name = s.partition(":")
+        prod = name or s
+        return AffectedInput(product=prod, ecosystem=(eco if name else None),
+                             kind=kind or classify_kind(eco))
+
+    with get_session() as reader:
+        targets = list(reader.execute(sql))
+    n = 0
+    pending_rows = []
+    for cid, software, is_mal in targets:
+        ai = to_affected(software, is_mal)
+        if ai is not None:
+            pending_rows.append((cid, ai))
+    with session_scope() as session:
+        for i, (cid, ai) in enumerate(pending_rows, 1):
+            persist_affected(session, cid, [ai])
+            n += 1
+            if i % batch == 0:
+                session.flush()
+    console.print(f"[green]backfill: {n} candidates con affected_products[/green]")
 
 
 if __name__ == "__main__":

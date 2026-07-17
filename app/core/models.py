@@ -121,6 +121,9 @@ class Candidate(SQLModel, table=True):
     requires_interaction: bool | None = Field(default=None, sa_column=SAColumn(Boolean))
     has_public_poc: bool | None = Field(default=None, sa_column=SAColumn(Boolean))
     poc_urls: list[str] | None = Field(default=None, sa_column=SAColumn(ARRAY(Text)))
+    cwe_ids: list[str] | None = Field(default=None, sa_column=SAColumn(ARRAY(Text)))
+    reference_urls: list[str] | None = Field(default=None, sa_column=SAColumn(ARRAY(Text)))
+    withdrawn: bool | None = Field(default=None, sa_column=SAColumn(Boolean))
     severity_hint: str | None = Field(default=None, sa_column=SAColumn(Text))
     in_kev: bool | None = Field(default=None, sa_column=SAColumn(Boolean))
     kev_date: date | None = Field(default=None, sa_column=SAColumn(Date))
@@ -273,6 +276,7 @@ class AffectedProduct(SQLModel, table=True):
     cpe23: str | None = Field(default=None, sa_column=SAColumn(Text))
     purl: str | None = Field(default=None, sa_column=SAColumn(Text))
     default_status: str | None = Field(default=None, sa_column=SAColumn(Text))
+    kind: str | None = Field(default=None, sa_column=SAColumn(Text))  # product/distro/malware
     exact_versions: list[str] | None = Field(default=None, sa_column=SAColumn(ARRAY(Text)))
     raw: str | None = Field(default=None, sa_column=SAColumn(Text))
     normalization_method: str | None = Field(default=None, sa_column=SAColumn(Text))
