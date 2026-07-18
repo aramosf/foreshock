@@ -48,6 +48,10 @@ _FEEDS: list[tuple[str, str, int, str]] = [
      "https://seclists.org/rss/fulldisclosure.rss"),
     ("oss_security", "oss-security Mailing List", 3,
      "https://seclists.org/rss/oss-sec.rss"),
+    ("veeam", "Veeam Security Advisories", 2,
+     "https://www.veeam.com/services/open/kb/security-feed"),
+    ("zdi_blog", "Zero Day Initiative Blog (roundups)", 5,
+     "https://www.zerodayinitiative.com/blog/?format=rss"),
 ]
 
 
