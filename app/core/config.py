@@ -23,7 +23,7 @@ class Settings(BaseSettings):
 
     # --- Base de datos / infra ---
     database_url: str = Field(
-        default="postgresql+psycopg://cveradar:cveradar@localhost:5432/cveradar",
+        default="postgresql+psycopg://foreshock:foreshock@localhost:5432/foreshock",
         validation_alias="DATABASE_URL",
     )
     redis_url: str = Field(default="redis://localhost:6379/0", validation_alias="REDIS_URL")

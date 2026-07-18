@@ -123,8 +123,8 @@ Rebuilds the radar layer from scratch with full history, reusing the artifact ca
 > 2. **Verify nothing else is ingesting**:
 >    ```bash
 >    docker ps --filter name=sources-worker-run          # should be empty
->    docker compose exec -T postgres psql -U cveradar -d cveradar -c \
->      "SELECT pid,state,left(query,40) FROM pg_stat_activity WHERE datname='cveradar' AND state='active';"
+>    docker compose exec -T postgres psql -U foreshock -d foreshock -c \
+>      "SELECT pid,state,left(query,40) FROM pg_stat_activity WHERE datname='foreshock' AND state='active';"
 >    ```
 >    Kill any stray runner: `docker ps --filter name=sources-worker-run -q | xargs -r docker kill`.
 >    If a previous background re-ingest task still exists, stop it (`TaskStop`, or kill
@@ -140,7 +140,7 @@ docker compose build
 # 3. Apply migrations (safe only when nothing else is writing):
 docker compose run --rm migrate
 # 4. Truncate ONLY the radar layer (baseline preserved):
-docker compose exec -T postgres psql -U cveradar -d cveradar -c "
+docker compose exec -T postgres psql -U foreshock -d foreshock -c "
   TRUNCATE candidates, candidate_links, identifiers, mentions, cvss_scores,
            affected_products, affected_version_ranges, cve_soft_references
   RESTART IDENTITY CASCADE;"
@@ -263,7 +263,7 @@ denormalized `published_cves` columns (`primary_cvss_*`, `primary_cwe`,
 ### Post-re-ingest verification
 
 ```bash
-docker compose exec -T postgres psql -U cveradar -d cveradar -c "
+docker compose exec -T postgres psql -U foreshock -d foreshock -c "
   SELECT (SELECT COUNT(*) FROM candidates WHERE status<>'merged') AS live,
          (SELECT COUNT(*) FROM mentions)  AS mentions,
          (SELECT MAX(n) FROM (SELECT COUNT(*) n FROM identifiers
@@ -287,10 +287,10 @@ an over-merge — investigate before trusting the data.
 - **Tests truncate the DB in `DATABASE_URL`.** The integration test fixture
   `TRUNCATE`s (including `published_cves`). Always run tests against an isolated DB:
   ```bash
-  docker compose exec -T postgres psql -U cveradar -d cveradar -c "CREATE DATABASE foreshock_test;"
-  docker compose run --rm -e DATABASE_URL=postgresql+psycopg://cveradar:cveradar@postgres:5432/foreshock_test \
+  docker compose exec -T postgres psql -U foreshock -d foreshock -c "CREATE DATABASE foreshock_test;"
+  docker compose run --rm -e DATABASE_URL=postgresql+psycopg://foreshock:foreshock@postgres:5432/foreshock_test \
     -v "$(pwd)/migrations:/app/migrations" migrate
-  docker compose run --rm -e DATABASE_URL=postgresql+psycopg://cveradar:cveradar@postgres:5432/foreshock_test \
+  docker compose run --rm -e DATABASE_URL=postgresql+psycopg://foreshock:foreshock@postgres:5432/foreshock_test \
     -v "$(pwd)/tests:/app/tests" -v "$(pwd)/pyproject.toml:/app/pyproject.toml" \
     migrate bash -lc "uv pip install --system --no-cache pytest pytest-asyncio respx && pytest /app/tests -q"
   ```

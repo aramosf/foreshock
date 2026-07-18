@@ -44,7 +44,7 @@ compose local; nunca se hardcodean secretos.
 ### Infra
 | Var | Default | Uso |
 |---|---|---|
-| `DATABASE_URL` | `postgresql+psycopg://cveradar:cveradar@localhost:5432/cveradar` | Conexión Postgres (driver psycopg3 sync). |
+| `DATABASE_URL` | `postgresql+psycopg://foreshock:foreshock@localhost:5432/foreshock` | Conexión Postgres (driver psycopg3 sync). |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis. |
 | `FORESHOCK_DATA_DIR` | `/data` | Raíz de datos (raw HTML, cachés, contextos browser). |
 | `FORESHOCK_RAW_HTML_DIR` | `/data/raw` | HTML crudo de menciones. |
@@ -130,7 +130,7 @@ GitHub y el HTML crudo sean visibles para ambos.
 
 ## Healthchecks
 
-- `postgres`: `pg_isready -U cveradar -d cveradar` (interval 3s, retries 20).
+- `postgres`: `pg_isready -U foreshock -d foreshock` (interval 3s, retries 20).
 - `redis`: `redis-cli ping` (interval 3s, retries 20).
 - `migrate` no tiene healthcheck: es un job que corre y sale con éxito; los
   workers dependen de su `service_completed_successfully`.
@@ -153,7 +153,7 @@ en el grupo `dev` (pytest, pytest-asyncio, pytest-cov, respx, ruff, mypy).
 ```bash
 # con la infra levantada y el esquema migrado:
 docker compose run --rm \
-  -e DATABASE_URL=postgresql+psycopg://cveradar:cveradar@postgres:5432/cveradar \
+  -e DATABASE_URL=postgresql+psycopg://foreshock:foreshock@postgres:5432/foreshock \
   baseline-worker sh -c "uv pip install --system --no-cache pytest pytest-asyncio respx && pytest"
 ```
 

@@ -260,7 +260,7 @@ deterministic aliases before hitting the LLM. See [`docs/ENRICHMENT.md`](docs/EN
 # 55 tests (unit + integration against a real Postgres)
 docker compose up -d postgres && docker compose run --rm migrate
 docker compose run --rm --no-deps \
-  -e DATABASE_URL=postgresql+psycopg://cveradar:cveradar@postgres:5432/cveradar \
+  -e DATABASE_URL=postgresql+psycopg://foreshock:foreshock@postgres:5432/foreshock \
   -v "$PWD":/app -w /app sources-worker \
   bash -lc "uv pip install --system -q pytest pytest-asyncio respx && pytest -q"
 ```

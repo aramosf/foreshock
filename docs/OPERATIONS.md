@@ -52,7 +52,7 @@ secret is ever hardcoded.
 ### Infra / storage
 | Variable | Default | Purpose |
 |---|---|---|
-| `DATABASE_URL` | `postgresql+psycopg://cveradar:cveradar@localhost:5432/cveradar` | Postgres DSN (psycopg3 driver). Compose overrides host to `postgres`. |
+| `DATABASE_URL` | `postgresql+psycopg://foreshock:foreshock@localhost:5432/foreshock` | Postgres DSN (psycopg3 driver). Compose overrides host to `postgres`. |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis URL. Compose overrides host to `redis`. |
 | `FORESHOCK_DATA_DIR` | `/data` | Root for raw HTML, caches, browser contexts. |
 | `FORESHOCK_RAW_HTML_DIR` | `/data/raw` | Persisted raw mention HTML (`/data/raw/<source_id>/<hash>.html`). |
@@ -186,7 +186,7 @@ per-repo watermarks, crawl cursor, and raw HTML are visible to both.
 
 ## Healthchecks & worker dependencies
 
-- `postgres`: `pg_isready -U cveradar -d cveradar` (interval 3s, retries 20).
+- `postgres`: `pg_isready -U foreshock -d foreshock` (interval 3s, retries 20).
 - `redis`: `redis-cli ping` (interval 3s, retries 20).
 - `migrate` has no healthcheck — it is a run-once job; other services wait on its
   `service_completed_successfully`.
@@ -212,7 +212,7 @@ dependencies live in the `dev` group (`pytest`, `pytest-asyncio`, `pytest-cov`,
 ```bash
 # with infra up and schema migrated:
 docker compose run --rm \
-  -e DATABASE_URL=postgresql+psycopg://cveradar:cveradar@postgres:5432/cveradar \
+  -e DATABASE_URL=postgresql+psycopg://foreshock:foreshock@postgres:5432/foreshock \
   baseline-worker sh -c "uv pip install --system --no-cache pytest pytest-asyncio respx && pytest"
 ```
 

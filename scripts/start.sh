@@ -72,7 +72,7 @@ if [ "${1:-}" = "--full-load" ]; then
 
   echo ">> 3) Re-ingest histórico de la capa radar (en background)…"
   echo ">>    (trunca la capa radar y re-ingiere todo; baseline intacto)"
-  $COMPOSE exec -T postgres psql -U cveradar -d cveradar -c \
+  $COMPOSE exec -T postgres psql -U foreshock -d foreshock -c \
     "TRUNCATE candidates, candidate_links, identifiers, mentions, cvss_scores, \
      affected_products, affected_version_ranges, cve_soft_references \
      RESTART IDENTITY CASCADE;"

@@ -2,15 +2,15 @@ services:
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_USER: cveradar
-      POSTGRES_PASSWORD: cveradar
-      POSTGRES_DB: cveradar
+      POSTGRES_USER: foreshock
+      POSTGRES_PASSWORD: foreshock
+      POSTGRES_DB: foreshock
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U cveradar -d cveradar"]
+      test: ["CMD-SHELL", "pg_isready -U foreshock -d foreshock"]
       interval: 3s
       timeout: 3s
       retries: 20
@@ -32,7 +32,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     environment:
-      DATABASE_URL: postgresql+psycopg://cveradar:cveradar@postgres:5432/cveradar
+      DATABASE_URL: postgresql+psycopg://foreshock:foreshock@postgres:5432/foreshock
     depends_on:
       postgres:
         condition: service_healthy
@@ -42,7 +42,7 @@ services:
   baseline-worker:
     build: { context: ., dockerfile: docker/Dockerfile }
     environment:
-      DATABASE_URL: postgresql+psycopg://cveradar:cveradar@postgres:5432/cveradar
+      DATABASE_URL: postgresql+psycopg://foreshock:foreshock@postgres:5432/foreshock
       REDIS_URL: redis://redis:6379/0
       FORESHOCK_DATA_DIR: /data
       FORESHOCK_RAW_HTML_DIR: /data/raw
@@ -59,7 +59,7 @@ services:
   sources-worker:
     build: { context: ., dockerfile: docker/Dockerfile }
     environment:
-      DATABASE_URL: postgresql+psycopg://cveradar:cveradar@postgres:5432/cveradar
+      DATABASE_URL: postgresql+psycopg://foreshock:foreshock@postgres:5432/foreshock
       REDIS_URL: redis://redis:6379/0
       FORESHOCK_DATA_DIR: /data
       FORESHOCK_RAW_HTML_DIR: /data/raw
@@ -90,7 +90,7 @@ services:
   api:
     build: { context: ., dockerfile: docker/Dockerfile }
     environment:
-      DATABASE_URL: postgresql+psycopg://cveradar:cveradar@postgres:5432/cveradar
+      DATABASE_URL: postgresql+psycopg://foreshock:foreshock@postgres:5432/foreshock
     depends_on:
       migrate: { condition: service_completed_successfully }
     ports:

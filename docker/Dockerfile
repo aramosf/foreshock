@@ -24,7 +24,7 @@ COPY alembic.ini ./
 COPY migrations ./migrations
 COPY app ./app
 
-# 3) Instala el proyecto (sin re-resolver deps) para exponer el script `cveradar`.
+# 3) Instala el proyecto (sin re-resolver deps) para exponer el script `foreshock`.
 RUN uv pip install --system --no-cache --no-deps .
 
 # La URL real llega por env var DATABASE_URL (docker-compose).

@@ -136,7 +136,7 @@ fuente) → **derivado** (calculado desde métricas con la librería `cvss`) →
 # 49 tests (unit + integración contra Postgres real)
 docker compose up -d postgres && docker compose run --rm migrate
 docker compose run --rm --no-deps \
-  -e DATABASE_URL=postgresql+psycopg://cveradar:cveradar@postgres:5432/cveradar \
+  -e DATABASE_URL=postgresql+psycopg://foreshock:foreshock@postgres:5432/foreshock \
   -v "$PWD":/app -w /app sources-worker \
   bash -lc "uv pip install --system -q pytest pytest-asyncio respx && pytest -q"
 ```
