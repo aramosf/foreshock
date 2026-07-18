@@ -84,8 +84,19 @@ Detailed component diagram in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 ## Quickstart
 
 ```bash
-# Bring everything up: postgres + redis + migrations + both workers
-docker compose up --build
+./scripts/start.sh              # start the whole system (migrate -> workers -> api)
+./scripts/start.sh --full-load  # first-time: baseline full sync + historical re-ingest
+./scripts/start.sh --status     # service + dashboard status
+```
+
+Full operational guide (startup, first-time load, safe re-ingest, the 12 sources,
+monitoring, migrations, and pitfalls): **[`docs/RUNBOOK.md`](docs/RUNBOOK.md)**.
+
+Under the hood `start.sh` is just:
+
+```bash
+# Bring everything up: postgres + redis + migrations + both workers + api
+docker compose up -d --build
 
 # Infrastructure only, for development
 docker compose up -d postgres redis

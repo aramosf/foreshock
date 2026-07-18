@@ -10,6 +10,7 @@ del score.
 
 from __future__ import annotations
 
+import gzip
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -21,12 +22,16 @@ from app.core.config import get_settings
 from app.core.db import session_scope
 from app.core.logging import get_logger
 from app.core.models import EPSSScore
+from app.sources.cache import cached_download
 from app.sources.http import get, make_client
 
 log = get_logger(__name__)
 
 _BATCH_SIZE = 100  # CVEs por petición cuando se filtra por lista
 _RECENT_LIMIT = 200  # top-N más recientes cuando no se filtra
+# Volcado masivo de FIRST: TODAS las puntuaciones EPSS actuales (~270k CVEs).
+EPSS_BULK_URL = "https://epss.cyentia.com/epss_scores-current.csv.gz"
+_FULL_COMMIT_EVERY = 5000
 
 
 def parse_epss_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -132,4 +137,68 @@ async def sync_epss(cve_ids: list[str] | None = None) -> dict[str, int]:
             stats["skipped"] += skipped
 
     log.info("epss.sync", model_version=model_version, filtered=bool(cve_ids), **stats)
+    return stats
+
+
+async def sync_epss_full() -> dict[str, int]:
+    """Full sync: descarga el volcado masivo CSV.gz de FIRST con TODAS las
+    puntuaciones EPSS actuales (~270k CVEs) y las ingiere por lotes. Cacheado."""
+    stats = {"rows": 0, "ingested": 0, "skipped": 0}
+    async with make_client() as client:
+        path = await cached_download(client, EPSS_BULK_URL, key="epss_scores-current.csv.gz")
+
+    model_version: str | None = None
+    scored_date: date | None = None
+    header_seen = False
+    batch: list[dict[str, Any]] = []
+
+    def _flush(rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        with session_scope() as session:
+            for rec in rows:
+                upsert_epss(session, rec, model_version)
+
+    with gzip.open(path, "rt", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("#"):  # cabecera: #model_version:v..,score_date:..
+                for part in line[1:].split(","):
+                    if ":" in part:
+                        k, v = part.split(":", 1)
+                        k = k.strip()
+                        if k == "model_version":
+                            model_version = v.strip()
+                        elif k == "score_date":
+                            try:
+                                scored_date = isoparse(v.strip()).date()
+                            except (ValueError, TypeError):
+                                scored_date = None
+                continue
+            if not header_seen:      # primera línea no-comentario = cabecera cve,epss,percentile
+                header_seen = True
+                continue
+            cols = line.split(",")
+            if len(cols) < 3:
+                stats["skipped"] += 1
+                continue
+            stats["rows"] += 1
+            try:
+                batch.append({
+                    "cve_id": cols[0], "score": float(cols[1]),
+                    "percentile": float(cols[2]),
+                    "scored_date": scored_date or datetime.now(UTC).date(),
+                })
+                stats["ingested"] += 1
+            except (ValueError, IndexError):
+                stats["skipped"] += 1
+                continue
+            if len(batch) >= _FULL_COMMIT_EVERY:
+                _flush(batch)
+                batch = []
+        _flush(batch)
+
+    log.info("epss.full_sync", model_version=model_version, scored_date=str(scored_date), **stats)
     return stats

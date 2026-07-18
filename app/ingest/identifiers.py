@@ -31,6 +31,12 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         r"GSD-\d{4}-\d+|MAL-\d{4}-\d+|OSV-\d{4}-\d+)\b", re.IGNORECASE)),
 ]
 
+# Esquemas que cuentan como "código de vulnerabilidad reconocido". Una mención
+# SOLO se almacena si ancla a al menos uno de estos (política de producto:
+# nada sin CVE o código equivalente). GHCOMMIT (commit desnudo sin código
+# asignado) NO está en la lista: es un ancla sintética que se descarta.
+RECOGNIZED_SCHEMES = frozenset({"CVE", "ZDI-CAN", "ZDI", "VU", "GHSA", "MSRC", "OSV"})
+
 
 @dataclass(frozen=True)
 class ExtractedId:

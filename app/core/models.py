@@ -60,6 +60,22 @@ class PublishedCVE(SQLModel, table=True):
     assigner_short_name: str | None = Field(default=None, sa_column=SAColumn(Text))
     raw_json: dict | None = Field(default=None, sa_column=SAColumn(JSONB))
     ingested_at: datetime | None = Field(default=None, sa_column=_ts_now())
+    # --- Enriquecimiento estructurado (0006), derivado de raw_json (CVE JSON 5.0) ---
+    # Campos DENORMALIZADOS "primarios" para filtros/orden rápidos; el detalle
+    # completo vive en las tablas hijas cve_cvss / cve_cwe / cve_cpe / cve_reference.
+    description_en: str | None = Field(default=None, sa_column=SAColumn(Text))
+    primary_cvss_version: str | None = Field(default=None, sa_column=SAColumn(Text))
+    primary_cvss_score: float | None = Field(default=None, sa_column=SAColumn(Float))
+    primary_cvss_severity: str | None = Field(default=None, sa_column=SAColumn(Text))
+    primary_cvss_vector: str | None = Field(default=None, sa_column=SAColumn(Text))
+    primary_cwe: str | None = Field(default=None, sa_column=SAColumn(Text))
+    has_exploit_ref: bool | None = Field(default=None, sa_column=SAColumn(Boolean))
+    has_patch_ref: bool | None = Field(default=None, sa_column=SAColumn(Boolean))
+    # SSVC (CISA ADP Vulnrichment): decisión oficial temprana de priorización.
+    ssvc_exploitation: str | None = Field(default=None, sa_column=SAColumn(Text))
+    ssvc_automatable: str | None = Field(default=None, sa_column=SAColumn(Text))
+    ssvc_technical_impact: str | None = Field(default=None, sa_column=SAColumn(Text))
+    enriched_at: datetime | None = Field(default=None, sa_column=_ts())
 
 
 class Source(SQLModel, table=True):
@@ -224,6 +240,91 @@ class EPSSScore(SQLModel, table=True):
     model_version: str | None = Field(default=None, sa_column=SAColumn(Text))
     scored_date: date = Field(sa_column=SAColumn(Date, primary_key=True))
     fetched_at: datetime | None = Field(default=None, sa_column=_ts_now())
+
+
+# ---------------------------------------------------------------------
+# Enriquecimiento oficial de CVEs (0006) — detalle normalizado.
+# cve_id es referencia BLANDA a published_cves.id (sin FK: un CVE puede
+# aparecer en un ADP antes de existir la fila baseline). Idempotencia por
+# delete-by-cve + insert al re-enriquecer.
+# ---------------------------------------------------------------------
+class CveCvss(SQLModel, table=True):
+    __tablename__ = "cve_cvss"
+
+    id: int | None = Field(default=None, sa_column=SAColumn(BigInteger, primary_key=True))
+    cve_id: str = Field(sa_column=SAColumn(Text, nullable=False))
+    version: str = Field(sa_column=SAColumn(Text, nullable=False))       # 2.0/3.0/3.1/4.0
+    source: str = Field(sa_column=SAColumn(Text, nullable=False))         # CNA shortName / cisa-adp
+    type: str | None = Field(default=None, sa_column=SAColumn(Text))      # Primary/Secondary
+    vector: str | None = Field(default=None, sa_column=SAColumn(Text))
+    base_score: float | None = Field(default=None, sa_column=SAColumn(Float))
+    base_severity: str | None = Field(default=None, sa_column=SAColumn(Text))
+    exploitability_score: float | None = Field(default=None, sa_column=SAColumn(Float))
+    impact_score: float | None = Field(default=None, sa_column=SAColumn(Float))
+    recorded_at: datetime | None = Field(default=None, sa_column=_ts_now())
+
+
+class CveCwe(SQLModel, table=True):
+    __tablename__ = "cve_cwe"
+
+    id: int | None = Field(default=None, sa_column=SAColumn(BigInteger, primary_key=True))
+    cve_id: str = Field(sa_column=SAColumn(Text, nullable=False))
+    cwe_id: str = Field(sa_column=SAColumn(Text, nullable=False))         # CWE-79 o texto
+    description: str | None = Field(default=None, sa_column=SAColumn(Text))
+    source: str | None = Field(default=None, sa_column=SAColumn(Text))
+    recorded_at: datetime | None = Field(default=None, sa_column=_ts_now())
+
+
+class CveCpe(SQLModel, table=True):
+    __tablename__ = "cve_cpe"
+
+    id: int | None = Field(default=None, sa_column=SAColumn(BigInteger, primary_key=True))
+    cve_id: str = Field(sa_column=SAColumn(Text, nullable=False))
+    cpe23: str = Field(sa_column=SAColumn(Text, nullable=False))
+    vulnerable: bool | None = Field(default=None, sa_column=SAColumn(Boolean))
+    version_start: str | None = Field(default=None, sa_column=SAColumn(Text))
+    version_start_type: str | None = Field(default=None, sa_column=SAColumn(Text))
+    version_end: str | None = Field(default=None, sa_column=SAColumn(Text))
+    version_end_type: str | None = Field(default=None, sa_column=SAColumn(Text))
+    source: str | None = Field(default=None, sa_column=SAColumn(Text))
+    recorded_at: datetime | None = Field(default=None, sa_column=_ts_now())
+
+
+class CveReference(SQLModel, table=True):
+    __tablename__ = "cve_reference"
+
+    id: int | None = Field(default=None, sa_column=SAColumn(BigInteger, primary_key=True))
+    cve_id: str = Field(sa_column=SAColumn(Text, nullable=False))
+    url: str = Field(sa_column=SAColumn(Text, nullable=False))
+    tags: list[str] | None = Field(default=None, sa_column=SAColumn(ARRAY(Text)))
+    source: str | None = Field(default=None, sa_column=SAColumn(Text))
+    recorded_at: datetime | None = Field(default=None, sa_column=_ts_now())
+
+
+class CveSoftReference(SQLModel, table=True):
+    """CVE MENCIONADO en la prosa de una nota (GHSA, commit, noticia) que NO es
+    el CVE propio de esa nota. Referencia BLANDA: NO ancla, NO fusiona, NO entra
+    en `identifiers` ni en el union-find. Solo registra "este CVE se mencionó
+    aquí", para contarlo y darle contexto sin colapsar vulnerabilidades distintas.
+    """
+
+    __tablename__ = "cve_soft_references"
+
+    id: int | None = Field(default=None, sa_column=SAColumn(BigInteger, primary_key=True))
+    cve_id: str = Field(sa_column=SAColumn(Text, nullable=False))
+    mention_id: int = Field(
+        sa_column=SAColumn(
+            BigInteger, ForeignKey("mentions.id", ondelete="CASCADE"), nullable=False
+        )
+    )
+    source_id: int = Field(sa_column=SAColumn(Integer, ForeignKey("sources.id"), nullable=False))
+    # El candidate de la NOTA donde apareció (contexto de drill-down); blando.
+    from_candidate_id: uuid.UUID | None = Field(
+        default=None,
+        sa_column=SAColumn(PGUUID(as_uuid=True), ForeignKey("candidates.id", ondelete="SET NULL")),
+    )
+    context: str | None = Field(default=None, sa_column=SAColumn(Text))
+    seen_at: datetime | None = Field(default=None, sa_column=_ts_now())
 
 
 # ---------------------------------------------------------------------

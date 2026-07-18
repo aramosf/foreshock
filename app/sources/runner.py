@@ -93,3 +93,29 @@ async def run_source(name: str) -> dict[str, int]:
 
     log.info("source.run", source=name, **stats)
     return stats
+
+
+def ingest_prefetched(name: str, mentions: list) -> dict[str, int]:
+    """Ingiere una lista de menciones YA obtenidas (p.ej. re-extraídas de la caché
+    del git-log) para la fuente `name`. Mismo aislamiento por savepoint que
+    run_source; no toca la red."""
+    stats = {"fetched": len(mentions), "created": 0, "duplicate": 0, "errors": 0}
+    with session_scope() as session:
+        row = _get_source_row(session, name)
+        if row is None or row.id is None:
+            raise RuntimeError(f"fuente '{name}' no está en sources; corre el seeding")
+        source_id = row.id
+        for m in mentions:
+            try:
+                with session.begin_nested():
+                    res = ingest_mention(session, source_id, m)
+                if res.created:
+                    stats["created"] += 1
+                elif res.duplicate:
+                    stats["duplicate"] += 1
+            except Exception as exc:  # noqa: BLE001
+                stats["errors"] += 1
+                log.warning("ingest.mention_error", source=name, error=str(exc))
+        row.last_success_at = datetime.now(UTC)
+    log.info("source.reextract", source=name, **stats)
+    return stats

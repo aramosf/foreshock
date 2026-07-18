@@ -153,6 +153,21 @@ def sources_run(name: str) -> None:
     console.print(stats)
 
 
+@sources_app.command("reextract-commits")
+def sources_reextract_commits() -> None:
+    """Re-extrae github_commits desde la caché comprimida de git-log (sin clonar).
+
+    Para recuperarse de un bug de parseo de commits: re-corre la extracción con el
+    código actual sobre los logs ya cacheados. Cero red."""
+    from app.core.config import get_settings
+    from app.sources.github_commits import reextract_from_cache
+    from app.sources.runner import ingest_prefetched
+
+    mentions = reextract_from_cache(get_settings())
+    console.print(f"menciones re-extraídas de caché: {len(mentions)}")
+    console.print(ingest_prefetched("github_commits", mentions))
+
+
 # ---------------------------------------------------------------- baseline
 @baseline_app.command("sync")
 def baseline_sync(
@@ -163,6 +178,34 @@ def baseline_sync(
     from app.baseline.service import run_baseline_once
 
     console.print(run_baseline_once(nvd_hours=nvd_hours, force_full_cvelist=full_cvelist))
+
+
+@baseline_app.command("nvd-full")
+def baseline_nvd_full() -> None:
+    """Full sync de NVD 2.0: pagina TODO el dataset (~270k CVEs, sin ventana)."""
+    from app.baseline.nvd import sync_nvd_full
+
+    console.print(asyncio.run(sync_nvd_full()))
+
+
+@baseline_app.command("epss-full")
+def baseline_epss_full() -> None:
+    """Full sync de EPSS: volcado CSV con TODAS las puntuaciones actuales (~270k)."""
+    from app.baseline.epss import sync_epss_full
+
+    console.print(asyncio.run(sync_epss_full()))
+
+
+@baseline_app.command("enrich-nvd")
+def baseline_enrich_nvd(
+    batch: int = typer.Option(2000, help="tamaño de lote (keyset por id)"),
+) -> None:
+    """Enriquece published_cves desde raw_json (CVE 5.0): CVSS/CWE/CPE/refs + SSVC.
+
+    Deriva de datos YA en BD (no descarga). Idempotente: reejecutable sin duplicar."""
+    from app.baseline.enrich import enrich_all
+
+    console.print(enrich_all(batch_size=batch))
 
 
 # ---------------------------------------------------------------- emerging

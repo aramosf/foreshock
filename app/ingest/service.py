@@ -16,16 +16,22 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.core.models import Candidate, Identifier
+from app.core.models import Candidate, CveSoftReference, Identifier
 from app.core.models import Mention as MentionRow
 from app.core.models import PublishedCVE
 from app.ingest.affected import AffectedInput, persist_affected, persist_cvss_vectors
 from app.ingest.hashing import content_hash
-from app.ingest.identifiers import extract_identifiers, primary_cve, primary_native
+from app.ingest.identifiers import (
+    RECOGNIZED_SCHEMES,
+    extract_identifiers,
+    primary_cve,
+    primary_native,
+)
 from app.ingest.reconcile import resolve_candidate
 
 log = get_logger(__name__)
@@ -124,10 +130,35 @@ def compute_days_ahead(session: Session, candidate: Candidate) -> None:
     candidate.days_ahead_vs_nvd_published = _days(pub.nvd_published_at, fs)
     candidate.days_ahead_vs_nvd_present = _days(pub.nvd_first_observed_at, fs)
     candidate.days_ahead_vs_nvd_analyzed = _days(pub.nvd_first_analyzed_observed_at, fs)
-    if pub.state == "PUBLISHED" and candidate.status in ("candidate", "emerging"):
+    # "Published" = la META es NVD CON DATOS (nvd_published_at). Un CVE reservado o
+    # solo en MITRE/cvelist sin fecha de NVD sigue siendo PRE-publicado para nosotros.
+    if pub.nvd_published_at is not None and candidate.status in ("candidate", "emerging"):
         candidate.status = "published"
         if candidate.promoted_at is None:
             candidate.promoted_at = datetime.now(UTC)
+
+
+def _record_soft_references(session: Session, mention_id: int, source_id: int,
+                            candidate: Candidate, anchored: list, m: "FetchedMention") -> None:
+    """Registra como referencia BLANDA los CVEs citados en la prosa que NO son el
+    CVE anclado de esta nota. No tocan la identidad ni el union-find: solo cuentan
+    y dan contexto ("este CVE se menciona aquí"). Idempotente por (mention_id, cve_id)."""
+    anchored_cves = {i.value for i in anchored if i.scheme == "CVE"}
+    prose = extract_identifiers(m.title, m.snippet, m.url)
+    referenced = {i.value for i in prose if i.scheme == "CVE"} - anchored_cves
+    if not referenced:
+        return
+    context = (m.title or m.snippet or "")[:500] or None
+    rows = [{
+        "cve_id": cve,
+        "mention_id": mention_id,
+        "source_id": source_id,
+        "from_candidate_id": candidate.id,
+        "context": context,
+    } for cve in sorted(referenced)]
+    stmt = pg_insert(CveSoftReference.__table__).values(rows)
+    stmt = stmt.on_conflict_do_nothing(constraint="uq_soft_ref_mention_cve")
+    session.execute(stmt)
 
 
 def _refresh_aggregates(session: Session, candidate: Candidate) -> None:
@@ -179,6 +210,15 @@ def ingest_mention(session: Session, source_id: int, m: FetchedMention) -> Inges
         log.debug("ingest.skip_no_identifier", source_id=source_id, url=m.url)
         return IngestResult(candidate_id="", mention_id=None, created=False, duplicate=False)
 
+    # POLÍTICA: solo se almacena si ancla a un código de vulnerabilidad RECONOCIDO
+    # (CVE/ZDI/VU/GHSA/MSRC/OSV). Un ancla sintética GHCOMMIT (commit de seguridad
+    # sin CVE ni código asignado) NO basta: se descarta para no meter ruido sin
+    # identidad oficial. Un commit que SÍ cita un CVE/GHSA entra por ese código.
+    if not any(i.scheme in RECOGNIZED_SCHEMES for i in ids):
+        log.debug("ingest.skip_unrecognized", source_id=source_id, url=m.url,
+                  schemes=sorted({i.scheme for i in ids}))
+        return IngestResult(candidate_id="", mention_id=None, created=False, duplicate=False)
+
     cve = m.cve_id or primary_cve(ids)
     native = m.native_id or primary_native(ids)
 
@@ -225,6 +265,9 @@ def ingest_mention(session: Session, source_id: int, m: FetchedMention) -> Inges
     )
     session.add(row)
     session.flush()
+
+    # Referencias blandas: CVEs citados en prosa que NO son el CVE anclado.
+    _record_soft_references(session, row.id, source_id, candidate, ids, m)
 
     _refresh_aggregates(session, candidate)
     compute_days_ahead(session, candidate)

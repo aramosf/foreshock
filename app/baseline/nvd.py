@@ -175,3 +175,55 @@ async def sync_nvd_delta(hours: int = 3) -> dict[str, int]:
 
     log.info("nvd.delta_sync", hours=hours, total_results=total_results, **stats)
     return stats
+
+
+async def sync_nvd_full() -> dict[str, int]:
+    """Full sync: pagina TODO el dataset NVD 2.0 (sin ventana de fechas) y hace
+    upsert de nvd_published_at/last_modified/vuln_status + observación propia.
+    ~270k CVEs; con api key es mucho más rápido (sin key: pausa entre páginas)."""
+    settings = get_settings()
+    observed_at = datetime.now(UTC)
+    headers: dict[str, str] = {}
+    if settings.nvd_api_key:
+        headers["apiKey"] = settings.nvd_api_key
+
+    stats = {"pages": 0, "fetched": 0, "upserted": 0, "skipped": 0}
+    start_index = 0
+    total_results: int | None = None
+
+    async with make_client() as client:
+        while True:
+            params = {"resultsPerPage": _PAGE_SIZE, "startIndex": start_index}
+            resp = await get(client, settings.nvd_api_base, params=params, headers=headers)
+            data = resp.json()
+            vulns = data.get("vulnerabilities") or []
+            total_results = data.get("totalResults", total_results)
+            stats["pages"] += 1
+
+            with session_scope() as session:
+                for vuln in vulns:
+                    stats["fetched"] += 1
+                    try:
+                        record = parse_nvd_vuln(vuln)
+                        if not record.get("id"):
+                            stats["skipped"] += 1
+                            continue
+                        with session.begin_nested():
+                            upsert_nvd(session, record, observed_at)
+                        stats["upserted"] += 1
+                    except Exception as exc:  # noqa: BLE001
+                        stats["skipped"] += 1
+                        log.warning("nvd.row_error", error=str(exc))
+
+            if stats["pages"] % 20 == 0:
+                log.info("nvd.full_progress", upserted=stats["upserted"],
+                         total=total_results)
+            page_size = data.get("resultsPerPage") or len(vulns)
+            start_index += page_size
+            if not vulns or (total_results is not None and start_index >= total_results):
+                break
+            if not settings.nvd_api_key:
+                await asyncio.sleep(_RATE_LIMIT_SLEEP)
+
+    log.info("nvd.full_sync", total_results=total_results, **stats)
+    return stats

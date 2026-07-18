@@ -51,10 +51,16 @@ class Settings(BaseSettings):
     github_api_base: str = Field(default="https://api.github.com")
     github_token: str | None = Field(default=None)  # PAT: sube el rate limit a 5000/h
     github_top_n: int = Field(default=10000)          # nº de repos más populares a vigilar
-    github_commits_months: int = Field(default=5)     # ventana de changelog a escanear
+    github_commits_months: int = Field(default=5)     # ventana relativa (fallback)
+    # Cutoff FIJO de commits (YYYY-MM-DD). Si se fija, se usa en vez de la ventana
+    # relativa y NO rueda con el tiempo -> el borde inferior queda anclado.
+    github_commits_since: str = Field(default="2026-05-01")
     github_repos_per_run: int = Field(default=150)    # repos por ejecución (crawl incremental)
     github_commits_max_pages: int = Field(default=10)  # páginas de commits/repo (100/pág)
-    github_synthesize_candidates: bool = Field(default=True)  # candidate pre-CVE en fixes sin CVE
+    # Política: NO sintetizar candidates GHCOMMIT desnudos (commit de seguridad sin
+    # CVE/código). La ingesta los descartaría (RECOGNIZED_SCHEMES), así que no se
+    # emiten. Un commit que cita un CVE/GHSA real sí entra por ese código.
+    github_synthesize_candidates: bool = Field(default=False)
     github_advisories_max_pages: int = Field(default=30)  # paginación GHSA (100/pág -> ~3000)
 
     # --- VulnCheck KEV (token gratis en vulncheck.com) ---
