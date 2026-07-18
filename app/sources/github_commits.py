@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import gzip
-import json
 import os
 import re
 import shutil
@@ -51,117 +50,6 @@ _CVE = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
 _REC = "\x1e"
 _FLD = "\x1f"
 _LOG_FMT = f"%H{_FLD}%cI{_FLD}%B{_REC}"
-
-
-def _headers(settings: Settings) -> dict[str, str]:
-    h = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-    if settings.github_token:
-        h["Authorization"] = f"Bearer {settings.github_token}"
-    return h
-
-
-# --- lista de repos top-N (cache en disco) -----------------------------------
-def _repo_list_path(settings: Settings) -> str:
-    return os.path.join(settings.data_dir, "github_top_repos.json")
-
-
-def _cursor_path(settings: Settings) -> str:
-    return os.path.join(settings.data_dir, "github_commits_cursor.txt")
-
-
-def _load_repo_list(settings: Settings) -> list[str] | None:
-    path = _repo_list_path(settings)
-    if not os.path.exists(path):
-        return None
-    with open(path, encoding="utf-8") as fh:
-        data = json.load(fh)
-    built = datetime.fromisoformat(data["built_at"])
-    if datetime.now(UTC) - built > timedelta(days=7):
-        return None
-    return list(data["repos"])
-
-
-def _save_repo_list(settings: Settings, repos: list[str]) -> None:
-    os.makedirs(settings.data_dir, exist_ok=True)
-    with open(_repo_list_path(settings), "w", encoding="utf-8") as fh:
-        json.dump({"built_at": datetime.now(UTC).isoformat(), "repos": repos}, fh)
-
-
-async def _build_repo_list(client: httpx.AsyncClient, settings: Settings) -> list[str]:
-    """Construye la lista top-N por estrellas con ventanas descendentes (la Search
-    API tope 1000 resultados por consulta, así que se windowa)."""
-    base = settings.github_api_base
-    repos: list[str] = []
-    seen: set[str] = set()
-    upper: int | None = None
-    floor = 50
-    while len(repos) < settings.github_top_n:
-        q = f"stars:>={floor}" if upper is None else f"stars:{floor}..{upper}"
-        page_min: int | None = None
-        for page in range(1, 11):
-            resp = await client.get(
-                f"{base}/search/repositories",
-                headers=_headers(settings),
-                params={"q": q, "sort": "stars", "order": "desc",
-                        "per_page": 100, "page": page},
-            )
-            if resp.status_code != 200:
-                log.warning("github.search_error", status=resp.status_code)
-                return repos
-            items = resp.json().get("items", [])
-            if not items:
-                break
-            for it in items:
-                full = it["full_name"]
-                page_min = it["stargazers_count"]
-                if full not in seen:
-                    seen.add(full)
-                    repos.append(full)
-                    if len(repos) >= settings.github_top_n:
-                        return repos
-        if page_min is None or page_min <= floor:
-            break
-        upper = page_min
-    return repos
-
-
-def _state_path(settings: Settings) -> str:
-    return os.path.join(settings.data_dir, "github_repo_state.json")
-
-
-def _load_state(settings: Settings) -> dict[str, str]:
-    path = _state_path(settings)
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, encoding="utf-8") as fh:
-            return dict(json.load(fh))
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-
-def _save_state(settings: Settings, state: dict[str, str]) -> None:
-    os.makedirs(settings.data_dir, exist_ok=True)
-    tmp = _state_path(settings) + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(state, fh)
-    os.replace(tmp, _state_path(settings))
-
-
-def _load_cursor(settings: Settings) -> int:
-    path = _cursor_path(settings)
-    if os.path.exists(path):
-        try:
-            return int(open(path).read().strip())
-        except ValueError:
-            return 0
-    return 0
-
-
-def _save_cursor(settings: Settings, cursor: int) -> None:
-    os.makedirs(settings.data_dir, exist_ok=True)
-    with open(_cursor_path(settings), "w", encoding="utf-8") as fh:
-        fh.write(str(cursor))
 
 
 # --- escaneo por clon blobless -----------------------------------------------
@@ -340,44 +228,48 @@ class GitHubCommitsSource(BaseSource):
 
     async def fetch(self, ctx: FetchContext) -> list[FetchedMention]:
         settings = get_settings()
-        repos = _load_repo_list(settings)
-        if repos is None or len(repos) < settings.github_top_n:
-            log.info("github.building_repo_list", top_n=settings.github_top_n,
-                     cached=len(repos) if repos else 0)
-            repos = await _build_repo_list(ctx.http, settings)
-            if repos:
-                _save_repo_list(settings, repos)
-        if not repos:
+        from app.core.db import session_scope
+        from app.sources.repo_registry import (
+            harvest_references,
+            harvest_top_n,
+            next_batch,
+            registry_count,
+            update_scan,
+        )
+
+        # Si el registro está vacío, cosecha base: top-N (estrellas) + referencias
+        # de advisories (repos con CVE previo). Ambas alimentan la MISMA tabla.
+        if registry_count() == 0:
+            log.info("github.registry_empty_bootstrap")
+            harvest_references()
+            await harvest_top_n(ctx.http, settings)
+
+        cutoff_date = (settings.github_commits_since
+                       or (datetime.now(UTC)
+                           - timedelta(days=30 * settings.github_commits_months)
+                           ).strftime("%Y-%m-%d"))[:10]
+
+        with session_scope() as session:
+            batch = next_batch(session, settings.github_repos_per_run)
+        if not batch:
             log.warning("github.no_repos")
             return []
 
-        if settings.github_commits_since:
-            cutoff_iso = f"{settings.github_commits_since}T00:00:00Z"
-        else:
-            cutoff = datetime.now(UTC) - timedelta(days=30 * settings.github_commits_months)
-            cutoff_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        cursor = _load_cursor(settings)
-        batch = repos[cursor:cursor + settings.github_repos_per_run]
-        if len(batch) < settings.github_repos_per_run:
-            batch += repos[: settings.github_repos_per_run - len(batch)]
-        next_cursor = (cursor + settings.github_repos_per_run) % max(len(repos), 1)
-
-        state = _load_state(settings)
         synthesize = settings.github_synthesize_candidates
         out: list[FetchedMention] = []
-        for full in batch:
-            since_iso = max(cutoff_iso, state.get(full, ""), key=lambda x: x or "")
-            since_iso = since_iso or cutoff_iso
+        scanned: list[tuple[str, str | None]] = []
+        for full, watermark in batch:
+            since_date = max(cutoff_date, (watermark or "")[:10]) or cutoff_date
+            newest = None
             try:
-                mentions, newest = await _git_scan(settings, full, since_iso, synthesize)
+                mentions, newest = await _git_scan(settings, full, since_date, synthesize)
                 out.extend(mentions)
-                if newest is not None:
-                    state[full] = newest
             except Exception as exc:  # noqa: BLE001 - un repo no tumba el lote
                 log.warning("github.repo_error", repo=full, error=str(exc))
-        _save_state(settings, state)
-        _save_cursor(settings, next_cursor)
-        log.info("github.batch_done", repos=len(batch), mentions=len(out),
-                 cursor=next_cursor, watermarks=len(state))
+            scanned.append((full, newest))
+        # Marca TODO el lote como escaneado (aunque un repo diera 0/None) -> rota.
+        with session_scope() as session:
+            for full, newest in scanned:
+                update_scan(session, full, newest)
+        log.info("github.batch_done", repos=len(batch), mentions=len(out))
         return out

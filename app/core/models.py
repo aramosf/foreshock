@@ -301,6 +301,24 @@ class CveReference(SQLModel, table=True):
     recorded_at: datetime | None = Field(default=None, sa_column=_ts_now())
 
 
+class GithubRepo(SQLModel, table=True):
+    """Registro unificado de repos GitHub a vigilar por github_commits. PK por
+    full_name => un repo añadido por varias estrategias es UNA fila (dedup). El
+    watermark evita re-escanear commits ya vistos."""
+
+    __tablename__ = "github_repos"
+
+    full_name: str = Field(sa_column=SAColumn(Text, primary_key=True))     # owner/repo
+    origin: str = Field(sa_column=SAColumn(Text, nullable=False))
+    stars: int | None = Field(default=None, sa_column=SAColumn(Integer))
+    priority: int = Field(
+        default=0, sa_column=SAColumn(Integer, nullable=False, server_default=text("0"))
+    )
+    watermark: str | None = Field(default=None, sa_column=SAColumn(Text))
+    first_seen_at: datetime | None = Field(default=None, sa_column=_ts_now())
+    last_scanned_at: datetime | None = Field(default=None, sa_column=_ts())
+
+
 class CveSoftReference(SQLModel, table=True):
     """CVE MENCIONADO en la prosa de una nota (GHSA, commit, noticia) que NO es
     el CVE propio de esa nota. Referencia BLANDA: NO ancla, NO fusiona, NO entra

@@ -20,7 +20,8 @@ from app.sources.runner import sync_registry_to_db
 _TABLES = [
     "affected_version_ranges", "affected_products", "product_aliases",
     "product_catalog", "cvss_scores", "epss_scores", "candidate_links",
-    "mentions", "identifiers", "candidates", "published_cves",
+    "cve_soft_references", "mentions", "identifiers", "candidates",
+    "published_cves", "github_repos",
 ]
 
 

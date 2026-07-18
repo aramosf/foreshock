@@ -63,6 +63,12 @@ class Settings(BaseSettings):
     github_synthesize_candidates: bool = Field(default=False)
     github_advisories_max_pages: int = Field(default=30)  # paginación GHSA (100/pág -> ~3000)
 
+    # --- Watchlist de repos (estrategias de relevancia más allá de las estrellas) ---
+    # 1+2 (referencias de advisories / CVE previo) y 3 (distros vía refs) se derivan
+    # de datos propios (siempre activas). 4 y 5 requieren fuente externa y son opt-in:
+    criticality_csv_url: str | None = Field(default=None)   # CSV OpenSSF Criticality Score
+    pypi_downloads_top_n: int = Field(default=0)            # >0 => top-N PyPI por descargas
+
     # --- VulnCheck KEV (token gratis en vulncheck.com) ---
     vulncheck_token: str | None = Field(default=None)
     vulncheck_api_base: str = Field(default="https://api.vulncheck.com/v3")

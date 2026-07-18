@@ -153,6 +153,21 @@ def sources_run(name: str) -> None:
     console.print(stats)
 
 
+@sources_app.command("harvest-repos")
+def sources_harvest_repos() -> None:
+    """Cosecha el registro de repos github_commits: top-N por estrellas + referencias
+    de advisories (repos con CVE previo) + criticality/descargas (opt-in por config)."""
+    from app.core.config import get_settings
+    from app.sources.http import make_client
+    from app.sources.repo_registry import harvest_all
+
+    async def _run() -> dict[str, int]:
+        async with make_client() as client:
+            return await harvest_all(client, get_settings())
+
+    console.print(asyncio.run(_run()))
+
+
 @sources_app.command("reextract-commits")
 def sources_reextract_commits() -> None:
     """Re-extrae github_commits desde la caché comprimida de git-log (sin clonar).
