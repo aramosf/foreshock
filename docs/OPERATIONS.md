@@ -1,6 +1,6 @@
 # Operations
 
-CVERadar is a headless data-loading backend (no UI). Everything runs with
+Foreshock is a headless data-loading backend (no UI). Everything runs with
 `docker compose` on top of Postgres 16 + Redis 7. All application processes are
 built from one image (`docker/Dockerfile`: `python:3.12-slim` + `git` +
 dependencies installed with `uv`).
@@ -34,9 +34,9 @@ On startup:
 Run operations manually inside a container:
 
 ```bash
-docker compose run --rm baseline-worker cveradar sources list
-docker compose run --rm baseline-worker cveradar baseline sync
-docker compose run --rm baseline-worker cveradar emerging list --since 24h --tier 1
+docker compose run --rm baseline-worker foreshock sources list
+docker compose run --rm baseline-worker foreshock baseline sync
+docker compose run --rm baseline-worker foreshock emerging list --since 24h --tier 1
 ```
 
 ---
@@ -44,8 +44,8 @@ docker compose run --rm baseline-worker cveradar emerging list --since 24h --tie
 ## Environment variables
 
 Configuration is centralized in `app/core/config.py` (`pydantic-settings`,
-`env_prefix="CVERADAR_"`, `env_file=".env"`, `extra="ignore"`). Two variables use
-an explicit `validation_alias` and therefore have **no** `CVERADAR_` prefix:
+`env_prefix="FORESHOCK_"`, `env_file=".env"`, `extra="ignore"`). Two variables use
+an explicit `validation_alias` and therefore have **no** `FORESHOCK_` prefix:
 `DATABASE_URL` and `REDIS_URL`. Defaults target the local compose network; no
 secret is ever hardcoded.
 
@@ -54,82 +54,97 @@ secret is ever hardcoded.
 |---|---|---|
 | `DATABASE_URL` | `postgresql+psycopg://cveradar:cveradar@localhost:5432/cveradar` | Postgres DSN (psycopg3 driver). Compose overrides host to `postgres`. |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis URL. Compose overrides host to `redis`. |
-| `CVERADAR_DATA_DIR` | `/data` | Root for raw HTML, caches, browser contexts. |
-| `CVERADAR_RAW_HTML_DIR` | `/data/raw` | Persisted raw mention HTML (`/data/raw/<source_id>/<hash>.html`). |
-| `CVERADAR_CVELIST_REPO_DIR` | `/data/cvelistV5` | Local shallow clone of cvelistV5. |
+| `FORESHOCK_DATA_DIR` | `/data` | Root for raw HTML, caches, browser contexts. |
+| `FORESHOCK_RAW_HTML_DIR` | `/data/raw` | Persisted raw mention HTML (`/data/raw/<source_id>/<hash>.html`). |
+| `FORESHOCK_CVELIST_REPO_DIR` | `/data/cvelistV5` | Local shallow clone of cvelistV5. |
 
 ### Baseline (cvelistV5 / NVD / EPSS)
 | Variable | Default | Purpose |
 |---|---|---|
-| `CVERADAR_CVELIST_REPO_URL` | `https://github.com/CVEProject/cvelistV5.git` | Repo cloned/pulled for canonical CVE records. |
-| `CVERADAR_CVELIST_SYNC_SECONDS` | `900` | cvelist job cadence (15 min). |
-| `CVERADAR_NVD_DELTA_SECONDS` | `7200` | NVD delta job cadence (2 h). |
-| `CVERADAR_NVD_API_BASE` | `https://services.nvd.nist.gov/rest/json/cves/2.0` | NVD 2.0 endpoint. |
-| `CVERADAR_NVD_API_KEY` | `None` | NVD API key. Without it, the module pauses 6 s between pages (public rate limit). |
-| `CVERADAR_EPSS_SYNC_SECONDS` | `86400` | EPSS job cadence (daily). |
-| `CVERADAR_EPSS_API_BASE` | `https://api.first.org/data/v1/epss` | FIRST.org EPSS endpoint. |
+| `FORESHOCK_CVELIST_REPO_URL` | `https://github.com/CVEProject/cvelistV5.git` | Repo cloned/pulled for canonical CVE records. |
+| `FORESHOCK_CVELIST_SYNC_SECONDS` | `900` | cvelist job cadence (15 min). |
+| `FORESHOCK_NVD_DELTA_SECONDS` | `7200` | NVD delta job cadence (2 h). |
+| `FORESHOCK_NVD_API_BASE` | `https://services.nvd.nist.gov/rest/json/cves/2.0` | NVD 2.0 endpoint. |
+| `FORESHOCK_NVD_API_KEY` | `None` | NVD API key. Without it, the module pauses 6 s between pages (public rate limit). |
+| `FORESHOCK_EPSS_SYNC_SECONDS` | `86400` | EPSS job cadence (daily). |
+| `FORESHOCK_EPSS_API_BASE` | `https://api.first.org/data/v1/epss` | FIRST.org EPSS endpoint. |
 
 ### GitHub commits source
+`github_commits` now scans via a **blobless git clone + `git log`** (no REST commit
+API, no rate limit) and consumes the `github_repos` registry (migration `0010`) via
+`next_batch`/`update_scan` instead of JSON state files.
+
 | Variable | Default | Purpose |
 |---|---|---|
-| `CVERADAR_GITHUB_API_BASE` | `https://api.github.com` | GitHub API base. |
-| `CVERADAR_GITHUB_TOKEN` | `None` | PAT. Raises the rate limit to 5000 req/h; strongly recommended. |
-| `CVERADAR_GITHUB_TOP_N` | `10000` | Number of most-starred repos to watch. Raising it triggers a repo-list rebuild. |
-| `CVERADAR_GITHUB_COMMITS_MONTHS` | `5` | Changelog look-back window scanned per repo. |
-| `CVERADAR_GITHUB_REPOS_PER_RUN` | `150` | Repos processed per run (rotating incremental crawl). *(compose passes `500` by default.)* |
-| `CVERADAR_GITHUB_COMMITS_MAX_PAGES` | `10` | Max commit pages per repo/run (100 commits/page) followed via the `Link` header. |
-| `CVERADAR_GITHUB_SYNTHESIZE_CANDIDATES` | `True` | Synthesize a pre-CVE `GHCOMMIT` candidate for security-fix commits that cite no CVE. |
-| `CVERADAR_GITHUB_ADVISORIES_MAX_PAGES` | `30` | GHSA advisories pagination cap (100/page → ~3000). |
+| `FORESHOCK_GITHUB_API_BASE` | `https://api.github.com` | GitHub API base (used by `harvest_top_n`'s Search API). |
+| `FORESHOCK_GITHUB_TOKEN` | `None` | PAT. Embedded in the clone URL for higher limits; raises the Search API rate limit. Strongly recommended. |
+| `FORESHOCK_GITHUB_TOP_N` | `10000` | Number of most-starred repos harvested into the `github_repos` watchlist (origin `top_n`). |
+| `FORESHOCK_GITHUB_COMMITS_MONTHS` | `5` | Relative look-back window (fallback when `..._SINCE` is unset). |
+| `FORESHOCK_GITHUB_COMMITS_SINCE` | `2026-05-01` | **Fixed** commit cutoff (`YYYY-MM-DD`). When set, used instead of the relative window and does not roll with time. |
+| `FORESHOCK_GITHUB_REPOS_PER_RUN` | `150` | Repos scanned per run (`next_batch`, unscanned-first rotation). |
+| `FORESHOCK_GITHUB_COMMITS_MAX_PAGES` | `10` | GHSA-era commit-page cap; **no longer used** by the git-based `github_commits`. |
+| `FORESHOCK_GITHUB_SYNTHESIZE_CANDIDATES` | `False` | **Default off.** When off, bare security-fix commits with no CVE are not synthesized as `GHCOMMIT` anchors (ingestion would drop them anyway — not a `RECOGNIZED_SCHEME`). |
+| `FORESHOCK_GITHUB_ADVISORIES_MAX_PAGES` | `30` | GHSA advisories pagination cap (100/page → ~3000). |
+
+### GitHub repo watchlist (registry) — opt-in strategies
+Beyond `top_n` and the always-on `reference`/`past_cve` (repos cited in advisory
+references), the `github_repos` registry supports two opt-in discovery strategies
+(`foreshock sources harvest-repos`):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `FORESHOCK_CRITICALITY_CSV_URL` | `None` | OpenSSF Criticality Score CSV URL → repos (origin `criticality`). Opt-in. |
+| `FORESHOCK_PYPI_DOWNLOADS_TOP_N` | `0` | `>0` ⇒ top-N PyPI packages by 30-day downloads → their repos (origin `downloads`). Opt-in. |
 
 ### VulnCheck KEV
 | Variable | Default | Purpose |
 |---|---|---|
-| `CVERADAR_VULNCHECK_TOKEN` | `None` | Free token from vulncheck.com. **Without it the source is inactive (returns `[]`).** |
-| `CVERADAR_VULNCHECK_API_BASE` | `https://api.vulncheck.com/v3` | VulnCheck API base. |
-| `CVERADAR_VULNCHECK_MAX_PAGES` | `50` | Pagination cap (100 items/page). |
+| `FORESHOCK_VULNCHECK_TOKEN` | `None` | Free token from vulncheck.com. **Without it the source is inactive (returns `[]`).** |
+| `FORESHOCK_VULNCHECK_API_BASE` | `https://api.vulncheck.com/v3` | VulnCheck API base. |
+| `FORESHOCK_VULNCHECK_MAX_PAGES` | `50` | Pagination cap (100 items/page). |
 
 ### OSV.dev
 | Variable | Default | Purpose |
 |---|---|---|
-| `CVERADAR_OSV_ECOSYSTEMS` | `PyPI,Go,crates.io,RubyGems,Packagist` | Comma-separated OSV ecosystems whose `all.zip` dump is scanned. |
-| `CVERADAR_OSV_MONTHS` | `5` | Only advisories with `published` within this window are kept. |
-| `CVERADAR_OSV_MAX_PER_ECOSYSTEM` | `3000` | Cap of mentions per ecosystem per run. **`0` = no cap** (full ingest). |
+| `FORESHOCK_OSV_ECOSYSTEMS` | `PyPI,Go,crates.io,RubyGems,Packagist` | Comma-separated OSV ecosystems whose `all.zip` dump is scanned. |
+| `FORESHOCK_OSV_MONTHS` | `5` | Only advisories with `published` within this window are kept. |
+| `FORESHOCK_OSV_MAX_PER_ECOSYSTEM` | `3000` | Cap of mentions per ecosystem per run. **`0` = no cap** (full ingest). |
 
 ### Fetchers / polite scraping
 | Variable | Default | Purpose |
 |---|---|---|
-| `CVERADAR_USER_AGENT` | `CVERadar/0.1 (+https://github.com/cveradar; early-CVE research)` | Identifiable UA on every request. |
-| `CVERADAR_HTTP_TIMEOUT_SECONDS` | `30.0` | httpx client timeout. |
-| `CVERADAR_MAX_RETRIES` | `3` | Retry budget knob (the retry decorator retries only transient errors: transport, 429, 5xx). |
-| `CVERADAR_RESPECT_ROBOTS` | `True` | Honour `robots.txt` for scrape fetchers (cached parser). |
-| `CVERADAR_BROWSER_MAX_CONCURRENT` | `3` | Playwright pool concurrency (optional `browser` extra). |
-| `CVERADAR_BROWSER_RECYCLE_AFTER` | `50` | Recycle a browser context after N uses. |
+| `FORESHOCK_USER_AGENT` | `Foreshock/0.1 (+https://github.com/foreshock; early-CVE research)` | Identifiable UA on every request. |
+| `FORESHOCK_HTTP_TIMEOUT_SECONDS` | `30.0` | httpx client timeout. |
+| `FORESHOCK_MAX_RETRIES` | `3` | Retry budget knob (the retry decorator retries only transient errors: transport, 429, 5xx). |
+| `FORESHOCK_RESPECT_ROBOTS` | `True` | Honour `robots.txt` for scrape fetchers (cached parser). |
+| `FORESHOCK_BROWSER_MAX_CONCURRENT` | `3` | Playwright pool concurrency (optional `browser` extra). |
+| `FORESHOCK_BROWSER_RECYCLE_AFTER` | `50` | Recycle a browser context after N uses. |
 
 ### LLM enrichment
 | Variable | Default | Purpose |
 |---|---|---|
-| `CVERADAR_LLM_PROVIDER` | `mock` | One of `mock` / `openai` / `anthropic` / `ollama`. `mock` needs no network. |
-| `CVERADAR_LLM_MODEL` | `mock-model` | Model id for the provider. |
-| `CVERADAR_LLM_API_KEY` | `None` | Provider API key (secret). |
-| `CVERADAR_LLM_BASE_URL` | `None` | Custom base URL (e.g. Ollama `http://ollama:11434`). |
-| `CVERADAR_LLM_MAX_TOKENS` | `1024` | Max tokens per enrichment call. |
-| `CVERADAR_ENRICHMENT_REENRICH_HOURS` | `24` | Re-enrich if the last enrichment is older than this. |
-| `CVERADAR_ENRICHMENT_REENRICH_MIN_MENTIONS` | `3` | Re-enrich if this many new mentions arrived. |
+| `FORESHOCK_LLM_PROVIDER` | `mock` | One of `mock` / `openai` / `anthropic` / `ollama`. `mock` needs no network. |
+| `FORESHOCK_LLM_MODEL` | `mock-model` | Model id for the provider. |
+| `FORESHOCK_LLM_API_KEY` | `None` | Provider API key (secret). |
+| `FORESHOCK_LLM_BASE_URL` | `None` | Custom base URL (e.g. Ollama `http://ollama:11434`). |
+| `FORESHOCK_LLM_MAX_TOKENS` | `1024` | Max tokens per enrichment call. |
+| `FORESHOCK_ENRICHMENT_REENRICH_HOURS` | `24` | Re-enrich if the last enrichment is older than this. |
+| `FORESHOCK_ENRICHMENT_REENRICH_MIN_MENTIONS` | `3` | Re-enrich if this many new mentions arrived. |
 
 ### Promotion / logging
 | Variable | Default | Purpose |
 |---|---|---|
-| `CVERADAR_EMERGING_MIN_MENTIONS` | `1` | Baseline promotion/emerging threshold. |
-| `CVERADAR_LOG_LEVEL` | `INFO` | Log level. |
-| `CVERADAR_LOG_JSON` | `True` | Structured JSON logging (structlog). |
+| `FORESHOCK_EMERGING_MIN_MENTIONS` | `1` | Baseline promotion/emerging threshold. |
+| `FORESHOCK_LOG_LEVEL` | `INFO` | Log level. |
+| `FORESHOCK_LOG_JSON` | `True` | Structured JSON logging (structlog). |
 
 `docker-compose.yml` forwards a subset from the host with `${VAR:-default}`
-interpolation (typically via a `.env` file): `CVERADAR_NVD_API_KEY`,
-`CVERADAR_LLM_PROVIDER` / `CVERADAR_LLM_API_KEY` / `CVERADAR_LLM_MODEL`,
-`CVERADAR_GITHUB_TOKEN`, `CVERADAR_GITHUB_TOP_N`, `CVERADAR_GITHUB_REPOS_PER_RUN`
-(compose default `500`), `CVERADAR_VULNCHECK_TOKEN`,
-`CVERADAR_VULNCHECK_MAX_PAGES`, `CVERADAR_OSV_ECOSYSTEMS`,
-`CVERADAR_OSV_MAX_PER_ECOSYSTEM`.
+interpolation (typically via a `.env` file): `FORESHOCK_NVD_API_KEY`,
+`FORESHOCK_LLM_PROVIDER` / `FORESHOCK_LLM_API_KEY` / `FORESHOCK_LLM_MODEL`,
+`FORESHOCK_GITHUB_TOKEN`, `FORESHOCK_GITHUB_TOP_N`, `FORESHOCK_GITHUB_REPOS_PER_RUN`
+(compose default `500`), `FORESHOCK_VULNCHECK_TOKEN`,
+`FORESHOCK_VULNCHECK_MAX_PAGES`, `FORESHOCK_OSV_ECOSYSTEMS`,
+`FORESHOCK_OSV_MAX_PER_ECOSYSTEM`.
 
 ---
 
@@ -138,21 +153,21 @@ interpolation (typically via a `.env` file): `CVERADAR_NVD_API_KEY`,
 All tokens/keys live in a local `.env` at the repo root (read by both
 `pydantic-settings` and `docker-compose`'s `${VAR}` interpolation). **`.env` is
 git-ignored — never commit tokens.** The secret-bearing variables are:
-`CVERADAR_NVD_API_KEY`, `CVERADAR_GITHUB_TOKEN`, `CVERADAR_VULNCHECK_TOKEN`,
-`CVERADAR_LLM_API_KEY`. Example `.env`:
+`FORESHOCK_NVD_API_KEY`, `FORESHOCK_GITHUB_TOKEN`, `FORESHOCK_VULNCHECK_TOKEN`,
+`FORESHOCK_LLM_API_KEY`. Example `.env`:
 
 ```dotenv
-CVERADAR_GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-CVERADAR_NVD_API_KEY=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-CVERADAR_VULNCHECK_TOKEN=vulncheck_xxxxxxxx
-CVERADAR_LLM_PROVIDER=openai
-CVERADAR_LLM_API_KEY=sk-xxxxxxxx
-CVERADAR_LLM_MODEL=gpt-4o-mini
+FORESHOCK_GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+FORESHOCK_NVD_API_KEY=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+FORESHOCK_VULNCHECK_TOKEN=vulncheck_xxxxxxxx
+FORESHOCK_LLM_PROVIDER=openai
+FORESHOCK_LLM_API_KEY=sk-xxxxxxxx
+FORESHOCK_LLM_MODEL=gpt-4o-mini
 ```
 
-Missing optional secrets degrade gracefully: no `CVERADAR_VULNCHECK_TOKEN` → the
-VulnCheck source is inactive; no `CVERADAR_GITHUB_TOKEN` → GitHub sources still
-run but at the 60 req/h unauthenticated limit; `CVERADAR_LLM_PROVIDER=mock` → no
+Missing optional secrets degrade gracefully: no `FORESHOCK_VULNCHECK_TOKEN` → the
+VulnCheck source is inactive; no `FORESHOCK_GITHUB_TOKEN` → GitHub sources still
+run but at the 60 req/h unauthenticated limit; `FORESHOCK_LLM_PROVIDER=mock` → no
 LLM calls.
 
 ---
@@ -162,7 +177,7 @@ LLM calls.
 | Volume | Mount | Contents |
 |---|---|---|
 | `pgdata` | `postgres:/var/lib/postgresql/data` | Postgres data. |
-| `data` | `baseline-worker` and `sources-worker` at `/data` | Raw HTML (`/data/raw/<source_id>/<hash>.html`); the cvelistV5 clone (`/data/cvelistV5`); GitHub caches (`github_top_repos.json`, `github_commits_cursor.txt`, `github_repo_state.json`); OSV `all.zip` temp files (streamed to a `NamedTemporaryFile` and unlinked). |
+| `data` | `baseline-worker` and `sources-worker` at `/data` | Raw HTML (`/data/raw/<source_id>/<hash>.html`); the cvelistV5 clone (`/data/cvelistV5`); the `github_commits` git-log cache (`/data/cache/gitlog/<owner__repo>.log.gz`) and ephemeral blobless clones (`/data/clones/`); OSV `all.zip` temp files (streamed to a `NamedTemporaryFile` and unlinked). The GitHub repo watchlist now lives in the `github_repos` **table**, not JSON files. |
 
 The `data` volume is **shared** by both workers, so the GitHub top-N list,
 per-repo watermarks, crawl cursor, and raw HTML are visible to both.
@@ -211,52 +226,54 @@ docker compose run --rm \
 **Re-ingest one source now** (e.g. after fixing a fetcher or to force a pull):
 
 ```bash
-docker compose run --rm sources-worker cveradar sources run osv
-docker compose run --rm sources-worker cveradar sources run github_commits
+docker compose run --rm sources-worker foreshock sources run osv
+docker compose run --rm sources-worker foreshock sources run github_commits
 ```
 
 **Force a baseline sync** (canonical state, incl. a full cvelist reprocess):
 
 ```bash
-docker compose run --rm baseline-worker cveradar baseline sync --nvd-hours 6
-docker compose run --rm baseline-worker cveradar baseline sync --full-cvelist
+docker compose run --rm baseline-worker foreshock baseline sync --nvd-hours 6
+docker compose run --rm baseline-worker foreshock baseline sync --full-cvelist
 ```
 
 **Enable / disable a source** (picked up hot within 60 s):
 
 ```bash
-docker compose run --rm sources-worker cveradar sources disable thehackernews
-docker compose run --rm sources-worker cveradar sources enable vulncheck_kev
+docker compose run --rm sources-worker foreshock sources disable thehackernews
+docker compose run --rm sources-worker foreshock sources enable vulncheck_kev
 ```
 
-**Raise the GitHub top-N** without clearing caches — set
-`CVERADAR_GITHUB_TOP_N` higher; on the next run the repo-list rebuilds because
-`_load_repo_list` returns `None` when the cached list is shorter than the
-requested top-N (or older than 7 days).
+**Raise the GitHub top-N** — set `FORESHOCK_GITHUB_TOP_N` higher and run
+`foreshock sources harvest-repos`; `harvest_top_n` upserts the additional
+most-starred repos into the `github_repos` registry (dedup by `full_name`), and
+`next_batch` picks up the newly-added, never-scanned repos first.
 
 **Backfill affected products** for candidates ingested before rich persistence:
 
 ```bash
-docker compose run --rm baseline-worker cveradar backfill-products --batch 2000
+docker compose run --rm baseline-worker foreshock backfill-products --batch 2000
 ```
 
 ---
 
 ## Scaling notes
 
-- **GitHub top-N (10k → 100k repos).** The top-N list is built once (windowed by
-  descending star counts because the Search API caps at 1000 results/query),
-  cached to `github_top_repos.json`, and rebuilt weekly. Each run processes a
-  rotating slice of `github_repos_per_run` repos (cursor in
-  `github_commits_cursor.txt`, wrapping around), with a per-repo commit-date
-  watermark (`github_repo_state.json`) so re-scans are incremental. To go from
-  10k to 100k, raise `CVERADAR_GITHUB_TOP_N` and either raise
-  `CVERADAR_GITHUB_REPOS_PER_RUN` and/or shorten the source cadence; a PAT
-  (`CVERADAR_GITHUB_TOKEN`, 5000 req/h) is required to keep up.
+- **GitHub top-N (10k → 100k repos).** The most-starred repos are harvested into
+  the `github_repos` registry (windowed by descending star counts because the
+  Search API caps at 1000 results/query) and unified with the other discovery
+  strategies (dedup by `full_name`). Each run scans a rotating batch of
+  `github_repos_per_run` repos via `next_batch` (unscanned-first ordering), with a
+  per-repo commit-date **watermark** in the table so re-scans are incremental.
+  Scanning is a **blobless git clone + `git log`**, so there is **no REST rate
+  limit** — the earlier 5000 req/h ceiling no longer applies. To go from 10k to
+  100k, raise `FORESHOCK_GITHUB_TOP_N`, run `foreshock sources harvest-repos`, and
+  raise `FORESHOCK_GITHUB_REPOS_PER_RUN` and/or shorten the source cadence; a PAT
+  (`FORESHOCK_GITHUB_TOKEN`) still helps clone throughput and the harvest Search API.
 - **OSV without a cap.** OSV streams each ecosystem's `all.zip` to a temp file
   (avoids OOM on large dumps like npm/Debian) and reads entries lazily. Set
-  `CVERADAR_OSV_MAX_PER_ECOSYSTEM=0` for full ingest and widen
-  `CVERADAR_OSV_ECOSYSTEMS` as needed; the 6 h cadence keeps bandwidth bounded.
+  `FORESHOCK_OSV_MAX_PER_ECOSYSTEM=0` for full ingest and widen
+  `FORESHOCK_OSV_ECOSYSTEMS` as needed; the 6 h cadence keeps bandwidth bounded.
 - **NVD.** With a key, NVD paginates 2000/page without the 6 s pause; widen
-  `--nvd-hours` (or shorten `CVERADAR_NVD_DELTA_SECONDS`) to reduce the chance of
+  `--nvd-hours` (or shorten `FORESHOCK_NVD_DELTA_SECONDS`) to reduce the chance of
   missing a busy delta window.

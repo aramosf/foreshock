@@ -1,6 +1,6 @@
 # Decisiones de diseño
 
-Registro de las decisiones no obvias de CVERadar y su porqué. Cada una remite al
+Registro de las decisiones no obvias de Foreshock y su porqué. Cada una remite al
 código que la implementa.
 
 ---
@@ -56,7 +56,7 @@ métricas" (juicio) de "calcular score" (aritmética) da resultados auditables:
 
 **Decisión**: se guardan tres deltas de ventaja, pero la métrica de referencia es
 `days_ahead_vs_nvd_present`, medida contra `nvd_first_observed_at` (cuándo
-CVERadar vio por primera vez el CVE en NVD), no contra `nvd_published_at`.
+Foreshock vio por primera vez el CVE en NVD), no contra `nvd_published_at`.
 
 **Por qué**: NVD hace *backfill* — publica CVEs con fechas retroactivas o
 reescribe timestamps. Un delta contra `nvd_published_at` queda distorsionado.

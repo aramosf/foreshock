@@ -22,31 +22,43 @@ def ingest_mention(session, source_id, m: FetchedMention) -> IngestResult
 1. **Normalize `seen_at`**: `m.seen_at or now(UTC)`; if naive, force
    `tzinfo=UTC`. Everything downstream is timezone-aware to avoid naive/aware
    mixing.
-2. **Extract identifiers** from `(cve_id, native_id, title, snippet, url)` via
-   `extract_identifiers(...)` (§2). **If none are found, the mention is dropped**
-   (`ingest.skip_no_identifier`) — with no identifier it cannot be anchored to
-   anything useful. Returns `IngestResult(created=False, duplicate=False)`.
-3. **Pick CVE / native**: `cve = m.cve_id or primary_cve(ids)`;
+2. **Establish identity — declared ids only.** The candidate's identity comes
+   **only** from what the source *declares*: `extract_identifiers(m.cve_id,
+   m.native_id, *m.extra_ids)`. These anchor and merge (union-find). Bare CVEs
+   merely cited in `title`/`snippet` are **not** used to merge — a commit that
+   "fixes 21 CVEs" or a news post listing several must not collapse distinct
+   vulnerabilities into one candidate. If the source declared **nothing**, it
+   falls back to the **first** identifier found in the text (`text_ids[:1]`), not
+   all of them. If still empty → dropped (`ingest.skip_no_identifier`), returns
+   `IngestResult(created=False, duplicate=False)`.
+3. **Drop if no recognized scheme.** If none of the identity ids is in
+   `RECOGNIZED_SCHEMES` (`{CVE, ZDI-CAN, ZDI, VU, GHSA, MSRC, OSV}`), the mention
+   is **dropped** (`ingest.skip_unrecognized`) — nothing is stored without a CVE
+   or equivalent official code. A synthetic `GHCOMMIT` anchor is not enough and is
+   discarded here.
+4. **Pick CVE / native**: `cve = m.cve_id or primary_cve(ids)`;
    `native = m.native_id or primary_native(ids)`.
-4. **Content hash** (§3): `chash = content_hash(cve, native, title, snippet, url)`.
-5. **Dedup** by `(source_id, content_hash)`:
+5. **Content hash** (§3): `chash = content_hash(cve, native, title, snippet, url)`.
+6. **Dedup** by `(source_id, content_hash)`:
    - **Hit (duplicate path)**: fetch the candidate the existing mention points
      at and re-apply `_apply_candidate_updates` (§6) — a re-emission that now
      carries `in_kev`, products, CVSS, CWEs, etc. must still land on the
      candidate even though the mention row is unchanged. Returns
      `duplicate=True`.
    - **Miss (new path)**: continue.
-6. **Resolve candidate** (§4–5): `candidate = resolve_candidate(session, ids)` —
+7. **Resolve candidate** (§4–5): `candidate = resolve_candidate(session, ids)` —
    finds/creates and merges candidates, attaches missing identifiers, sets
    `cve_id` if a CVE appears.
-7. **Apply candidate updates** (§6): flags + structured data.
-8. **Persist raw HTML** (`_persist_raw`): if `m.raw_html` is set, write it to
+8. **Apply candidate updates** (§6): flags + structured data.
+9. **Persist raw HTML** (`_persist_raw`): if `m.raw_html` is set, write it to
    `{raw_html_dir}/{source_id}/{chash}.html` (skip if the file already exists);
    store the path on the mention.
-9. **Insert the `mentions` row** (`extracted_cve`, `extracted_native`, `url`,
-   `title`, `snippet`, `raw_html_path`, `seen_at`, `content_hash`), `flush`.
-10. **Refresh aggregates** (§7) and **recompute days-ahead** (§8), `flush`.
-11. Return `IngestResult(candidate_id, mention_id, created=True, duplicate=False)`.
+10. **Insert the `mentions` row** (`extracted_cve`, `extracted_native`, `url`,
+    `title`, `snippet`, `raw_html_path`, `seen_at`, `content_hash`), `flush`.
+11. **Record soft references** (§6.1): CVEs cited in the note's prose that are
+    **not** the anchored CVE → `cve_soft_references` (not anchored, not merged).
+12. **Refresh aggregates** (§7) and **recompute days-ahead** (§8), `flush`.
+13. Return `IngestResult(candidate_id, mention_id, created=True, duplicate=False)`.
 
 ---
 
@@ -78,6 +90,14 @@ Helpers:
 
 - `primary_cve(ids)` → first `CVE`, else `None`.
 - `primary_native(ids)` → first non-`CVE` identifier, else `None`.
+
+**`RECOGNIZED_SCHEMES`** (`frozenset({CVE, ZDI-CAN, ZDI, VU, GHSA, MSRC, OSV})`) is
+the product policy gate. A mention that resolves to **no** recognized scheme is
+dropped at ingest (§1 step 3) — Foreshock stores nothing without a CVE or an
+equivalent official code. `GHCOMMIT` is a **defined** scheme but is deliberately
+**not** in `RECOGNIZED_SCHEMES`: a bare security-fix commit with no assigned code
+is not anchored or stored. Together with `github_synthesize_candidates=False`
+(default), `github_commits` therefore emits **only** commits that cite a real CVE.
 
 ---
 
@@ -181,6 +201,17 @@ candidate.
 All the upserts are idempotent, so applying them repeatedly (duplicate path) does
 not duplicate anything.
 
+### 6.1 Soft references (`_record_soft_references`)
+
+After the `mentions` row is inserted (new path only), the pipeline scans the
+note's prose (`extract_identifiers(title, snippet, url)`) for **CVEs that are not
+the anchored CVE** and records each in `cve_soft_references`
+(`{cve_id, mention_id, source_id, from_candidate_id, context}`). These are
+**counted, not merged**: a GHSA body or commit message that cites other CVEs must
+not pull those distinct vulnerabilities into this candidate. The cited CVE may not
+even be published yet — that is the interesting case. Idempotent via
+`ON CONFLICT DO NOTHING` on `uq_soft_ref_mention_cve`. See `DATA_MODEL.md`.
+
 ---
 
 ## 7. Aggregates (`_refresh_aggregates`)
@@ -208,9 +239,11 @@ Computes the radar's edge against NVD, only when the candidate has a reconciled
 `timedelta.days`**, because `.days` floors and would return `-1` for small
 negative deltas. Both operands are timezone-aware.
 
-If the published CVE is in state `PUBLISHED` and the candidate is
-`candidate`/`emerging`, it is promoted to `published` and `promoted_at` is
-stamped once.
+**Promotion means "NVD has data".** If `pub.nvd_published_at IS NOT NULL` and the
+candidate is `candidate`/`emerging`, it is promoted to `published` and `promoted_at`
+is stamped once. Note this is gated on the **NVD publication date**, not merely
+cvelist `state='PUBLISHED'`: a CVE that is reserved or lacks an NVD date stays
+pre-published, which is exactly the early window Foreshock measures.
 
 ---
 

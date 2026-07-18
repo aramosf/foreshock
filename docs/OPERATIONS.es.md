@@ -28,9 +28,9 @@ la tabla `sources` (`sync_registry_to_db`) y programa cada fuente habilitada.
 Para operar manualmente dentro de un contenedor:
 
 ```bash
-docker compose run --rm baseline-worker cveradar sources list
-docker compose run --rm baseline-worker cveradar baseline sync
-docker compose run --rm baseline-worker cveradar emerging list --since 24h --tier 1
+docker compose run --rm baseline-worker foreshock sources list
+docker compose run --rm baseline-worker foreshock baseline sync
+docker compose run --rm baseline-worker foreshock emerging list --since 24h --tier 1
 ```
 
 ---
@@ -38,7 +38,7 @@ docker compose run --rm baseline-worker cveradar emerging list --since 24h --tie
 ## Variables de entorno
 
 Config centralizada en `app/core/config.py` (`pydantic-settings`, prefijo
-`CVERADAR_`, salvo las de infra con `validation_alias`). Defaults apuntan al
+`FORESHOCK_`, salvo las de infra con `validation_alias`). Defaults apuntan al
 compose local; nunca se hardcodean secretos.
 
 ### Infra
@@ -46,58 +46,72 @@ compose local; nunca se hardcodean secretos.
 |---|---|---|
 | `DATABASE_URL` | `postgresql+psycopg://cveradar:cveradar@localhost:5432/cveradar` | Conexión Postgres (driver psycopg3 sync). |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis. |
-| `CVERADAR_DATA_DIR` | `/data` | Raíz de datos (raw HTML, cachés, contextos browser). |
-| `CVERADAR_RAW_HTML_DIR` | `/data/raw` | HTML crudo de menciones. |
-| `CVERADAR_CVELIST_REPO_DIR` | `/data/cvelistV5` | Clon de cvelistV5. |
+| `FORESHOCK_DATA_DIR` | `/data` | Raíz de datos (raw HTML, cachés, contextos browser). |
+| `FORESHOCK_RAW_HTML_DIR` | `/data/raw` | HTML crudo de menciones. |
+| `FORESHOCK_CVELIST_REPO_DIR` | `/data/cvelistV5` | Clon de cvelistV5. |
 
 ### Baseline
 | Var | Default |
 |---|---|
-| `CVERADAR_CVELIST_REPO_URL` | `https://github.com/CVEProject/cvelistV5.git` |
-| `CVERADAR_CVELIST_SYNC_SECONDS` | `900` |
-| `CVERADAR_NVD_DELTA_SECONDS` | `7200` |
-| `CVERADAR_NVD_API_BASE` | `https://services.nvd.nist.gov/rest/json/cves/2.0` |
-| `CVERADAR_NVD_API_KEY` | `None` (sin key → pausa 6 s/página) |
-| `CVERADAR_EPSS_SYNC_SECONDS` | `86400` |
-| `CVERADAR_EPSS_API_BASE` | `https://api.first.org/data/v1/epss` |
+| `FORESHOCK_CVELIST_REPO_URL` | `https://github.com/CVEProject/cvelistV5.git` |
+| `FORESHOCK_CVELIST_SYNC_SECONDS` | `900` |
+| `FORESHOCK_NVD_DELTA_SECONDS` | `7200` |
+| `FORESHOCK_NVD_API_BASE` | `https://services.nvd.nist.gov/rest/json/cves/2.0` |
+| `FORESHOCK_NVD_API_KEY` | `None` (sin key → pausa 6 s/página) |
+| `FORESHOCK_EPSS_SYNC_SECONDS` | `86400` |
+| `FORESHOCK_EPSS_API_BASE` | `https://api.first.org/data/v1/epss` |
 
 ### GitHub commits
+`github_commits` ahora escanea vía **clon blobless + `git log`** (sin REST API ni
+rate limit) y consume el registro `github_repos` (migración `0010`) vía
+`next_batch`/`update_scan`, no ficheros JSON de estado.
+
 | Var | Default | Uso |
 |---|---|---|
-| `CVERADAR_GITHUB_API_BASE` | `https://api.github.com` | |
-| `CVERADAR_GITHUB_TOKEN` | `None` | PAT → 5000 req/h. |
-| `CVERADAR_GITHUB_TOP_N` | `10000` | Repos top a vigilar. |
-| `CVERADAR_GITHUB_COMMITS_MONTHS` | `5` | Ventana de changelog. |
-| `CVERADAR_GITHUB_REPOS_PER_RUN` | `150` | Repos por ejecución (crawl rotatorio). |
-| `CVERADAR_GITHUB_SYNTHESIZE_CANDIDATES` | `True` | Candidate pre-CVE en fixes sin CVE. |
+| `FORESHOCK_GITHUB_API_BASE` | `https://api.github.com` | Search API de `harvest_top_n`. |
+| `FORESHOCK_GITHUB_TOKEN` | `None` | PAT. Se embebe en la URL de clon; sube el límite de la Search API. |
+| `FORESHOCK_GITHUB_TOP_N` | `10000` | Repos top por estrellas cosechados al watchlist (origin `top_n`). |
+| `FORESHOCK_GITHUB_COMMITS_MONTHS` | `5` | Ventana relativa (fallback si `..._SINCE` no se fija). |
+| `FORESHOCK_GITHUB_COMMITS_SINCE` | `2026-05-01` | Cutoff FIJO de commits (`YYYY-MM-DD`); si se fija, se usa en vez de la ventana y no rueda con el tiempo. |
+| `FORESHOCK_GITHUB_REPOS_PER_RUN` | `150` | Repos por ejecución (`next_batch`, rotación nunca-escaneados primero). |
+| `FORESHOCK_GITHUB_SYNTHESIZE_CANDIDATES` | `False` | **Off por defecto.** Los commits de seguridad sin CVE no se sintetizan como ancla `GHCOMMIT` (la ingesta los descartaría: no es un `RECOGNIZED_SCHEME`). |
+
+### Watchlist de repos (registro) — estrategias opt-in
+Además de `top_n` y de `reference`/`past_cve` (siempre activas), el registro
+`github_repos` admite dos estrategias opt-in (`foreshock sources harvest-repos`):
+
+| Var | Default | Uso |
+|---|---|---|
+| `FORESHOCK_CRITICALITY_CSV_URL` | `None` | CSV OpenSSF Criticality Score → repos (origin `criticality`). Opt-in. |
+| `FORESHOCK_PYPI_DOWNLOADS_TOP_N` | `0` | `>0` ⇒ top-N PyPI por descargas → sus repos (origin `downloads`). Opt-in. |
 
 ### Fetchers / scraping educado
 | Var | Default |
 |---|---|
-| `CVERADAR_USER_AGENT` | `CVERadar/0.1 (+…; early-CVE research)` |
-| `CVERADAR_HTTP_TIMEOUT_SECONDS` | `30.0` |
-| `CVERADAR_MAX_RETRIES` | `3` |
-| `CVERADAR_RESPECT_ROBOTS` | `True` |
-| `CVERADAR_BROWSER_MAX_CONCURRENT` | `3` |
-| `CVERADAR_BROWSER_RECYCLE_AFTER` | `50` |
+| `FORESHOCK_USER_AGENT` | `Foreshock/0.1 (+…; early-CVE research)` |
+| `FORESHOCK_HTTP_TIMEOUT_SECONDS` | `30.0` |
+| `FORESHOCK_MAX_RETRIES` | `3` |
+| `FORESHOCK_RESPECT_ROBOTS` | `True` |
+| `FORESHOCK_BROWSER_MAX_CONCURRENT` | `3` |
+| `FORESHOCK_BROWSER_RECYCLE_AFTER` | `50` |
 
 ### Enriquecimiento LLM
 | Var | Default |
 |---|---|
-| `CVERADAR_LLM_PROVIDER` | `mock` (`mock`/`openai`/`anthropic`/`ollama`) |
-| `CVERADAR_LLM_MODEL` | `mock-model` |
-| `CVERADAR_LLM_API_KEY` | `None` |
-| `CVERADAR_LLM_BASE_URL` | `None` (p.ej. Ollama `http://ollama:11434`) |
-| `CVERADAR_LLM_MAX_TOKENS` | `1024` |
-| `CVERADAR_ENRICHMENT_REENRICH_HOURS` | `24` |
-| `CVERADAR_ENRICHMENT_REENRICH_MIN_MENTIONS` | `3` |
+| `FORESHOCK_LLM_PROVIDER` | `mock` (`mock`/`openai`/`anthropic`/`ollama`) |
+| `FORESHOCK_LLM_MODEL` | `mock-model` |
+| `FORESHOCK_LLM_API_KEY` | `None` |
+| `FORESHOCK_LLM_BASE_URL` | `None` (p.ej. Ollama `http://ollama:11434`) |
+| `FORESHOCK_LLM_MAX_TOKENS` | `1024` |
+| `FORESHOCK_ENRICHMENT_REENRICH_HOURS` | `24` |
+| `FORESHOCK_ENRICHMENT_REENRICH_MIN_MENTIONS` | `3` |
 
 ### Otros
-`CVERADAR_EMERGING_MIN_MENTIONS` (`1`), `CVERADAR_LOG_LEVEL` (`INFO`),
-`CVERADAR_LOG_JSON` (`True`).
+`FORESHOCK_EMERGING_MIN_MENTIONS` (`1`), `FORESHOCK_LOG_LEVEL` (`INFO`),
+`FORESHOCK_LOG_JSON` (`True`).
 
-`docker-compose.yml` pasa `CVERADAR_NVD_API_KEY`, `CVERADAR_LLM_PROVIDER`,
-`CVERADAR_LLM_API_KEY`, `CVERADAR_LLM_MODEL` desde el entorno del host
+`docker-compose.yml` pasa `FORESHOCK_NVD_API_KEY`, `FORESHOCK_LLM_PROVIDER`,
+`FORESHOCK_LLM_API_KEY`, `FORESHOCK_LLM_MODEL` desde el entorno del host
 (interpolación `${VAR:-default}`), típicamente via un fichero `.env`.
 
 ---
@@ -107,7 +121,7 @@ compose local; nunca se hardcodean secretos.
 | Volumen | Montaje | Contenido |
 |---|---|---|
 | `pgdata` | `postgres:/var/lib/postgresql/data` | Datos de Postgres. |
-| `data` | `baseline-worker` y `sources-worker` en `/data` | HTML crudo (`/data/raw/<source_id>/<hash>.html`), clon `cvelistV5`, cachés de github (`github_top_repos.json`, `github_commits_cursor.txt`, `github_repo_state.json`), contextos Playwright (`/data/browser/<source>`). |
+| `data` | `baseline-worker` y `sources-worker` en `/data` | HTML crudo (`/data/raw/<source_id>/<hash>.html`), clon `cvelistV5`, caché de git-log de `github_commits` (`/data/cache/gitlog/<owner__repo>.log.gz`) y clones blobless efímeros (`/data/clones/`), contextos Playwright (`/data/browser/<source>`). El watchlist de repos ahora vive en la **tabla** `github_repos`, no en ficheros JSON. |
 
 El volumen `data` es **compartido** por ambos workers, de ahí que las cachés de
 GitHub y el HTML crudo sean visibles para ambos.

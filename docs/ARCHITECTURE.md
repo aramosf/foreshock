@@ -1,6 +1,6 @@
-# CVERadar Architecture
+# Foreshock Architecture
 
-CVERadar is an **early vulnerability radar**: a data-ingestion backend (no UI) that
+Foreshock is an **early vulnerability radar**: a data-ingestion backend (no UI) that
 picks up signals that a vulnerability exists **before** its CVE is published and
 analyzed in NVD, and measures how many *lead days* each source gains over NVD.
 
@@ -8,10 +8,10 @@ All code lives in the `app/` package and runs as plain Python processes over
 Postgres 16 + Redis. There is no web server and no frontend.
 
 > **Framing.** MITRE (cvelistV5) and OSV are the **finish line** — the authoritative,
-> canonical record of what a vulnerability *is*. CVERadar does not try to replace them;
+> canonical record of what a vulnerability *is*. Foreshock does not try to replace them;
 > it watches the **race** that happens before they cross that line: the reserved id, the
 > exploit template, the security commit, the KEV entry. See
-> [*What CVERadar answers that MITRE/OSV cannot*](#what-cveradar-answers-that-mitreosv-cannot).
+> [*What Foreshock answers that MITRE/OSV cannot*](#what-foreshock-answers-that-mitreosv-cannot).
 
 ---
 
@@ -25,11 +25,11 @@ flowchart LR
         CVELIST["cvelistV5<br/>(git shallow clone)"]
         NVD["NVD 2.0<br/>delta feed"]
         EPSSAPI["EPSS<br/>FIRST.org"]
-        T1["Tier1 · CISA KEV · VulnCheck KEV · CERT/CC VU#"]
-        T2["Tier2 · Red Hat CSAF"]
-        T3["Tier3 · Nessus · nuclei-templates · metasploit"]
-        T4["Tier4 · GHSA · top-N GitHub commits · OSV.dev"]
-        T5["Tier5 · The Hacker News"]
+        T1["Tier1 · CISA KEV · VulnCheck KEV · CERT/CC VU# · ZDI published/upcoming · CERT-EU"]
+        T2["Tier2 · Red Hat CSAF · Siemens · Palo Alto · Spring · FortiGuard · Veeam"]
+        T3["Tier3 · Nessus · nuclei-templates · metasploit · Full Disclosure · oss-security"]
+        T4["Tier4 · GHSA · github_commits (blobless clone) · OSV.dev"]
+        T5["Tier5 · The Hacker News · ZDI blog"]
     end
 
     %% ---------------- baseline-worker ----------------
@@ -46,8 +46,8 @@ flowchart LR
     %% ---------------- sources-worker ----------------
     subgraph SW["sources-worker (AsyncIOScheduler + hot reconcile)"]
         direction TB
-        FETCH["BaseSource.fetch()<br/>11 fetchers, isolated"]
-        INGEST["ingest_mention()<br/>1 extract_identifiers<br/>2 resolve_candidate (union-find)<br/>3 content_hash (idempotency)<br/>4 persist raw + mention<br/>5 aggregates + days_ahead"]
+        FETCH["BaseSource.fetch()<br/>22 fetchers, isolated"]
+        INGEST["ingest_mention()<br/>1 extract_identifiers (declared-only identity)<br/>2 drop if no RECOGNIZED_SCHEME<br/>3 resolve_candidate (union-find)<br/>4 content_hash (idempotency)<br/>5 persist raw + mention + soft refs<br/>6 aggregates + days_ahead"]
         ENRICH["enrich_candidate()<br/>LLM metrics · authoritative+derived CVSS<br/>severity_hint · affected products"]
         FETCH --> INGEST --> ENRICH
     end
@@ -64,20 +64,31 @@ flowchart LR
     %% ---------------- Postgres ----------------
     subgraph PG["Postgres 16"]
         direction TB
-        PUB["published_cves<br/>(canonical + own NVD observation)"]
+        PUB["published_cves<br/>(canonical + own NVD observation<br/>+ enrichment columns 0006)"]
         EPSST["epss_scores (history)"]
         CAND["candidates"]
         IDN["identifiers"]
         MEN["mentions"]
+        SOFT["cve_soft_references<br/>(0007, unanchored CVE citations)"]
+        GHREPOS["github_repos<br/>(0010, watchlist + watermark)"]
         CVSST["cvss_scores (v3/v4)"]
         AFF["affected_products<br/>+ product_catalog/aliases + version ranges"]
+        ENR["cve_cvss · cve_cwe<br/>cve_cpe · cve_reference (0006)"]
         VIEW["views: radar · cvss_selected · epss_current"]
     end
+
+    %% ---------------- NVD enrichment (derived) ----------------
+    ENRNVD["enrich-nvd<br/>parse raw_json (CVE 5.0)<br/>CNA + CISA-ADP → CVSS/CWE/CPE/refs/SSVC"]
+
     JB1 --> PUB
     JB2 --> PUB
     JB3 --> EPSST
-    INGEST --> CAND & IDN & MEN
+    INGEST --> CAND & IDN & MEN & SOFT
     ENRICH --> CVSST & AFF
+    PUB --> ENRNVD --> ENR
+    ENRNVD -. "denormalized cols" .-> PUB
+    MEN & CAND -. "harvest refs / top-N" .-> GHREPOS
+    GHREPOS -. "next_batch (blobless clone)" .-> FETCH
     PUB -. "reconciliation by cve_id (lookup, no FK)" .-> CAND
     CAND --- VIEW
 
@@ -85,7 +96,7 @@ flowchart LR
     REDIS["Redis<br/>cache · rate-limit"]
     VOL["Volume data:/data<br/>raw_html · cvelistV5 clone · GitHub caches"]
     MIG["migrate<br/>alembic upgrade head"]
-    CLI["CLI cveradar<br/>db · sources · baseline · emerging · cve · enrich · stats · pending · trend · backfill-products"]
+    CLI["CLI foreshock<br/>db · sources · baseline · emerging · cve · enrich · stats · pending · trend · backfill-products"]
 
     SW -.-> REDIS
     BW -.-> VOL
@@ -97,8 +108,8 @@ flowchart LR
     classDef store fill:#efe,stroke:#7a7;
     classDef proc fill:#fee,stroke:#c88;
     class EXT,CVELIST,NVD,EPSSAPI,T1,T2,T3,T4,T5 ext;
-    class PG,PUB,EPSST,CAND,IDN,MEN,CVSST,AFF,VIEW store;
-    class BW,SW,JB1,JB2,JB3,FETCH,INGEST,ENRICH proc;
+    class PG,PUB,EPSST,CAND,IDN,MEN,SOFT,GHREPOS,CVSST,AFF,ENR,VIEW store;
+    class BW,SW,JB1,JB2,JB3,FETCH,INGEST,ENRICH,ENRNVD proc;
 ```
 
 Legend: **blue** = external sources · **red** = processes/logic · **green** = storage.
@@ -129,9 +140,9 @@ An `AsyncIOScheduler` with three interval jobs at cadences from `Settings`:
 
 | Job | Function | Default cadence (env) |
 |---|---|---|
-| `cvelist` | `_cvelist_job → sync_cvelist` (git shallow pull, run in a thread) | `CVERADAR_CVELIST_SYNC_SECONDS=900` (15 min) |
-| `nvd` | `_nvd_job → sync_nvd_delta` (NVD 2.0 delta, async) | `CVERADAR_NVD_DELTA_SECONDS=7200` (2 h) |
-| `epss` | `_epss_job → sync_epss` (FIRST.org, async) | `CVERADAR_EPSS_SYNC_SECONDS=86400` (daily) |
+| `cvelist` | `_cvelist_job → sync_cvelist` (git shallow pull, run in a thread) | `FORESHOCK_CVELIST_SYNC_SECONDS=900` (15 min) |
+| `nvd` | `_nvd_job → sync_nvd_delta` (NVD 2.0 delta, async) | `FORESHOCK_NVD_DELTA_SECONDS=7200` (2 h) |
+| `epss` | `_epss_job → sync_epss` (FIRST.org, async) | `FORESHOCK_EPSS_SYNC_SECONDS=86400` (daily) |
 
 It runs one **immediate** pass on startup, then on interval. Each job wraps its call in
 try/except so a failure in one source never brings down the worker or blocks the others.
@@ -151,7 +162,7 @@ The distinctive part is `_reconcile_jobs()`, wired as its own interval job
 - **cadence change live**: if `cadence_seconds` changed in the DB, the job is
   *rescheduled* without a restart.
 
-So an operator can `cveradar sources disable thehackernews` or bump a cadence and the
+So an operator can `foreshock sources disable thehackernews` or bump a cadence and the
 running worker picks it up within a minute — no redeploy. `sync_registry_to_db()`
 deliberately **does not** overwrite `cadence_seconds`, so operational tuning survives
 code re-syncs.
@@ -176,22 +187,31 @@ the batch nor loses the valid ones.
                                              ▼
  ┌──────────────────── sources-worker ───────────────────────────────────────┐
  │  BaseSource.fetch(ctx) ──► list[FetchedMention]        (Layer 2: capture)  │
- │  cisa_kev · vulncheck_kev · certcc_vu · redhat_csaf · nessus ·            │
- │  nuclei_templates · metasploit · github_advisories · github_commits ·    │
- │  osv · thehackernews                                                     │
+ │  22 fetchers by tier:                                                      │
+ │   T1 cisa_kev · vulncheck_kev · certcc_vu · zdi_published · zdi_upcoming · │
+ │      certeu                                                                 │
+ │   T2 redhat_csaf · siemens_cert · paloalto · spring_security ·             │
+ │      fortiguard_psirt · veeam                                              │
+ │   T3 nessus · nuclei_templates · metasploit · fulldisclosure · oss_security│
+ │   T4 github_advisories · github_commits (blobless clone) · osv             │
+ │   T5 thehackernews · zdi_blog                                              │
  │        │                                                                   │
  │        ▼  ingest_mention()   (app/ingest/service.py)                       │
- │   1. extract_identifiers()  (CVE, ZDI-CAN, ZDI, VU#, GHSA, MSRC,           │
- │                              GHCOMMIT, OSV[PYSEC/GO/RUSTSEC/GSD/MAL/OSV])   │
- │   2. resolve_candidate()    (union-find over identifiers)                  │
- │   3. content_hash()         (idempotency by excerpt, not raw HTML)         │
- │   4. persist raw_html + INSERT mention                                     │
- │   5. _refresh_aggregates() + compute_days_ahead()                          │
+ │   1. extract_identifiers()  IDENTITY = declared ids only (cve/native/extra)│
+ │      schemes: CVE, ZDI-CAN, ZDI, VU#, GHSA, MSRC,                          │
+ │              OSV[PYSEC/GO/RUSTSEC/GSD/MAL/OSV]  (GHCOMMIT defined but       │
+ │              NOT recognized)                                               │
+ │   2. DROP if no RECOGNIZED_SCHEME  (nothing stored without a CVE/code)     │
+ │   3. resolve_candidate()    (union-find over identifiers)                  │
+ │   4. content_hash()         (idempotency by excerpt, not raw HTML)         │
+ │   5. persist raw_html + INSERT mention                                     │
+ │   6. _record_soft_references()  (CVEs cited in prose, NOT anchored)        │
+ │   7. _refresh_aggregates() + compute_days_ahead()                          │
  │   +  _apply_candidate_updates(): flags (in_kev…), structured CVSS,         │
  │      affected products, cwe_ids, reference_urls, withdrawn                 │
  │        │                                                                   │
  │        ▼                                                                   │
- │   candidates ◄── identifiers ◄── mentions                                  │
+ │   candidates ◄── identifiers ◄── mentions ──► cve_soft_references          │
  │        │                                                                   │
  │        ▼  enrich_candidate()  (Layer 3: app/enrichment/service.py)         │
  │   LLM extracts METRICS ─► cvss_scores (authoritative + derived)            │
@@ -202,7 +222,11 @@ the batch nor loses the valid ones.
 The system's **three layers**:
 
 - **Layer 1 — Baseline** (`app/baseline/*`): `published_cves`, `epss_scores` — the
-  canonical truth, plus CVERadar's own NVD observation timestamps.
+  canonical truth, plus Foreshock's own NVD observation timestamps. An idempotent
+  **NVD enrichment** pass (`app/baseline/enrich.py`, `foreshock baseline enrich-nvd`)
+  derives structured data from `published_cves.raw_json` into `cve_cvss` / `cve_cwe`
+  / `cve_cpe` / `cve_reference` plus denormalized columns on `published_cves` (see
+  below).
 - **Layer 2 — Capture & ingestion** (`app/sources/*`, `app/ingest/*`): fetchers emit
   `FetchedMention` objects; the ingest pipeline turns them into `mentions`,
   `candidates`, `identifiers` idempotently. Structured payloads a fetcher already knows
@@ -230,8 +254,33 @@ the CVE. `app/ingest/identifiers.py` recognises, in priority order:
 | `VU` | `VU#123456` | CERT/CC vulnerability note. |
 | `GHSA` | `GHSA-jfh8-c2jp-5v3q` | GitHub Security Advisory (canonicalized `GHSA-`+lowercase body). |
 | `MSRC` | `ADV123456` | Microsoft advisory number. |
-| `GHCOMMIT` | `GHCOMMIT:owner/repo@<sha>` | **Synthetic** id anchoring a security fix commit that has *no CVE yet* — the purest pre-CVE signal. |
 | `OSV` | `PYSEC-2026-1`, `GO-2026-1`, `RUSTSEC-2026-0001`, `GSD-2026-1`, `MAL-2026-1`, `OSV-2026-1` | OSV ecosystem advisory ids: PyPI (`PYSEC`), Go (`GO`), Rust (`RUSTSEC`), generic (`GSD`/`OSV`), and **`MAL`** malicious-package advisories — all can predate a CVE. |
+
+`GHCOMMIT:owner/repo@<sha>` is still a **defined** scheme (a synthetic id for a
+bare security-fix commit), but it is **no longer stored**. See the recognition
+policy below.
+
+### Recognition policy: nothing is stored without a recognized code
+
+`identifiers.py` defines `RECOGNIZED_SCHEMES = {CVE, ZDI-CAN, ZDI, VU, GHSA,
+MSRC, OSV}`. A mention that resolves to **no** recognized code is **dropped** —
+Foreshock stores nothing that lacks a CVE or an equivalent official code.
+`GHCOMMIT` is deliberately **excluded** from `RECOGNIZED_SCHEMES`, and
+`github_synthesize_candidates` now defaults to `False`, so a bare security-fix
+commit with no CVE is neither synthesized nor anchored. A commit that *does* cite
+a real CVE (or a GHSA) still enters through that recognized code. This replaces
+the earlier design in which `GHCOMMIT` anchored and stored a standalone pre-CVE
+candidate.
+
+### Soft references: counting CVEs cited in prose without merging
+
+A note's prose (a GHSA body, a commit message, a news item) often cites CVEs that
+are **not** the note's own anchored CVE. Anchoring or merging on those would
+collapse distinct vulnerabilities (over-merge). Instead, `_record_soft_references`
+records each such CVE in `cve_soft_references` (migration `0007`): **not**
+anchored, **not** merged, **not** in `identifiers` or the union-find — just "this
+CVE was mentioned here", so it can be counted and given context (the cited CVE may
+not even be published yet). See `INGESTION.md` and `DATA_MODEL.md`.
 
 Each `(scheme, value)` is globally unique (`identifiers.uq_identifiers_scheme_value`) and
 points to exactly one candidate. When a mention brings identifiers that already pointed at
@@ -243,18 +292,19 @@ points to exactly one candidate. When a mention brings identifiers that already 
 That is exactly why `cve_id` is a **soft reference**: migration `0003_soft_cve_ref.py`
 drops the FK to `published_cves`. A CVE may be only RESERVED and not ingested yet, and we
 still want the early signal on record. Forcing the FK would reject precisely the data
-CVERadar exists to keep.
+Foreshock exists to keep.
 
 **Status lifecycle**: `candidate` → `emerging` (`_refresh_aggregates` on the first
-mention) → `published` (`compute_days_ahead` when the CVE turns up `PUBLISHED` in the
-baseline). `merged` marks a union-find tombstone; `rejected` is a possible terminal state.
+mention) → `published` (`compute_days_ahead` when the CVE has **NVD data** —
+`published_cves.nvd_published_at IS NOT NULL`, see below). `merged` marks a
+union-find tombstone; `rejected` is a possible terminal state.
 
 ---
 
 ## The three `days_ahead` and why `present` is the robust metric
 
 When a candidate reconciles with its CVE, `compute_days_ahead()`
-(`app/ingest/service.py`) computes three deltas between the **first time CVERadar saw the
+(`app/ingest/service.py`) computes three deltas between the **first time Foreshock saw the
 signal** (`candidate.first_seen_at`) and three NVD milestones (rounded, so small negative
 deltas don't floor to −1):
 
@@ -264,12 +314,18 @@ deltas don't floor to −1):
 | `days_ahead_vs_nvd_present` | `nvd_first_observed_at` | **Own observation**: when we first saw it in NVD. |
 | `days_ahead_vs_nvd_analyzed` | `nvd_first_analyzed_observed_at` | When we first saw it in `Analyzed` state. |
 
+**Promotion to `published` means "NVD has data".** `compute_days_ahead` promotes a
+candidate to `published` only when `published_cves.nvd_published_at IS NOT NULL` —
+i.e. the CVE actually has an NVD publication date. A CVE that is merely RESERVED,
+or present in MITRE/cvelist but without an NVD date, stays **pre-published** for us
+(that is precisely the early window Foreshock cares about).
+
 **The backfill problem.** NVD can publish a CVE today with a `published` date set in the
 past, or rewrite dates retroactively. A delta against `nvd_published_at` can end up
 distorted or even negative because of those adjustments.
 
 `nvd_first_observed_at` is **our own ground truth**: `upsert_nvd()` (`app/baseline/nvd.py`)
-writes it with `COALESCE(existing, observed_at)` the **first** time CVERadar sees the CVE
+writes it with `COALESCE(existing, observed_at)` the **first** time Foreshock sees the CVE
 in the delta feed and never overwrites it afterwards (`nvd_first_analyzed_observed_at`
 works the same way but is sealed only when the observed status is `Analyzed`). It measures
 a fact on *our* clock — "at this instant the CVE was already in NVD for us" — so it is
@@ -278,10 +334,45 @@ the default in the CLI (`emerging`, `stats`) and the `radar` view.
 
 ---
 
-## What CVERadar answers that MITRE/OSV cannot
+## NVD structured enrichment (`enrich-nvd`)
+
+`published_cves.raw_json` holds the full **CVE JSON 5.0** record from cvelistV5,
+with a CNA container and CISA **ADP ("Vulnrichment")** containers.
+`app/baseline/enrich.py` (`foreshock baseline enrich-nvd`) is a **purely derived**,
+network-free, idempotent batch (delete-by-cve + insert) that parses that JSON and
+materializes:
+
+- **`cve_cvss`** — every CVSS metric (v2/v3.0/3.1/4.0) by source (CNA short name /
+  `cisa-adp`), with vector, base/exploitability/impact scores and severity.
+- **`cve_cwe`** — declared weaknesses (`CWE-…` or free text).
+- **`cve_cpe`** — affected products as CPE 2.3 strings.
+- **`cve_reference`** — reference URLs with their tags (Exploit/Patch/…).
+- **denormalized columns on `published_cves`** for fast filters/joins:
+  `description_en`, `primary_cvss_version/score/severity/vector`, `primary_cwe`,
+  `has_exploit_ref`, `has_patch_ref`, and the **SSVC** decision from the CISA ADP
+  Vulnrichment container (`ssvc_exploitation`, `ssvc_automatable`,
+  `ssvc_technical_impact`), plus `enriched_at`.
+
+`parse_record` is a pure function; `enrich_all` walks `published_cves` by keyset.
+The "primary" CVSS is chosen CNA-proprietary > primary type > highest version. See
+`ENRICHMENT.md` and `DATA_MODEL.md`.
+
+## GitHub repo watchlist / registry
+
+`github_commits` is driven by the `github_repos` table (migration `0010`,
+`app/sources/repo_registry.py`), which unifies all repo-discovery strategies under
+one `full_name` primary key (dedup) with a per-repo scan `watermark`. Strategies:
+`top_n` (top-N by stars, kept — *additional*, not a replacement), `reference`
+(repos cited in advisory reference URLs), `past_cve` (referenced repos whose citing
+candidate already has a CVE — higher priority), `criticality` (OpenSSF Criticality
+Score CSV, opt-in) and `downloads` (top PyPI packages → their repo, opt-in).
+`next_batch` orders unscanned-first, then priority, then stars; `foreshock sources
+harvest-repos` (re)populates it. See `SOURCES.md` §3.4.
+
+## What Foreshock answers that MITRE/OSV cannot
 
 MITRE (cvelistV5) and OSV answer *"what is this vulnerability, authoritatively?"* — the
-canonical record. They are the goal. CVERadar answers a different, time-shifted question:
+canonical record. They are the goal. Foreshock answers a different, time-shifted question:
 *"what is about to become a vulnerability, and how much warning did each signal give?"* —
 the **race** before that record exists. Concretely:
 
@@ -292,8 +383,8 @@ RESERVED (or has no CVE at all)**:
 - **`nuclei_templates`** (ProjectDiscovery) and **`metasploit`** (Rapid7) are watched at
   the *commit* level. A new nuclei detection template or metasploit module is a concrete
   exploit/detection capability. When it references a CVE that `published_cves` shows as
-  `RESERVED` — or a bare `GHCOMMIT`/product with no CVE — CVERadar has an **exploit before
-  the CVE is public**. MITRE/OSV have nothing to say yet.
+  `RESERVED` (or with no NVD date yet), Foreshock has an **exploit before the CVE is
+  public**. MITRE/OSV have nothing to say yet.
 - **`has_public_poc` / `poc_urls`** on the candidate capture the same idea for
   proof-of-concept links surfaced by any source or the LLM.
 
@@ -301,7 +392,7 @@ RESERVED (or has no CVE at all)**:
 `cisa_kev` and `vulncheck_kev` don't merely generate mentions — they set
 `in_kev`/`kev_date`/`kev_source` on the candidate (migration `0004`). Because a candidate
 can already carry a dozen earlier mentions (a commit, an OSV advisory, a news post),
-CVERadar records **how long the signal existed before it entered KEV** — ground truth for
+Foreshock records **how long the signal existed before it entered KEV** — ground truth for
 a future "probability of entering KEV in N days" model. Neither MITRE nor OSV tracks
 in-the-wild exploitation timelines.
 
@@ -311,23 +402,24 @@ measure **how fast and across how many independent sources** a vulnerability is 
 up — the acceleration of attention, invisible in a static advisory record.
 
 ### Multi-signal crosses
-Because every signal is anchored to the same candidate regardless of scheme, CVERadar can
+Because every signal is anchored to the same candidate regardless of scheme, Foreshock can
 answer questions that require *joining across sources and time*, for example:
 
 - reserved CVE **and** a public exploit template — imminent, prioritize now;
-- security commit in a top-N repo with **no CVE yet** — pre-CVE (`cveradar pending`);
+- a CVE cited by a watchlisted-repo commit while it is still only RESERVED — pre-CVE
+  (`foreshock pending`);
 - `MAL-*` malicious-package advisory correlated to an ecosystem you depend on;
 - a candidate whose `days_ahead_vs_nvd_present` is large — a source that consistently
   beats NVD, worth trusting earlier.
 
 ### Differential questions the CLI answers directly
 - *"Which identified, software-associated vulnerabilities have no official public CVE
-  yet, and which software has the most pending?"* → `cveradar pending`
+  yet, and which software has the most pending?"* → `foreshock pending`
   (splits `product` / `distro` / `malware`).
 - *"How is the volume of pending vulnerabilities trending month over month?"* →
-  `cveradar trend` (by `first_seen_at`, the earliest radar signal).
+  `foreshock trend` (by `first_seen_at`, the earliest radar signal).
 - *"How many lead days does each source give us over NVD, on average?"* →
-  `cveradar stats` (average `days_ahead_vs_nvd_present`, de-duplicated per candidate).
+  `foreshock stats` (average `days_ahead_vs_nvd_present`, de-duplicated per candidate).
 
-In short: **MITRE/OSV are the finish line; CVERadar watches the race** and timestamps
+In short: **MITRE/OSV are the finish line; Foreshock watches the race** and timestamps
 everyone's position along the way.

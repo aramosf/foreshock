@@ -1,9 +1,9 @@
-# CLI — `cveradar`
+# CLI — `foreshock`
 
 Complete reference for the operations and query CLI (Typer + Rich), defined in
-`app/cli.py` and exposed as the `cveradar` console script (`pyproject.toml
+`app/cli.py` and exposed as the `foreshock` console script (`pyproject.toml
 [project.scripts] → app.cli:app`). Inside a container it is invoked identically
-(`cveradar …`) or as `python -m app.cli`.
+(`foreshock …`) or as `python -m app.cli`.
 
 The app is built with `typer.Typer(no_args_is_help=True)`. It has three
 sub-applications registered with `app.add_typer(...)` — `db`, `sources`,
@@ -43,7 +43,7 @@ Notes:
 ## `db` — database / migrations
 
 ```bash
-cveradar db init          # alembic upgrade head
+foreshock db init          # alembic upgrade head
 ```
 
 `db init` shells out to `subprocess.run(["alembic", "upgrade", "head"])` and
@@ -56,11 +56,13 @@ Alembic's `env.py` reads).
 ## `sources` — source management
 
 ```bash
-cveradar sources sync                 # register the code's fetchers into `sources`
-cveradar sources list                 # list sources and their state
-cveradar sources enable <name>        # enable a source
-cveradar sources disable <name>       # disable a source
-cveradar sources run <name>           # run a fetcher once and print metrics
+foreshock sources sync                 # register the code's fetchers into `sources`
+foreshock sources list                 # list sources and their state
+foreshock sources enable <name>        # enable a source
+foreshock sources disable <name>       # disable a source
+foreshock sources run <name>           # run a fetcher once and print metrics
+foreshock sources harvest-repos        # (re)populate the github_repos watchlist
+foreshock sources reextract-commits    # re-parse github_commits from the git-log cache
 ```
 
 ### `sources sync`
@@ -76,8 +78,8 @@ Selects all `Source` rows ordered by `(tier, name)` and renders a table:
 | Column | Source |
 |---|---|
 | `name` | `sources.name` |
-| `tier` | `sources.tier` (1–5) |
-| `method` | `api` / `rss` / `scrape` / `browser` |
+| `tier` | `sources.tier` (1–9 CHECK; 1–5 in use) |
+| `method` | `api` / `rss` / `scrape` / `browser` / `git` |
 | `enabled` | `✓` / `✗` |
 | `cadence` | `f"{cadence_seconds}s"` |
 | `last_success` | `last_success_at.isoformat()` or `-` |
@@ -99,7 +101,7 @@ metrics rather than crashing. Per-mention ingestion runs inside a savepoint
 (`session.begin_nested()`) so a single bad mention does not roll back the batch.
 
 ```bash
-cveradar sources run redhat_csaf
+foreshock sources run redhat_csaf
 # {'fetched': 100, 'created': 12, 'duplicate': 88, 'errors': 0}
 ```
 
@@ -107,15 +109,59 @@ Stats keys: `fetched` (mentions returned by the fetcher), `created` (new
 mentions inserted), `duplicate` (idempotent hits), `errors` (mentions that
 raised during ingest).
 
+### `sources harvest-repos`
+Runs `repo_registry.harvest_all(client, settings)` inside an HTTP client and
+prints the per-strategy count dict. It (re)populates the `github_repos` watchlist
+consumed by `github_commits`:
+
+- `reference` / `past_cve` — repos cited in advisory reference URLs (`mentions`,
+  `cve_reference`, `candidates.reference_urls`); those whose citing candidate
+  already has a CVE become higher-priority `past_cve`. **Always run** (own data).
+- `top_n` — top-N repos by stars via the GitHub Search API (`github_top_n`,
+  default 10000). **Always run.**
+- `criticality` — OpenSSF Criticality Score CSV. **Opt-in** via
+  `FORESHOCK_CRITICALITY_CSV_URL`.
+- `downloads` — top PyPI packages by 30-day downloads → their repos. **Opt-in**
+  via `FORESHOCK_PYPI_DOWNLOADS_TOP_N > 0`.
+
+```bash
+foreshock sources harvest-repos
+# {'reference': 812, 'past_cve': 96, 'top_n': 10000, 'criticality': 0, 'downloads': 0}
+```
+
+`github_commits` also bootstraps the registry itself (references + top-N) if it is
+empty on first run, so this command is for **refreshing/expanding** the watchlist
+or enabling the opt-in strategies.
+
+### `sources reextract-commits`
+Re-extracts `github_commits` mentions from the **compressed git-log cache**
+(`{cache_dir}/gitlog/<owner__repo>.log.gz`) **without cloning** — `reextract_from_cache`
+re-runs `_mentions_from_log` with the current code, then `ingest_prefetched`
+ingests the result (same per-mention savepoint isolation as `sources run`). Zero
+network. Use it to recover from a commit-parsing bug: fix the parser, then re-run
+this over the cache that the last clone already captured.
+
+```bash
+foreshock sources reextract-commits
+# menciones re-extraídas de caché: 1843
+# {'fetched': 1843, 'created': 210, 'duplicate': 1633, 'errors': 0}
+```
+
 ---
 
 ## `baseline` — canonical state synchronization
 
 ```bash
-cveradar baseline sync                        # cvelistV5 + NVD delta + EPSS, one pass
-cveradar baseline sync --nvd-hours 6          # NVD lastMod window in hours (default 3)
-cveradar baseline sync --full-cvelist         # reprocess ALL of cvelistV5 (default False)
+foreshock baseline sync                        # cvelistV5 + NVD delta + EPSS, one pass
+foreshock baseline sync --nvd-hours 6          # NVD lastMod window in hours (default 3)
+foreshock baseline sync --full-cvelist         # reprocess ALL of cvelistV5 (default False)
+foreshock baseline nvd-full                    # full NVD 2.0 backfill (~270k CVEs, no window)
+foreshock baseline epss-full                   # full EPSS CSV dump (all current scores)
+foreshock baseline enrich-nvd                  # derive CVSS/CWE/CPE/refs/SSVC from raw_json
+foreshock baseline enrich-nvd --batch 5000     # keyset batch size (default 2000)
 ```
+
+### `baseline sync`
 
 | Option | Type / default | Effect |
 |---|---|---|
@@ -132,14 +178,40 @@ per-source metrics dict, e.g.:
  'epss': {'requests': 1, 'ingested': 200, 'skipped': 0}}
 ```
 
+### `baseline nvd-full`
+`asyncio.run(sync_nvd_full())` — paginates the **entire** NVD 2.0 dataset
+(~270k CVEs, no `lastMod` window). Use once for a cold backfill; the scheduled
+delta job keeps it current afterwards.
+
+### `baseline epss-full`
+`asyncio.run(sync_epss_full())` — downloads the full EPSS CSV dump (all current
+scores, ~270k) instead of the daily delta.
+
+### `baseline enrich-nvd`
+`enrich_all(batch_size=batch)` (`app/baseline/enrich.py`) — **derives** structured
+data from `published_cves.raw_json` (CVE JSON 5.0): `cve_cvss` / `cve_cwe` /
+`cve_cpe` / `cve_reference` rows plus the denormalized enrichment columns on
+`published_cves` (primary CVSS/CWE, exploit/patch flags, SSVC). Reads only data
+already in the DB (no network) and is **idempotent** (delete-by-cve + insert),
+so it is safe to re-run after each baseline pull. Prints the counts dict.
+
+| Option | Type / default | Effect |
+|---|---|---|
+| `--batch` | `int` = `2000` | Keyset page size over `published_cves.id`. |
+
+```bash
+foreshock baseline enrich-nvd
+# {'processed': 271034, 'cvss': 240110, 'cwe': 198221, 'cpe': 512004, 'refs': 903112}
+```
+
 ---
 
 ## `emerging` — emerging candidates (with filters)
 
 ```bash
-cveradar emerging list
-cveradar emerging list --since 24h --tier 1 --min-mentions 2
-cveradar emerging list --source certcc_vu --limit 100 --format json
+foreshock emerging list
+foreshock emerging list --since 24h --tier 1 --min-mentions 2
+foreshock emerging list --source certcc_vu --limit 100 --format json
 ```
 
 Signature: `emerging(action="list", --since, --source, --tier, --min-mentions,
@@ -178,8 +250,8 @@ Columns:
 ## `cve show` — timeline and enrichment of one candidate
 
 ```bash
-cveradar cve show CVE-2026-12345
-cveradar cve show 3f8e5b6a-....-uuid      # also accepts a candidate UUID
+foreshock cve show CVE-2026-12345
+foreshock cve show 3f8e5b6a-....-uuid      # also accepts a candidate UUID
 ```
 
 Signature: `cve(action="show", cve_id)`. Only `show` is accepted. Resolution is
@@ -194,7 +266,7 @@ Prints (Rich, no `--format`):
   hint=<severity_hint>`.
 - Lead line: `days_ahead present=<…_present> analyzed=<…_analyzed>`.
 - `ids:` all `identifiers` as `scheme:value` (e.g. `CVE:CVE-2026-… , GHSA:… ,
-  GHCOMMIT:owner/repo@sha`).
+  ZDI-CAN:ZDI-CAN-…`).
 - A **CVSS table** (only if scores exist): `version`, `score`, `sev`,
   `provenance` (`authoritative`/`derived`), `source`.
 - **EPSS** (only if the candidate has a `cve_id` and an EPSS row):
@@ -208,8 +280,8 @@ Prints (Rich, no `--format`):
 ## `enrich` — enrich a candidate
 
 ```bash
-cveradar enrich CVE-2026-12345
-cveradar enrich <candidate-uuid>
+foreshock enrich CVE-2026-12345
+foreshock enrich <candidate-uuid>
 ```
 
 Resolves the candidate with `_find_candidate` (not found → `typer.Exit(1)`), then
@@ -219,15 +291,15 @@ work from). Enrichment: extracts authoritative CVSS vectors verbatim from mentio
 text, calls the configured LLM for structured metrics, derives a CVSS v3.1 vector
 if all 8 base metrics are present, sets `severity_hint` only when no numeric score
 exists, and upserts `affected_products`. The LLM backend is chosen by
-`CVERADAR_LLM_PROVIDER` (default `mock`, no network).
+`FORESHOCK_LLM_PROVIDER` (default `mock`, no network).
 
 ---
 
 ## `stats` — lead metrics per source
 
 ```bash
-cveradar stats
-cveradar stats --format json
+foreshock stats
+foreshock stats --format json
 ```
 
 | Option | Default | Effect |
@@ -271,9 +343,9 @@ candidates=812  promoted=104  promotion_rate_pct=12.8
 ## `pending` — software with vulnerabilities that have no official CVE
 
 ```bash
-cveradar pending
-cveradar pending --kind product --top 30
-cveradar pending --kind all --format json
+foreshock pending
+foreshock pending --kind product --top 30
+foreshock pending --kind all --format json
 ```
 
 | Option | Type / default | Effect |
@@ -339,9 +411,9 @@ total=512  con_software=430  product=380  distro=95  malware=37  kind=product
 ## `trend` — time series of pending vulnerabilities
 
 ```bash
-cveradar trend
-cveradar trend --kind product --granularity month --months 6
-cveradar trend --kind all --granularity year --months 0 --format csv
+foreshock trend
+foreshock trend --kind product --granularity month --months 6
+foreshock trend --kind all --granularity year --months 0 --format csv
 ```
 
 | Option | Type / default | Effect |
@@ -368,8 +440,8 @@ kind filter, or older than the cutoff is skipped. Empty result →
 ## `backfill-products` — populate `affected_products` for older candidates
 
 ```bash
-cveradar backfill-products
-cveradar backfill-products --batch 2000
+foreshock backfill-products
+foreshock backfill-products --batch 2000
 ```
 
 | Option | Type / default | Effect |
@@ -380,6 +452,8 @@ Idempotent. For every live candidate that has **no** `affected_products` row yet
 it derives one software string via a COALESCE of three heuristics, in order:
 
 1. A `GHCOMMIT:owner/repo@sha` identifier → `owner/repo` (regex-stripped).
+   *(Dead in practice: `GHCOMMIT` ids are no longer stored — see `INGESTION.md` §2
+   — so this branch matches nothing on current data; heuristics 2–3 do the work.)*
 2. A mention `snippet` containing `affected: <token>` (OSV-style label).
 3. A mention `title` shaped `owner/repo: …` (prefix before the first `:`).
 
@@ -406,7 +480,12 @@ don't duplicate. Prints `backfill: <n> candidates con affected_products`.
 | `sources enable <name>` | — |
 | `sources disable <name>` | — |
 | `sources run <name>` | — |
+| `sources harvest-repos` | — |
+| `sources reextract-commits` | — |
 | `baseline sync` | `--nvd-hours`, `--full-cvelist` |
+| `baseline nvd-full` | — |
+| `baseline epss-full` | — |
+| `baseline enrich-nvd` | `--batch` |
 | `emerging [list]` | `--since`, `--source`, `--tier`, `--min-mentions`, `--limit`, `--format/-f` |
 | `cve show <key>` | — |
 | `enrich <key>` | — |

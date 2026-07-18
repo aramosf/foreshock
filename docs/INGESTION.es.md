@@ -13,32 +13,48 @@ class FetchedMention:            # app/ingest/service.py
     title: str | None = None
     snippet: str | None = None
     cve_id: str | None = None      # si el fetcher ya lo conoce
-    native_id: str | None = None   # p.ej. ZDI-CAN-nnnn, GHSA-…, GHCOMMIT:…
+    native_id: str | None = None   # p.ej. ZDI-CAN-nnnn, GHSA-…
+    extra_ids: list[str] = field(default_factory=list)  # ids declarados que SÍ fusionan; no para CVEs citados en prosa
     raw_html: str | None = None    # contenido crudo a persistir
     seen_at: datetime | None = None
 ```
 
 ---
 
-## Paso 1 — Extracción de identificadores (`app/ingest/identifiers.py`)
+## Paso 1 — Identidad: solo ids declarados (`app/ingest/identifiers.py`)
+
+La identidad del candidate proviene **solo** de lo que la fuente *declara*:
+`extract_identifiers(m.cve_id, m.native_id, *m.extra_ids)`. Estos ids anclan y
+fusionan (union-find). Los CVEs meramente citados en `title`/`snippet` **no** se
+usan para fusionar: un commit que "arregla 21 CVEs" o una noticia que lista
+varios no deben colapsar vulnerabilidades distintas en un solo candidate. Si la
+fuente **no declara nada**, se usa como respaldo el **primer** identificador
+hallado en el texto (`text_ids[:1]`), no todos. Si aun así queda vacío, la
+mención se descarta (`ingest.skip_no_identifier`): sin ancla no puede
+correlacionarse.
 
 `extract_identifiers(*texts)` corre una batería de regex sobre la concatenación
-de `cve_id`, `native_id`, `title`, `snippet` y `url`, preservando **orden de
-prioridad**. El primer scheme de la lista es el "nativo" preferido cuando no hay
-CVE.
+de las entradas no vacías, preservando **orden de prioridad**. El primer scheme
+de la lista es el "nativo" preferido cuando no hay CVE.
 
 | Scheme | Patrón (resumen) |
 |---|---|
-| `CVE` | `\bCVE-\d{4}-\d{4,7}\b` |
+| `CVE` | `\bCVE-\d{4}-\d{4,}\b` |
 | `ZDI-CAN` | `\bZDI-CAN-\d{3,6}\b` |
 | `ZDI` | `\bZDI-\d{2}-\d{3,5}\b` |
 | `VU` | `\bVU#\d{5,7}\b` |
 | `GHSA` | `\bGHSA-xxxx-xxxx-xxxx\b` (alfabeto base32 restringido) |
 | `MSRC` | `\bADV\d{6}\b` |
-| `GHCOMMIT` | `\bGHCOMMIT:owner/repo@<sha7-40>\b` |
+| `GHCOMMIT` | `\bGHCOMMIT:owner/repo@<sha7-40>\b` (definido, **no** reconocido) |
 
-`GHCOMMIT` es un identificador **sintético** para anclar candidates pre-CVE
-desde commits de seguridad sin CVE asignado (ver `SOURCES.md`).
+**Política de descarte — `RECOGNIZED_SCHEMES`** (`{CVE, ZDI-CAN, ZDI, VU, GHSA,
+MSRC, OSV}`): si **ninguno** de los ids de identidad pertenece a un scheme
+reconocido, la mención se **descarta** (`ingest.skip_unrecognized`) — no se
+almacena nada sin un CVE o código oficial equivalente. `GHCOMMIT` es un scheme
+**definido** pero deliberadamente **no** reconocido: un commit de seguridad sin
+código asignado no se ancla ni se guarda. Junto con
+`github_synthesize_candidates=False` (por defecto), `github_commits` por tanto
+emite **solo** commits que citan un CVE real.
 
 Normalización (`_canon`): `GHSA` conserva el prefijo en mayúsculas y el cuerpo
 en minúsculas (`GHSA-jfh8-c2jp-5v3q`); `GHCOMMIT` **no** se normaliza (owner/repo
@@ -46,9 +62,6 @@ y sha son sensibles a mayúsculas); el resto se pasa a mayúsculas.
 
 Helpers: `primary_cve(ids)` devuelve el primer CVE; `primary_native(ids)`
 devuelve el primer identificador no-CVE.
-
-Si no se extrae **ningún** identificador, la mención se descarta
-(`ingest.skip_no_identifier`): sin ancla no puede correlacionarse.
 
 ---
 
@@ -122,6 +135,15 @@ guarda en `mentions.raw_html_path` para re-parseo sin volver a la fuente.
 
 Tras insertar la mención:
 
+- **`_record_soft_references`** (solo ruta nueva): tras insertar la fila
+  `mentions`, registra los CVEs citados en la prosa de la nota
+  (`extract_identifiers(title, snippet, url)`) que **no** son el CVE anclado en
+  `cve_soft_references` (`{cve_id, mention_id, source_id, from_candidate_id,
+  context}`). Se **cuentan, no se fusionan** ni entran en identifiers/union-find:
+  un cuerpo GHSA o mensaje de commit que cita otros CVEs no debe arrastrar esas
+  vulnerabilidades distintas a este candidate; el CVE citado puede ni estar
+  publicado aún — ese es el caso interesante. Idempotente vía
+  `ON CONFLICT DO NOTHING` en `uq_soft_ref_mention_cve` (ver `DATA_MODEL.md`).
 - **`_refresh_aggregates`** recalcula por SQL: `mention_count`, `source_count`
   (distinct `source_id`), `first_seen_at = min(seen_at)`,
   `last_seen_at = max(seen_at)`. Si `status == 'candidate'` y hay ≥1 mención,
@@ -129,8 +151,11 @@ Tras insertar la mención:
 - **`compute_days_ahead`** — solo si el candidate tiene `cve_id` reconciliado y
   el CVE existe en `published_cves`: calcula los tres deltas
   (`published`/`present`/`analyzed`, ver `ARCHITECTURE.md`) contra
-  `candidate.first_seen_at`. Si el CVE está `PUBLISHED` y el candidate está en
-  `candidate`/`emerging`, lo promueve a `published` y sella `promoted_at`.
+  `candidate.first_seen_at`. **Promoción = "NVD ya tiene datos"**: si
+  `pub.nvd_published_at IS NOT NULL` y el candidate está en `candidate`/`emerging`,
+  lo promueve a `published` y sella `promoted_at`. Se gatilla por la **fecha de
+  publicación en NVD**, no por el mero estado `state='PUBLISHED'` de cvelist: un
+  CVE reservado o sin fecha NVD permanece pre-publicado.
 
 ---
 

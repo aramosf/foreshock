@@ -5,7 +5,7 @@ the radar's edge is measured. Three sources feed `published_cves` and
 `epss_scores`:
 
 - **cvelistV5** — the official CVE 5.x record dump (`cvelist_*` columns);
-- **NVD 2.0 delta** — NVD status/timestamps plus CVERadar's **own** first-
+- **NVD 2.0 delta** — NVD status/timestamps plus Foreshock's **own** first-
   observation ground truth (`nvd_*` columns);
 - **EPSS** — FIRST.org exploitation-probability scores, kept as a per-date
   history.

@@ -1,6 +1,6 @@
 # Sources
 
-The **sources layer** (`app/sources/`) is CVERadar's collection tier. Every fetcher
+The **sources layer** (`app/sources/`) is Foreshock's collection tier. Every fetcher
 is a self-contained module that pulls signal from one upstream and hands the
 pipeline a list of `FetchedMention` objects. Fetchers **never touch the
 database** — persistence, deduplication, correlation and enrichment are the job
@@ -8,9 +8,10 @@ of the ingestion pipeline (`app/ingest/`, see `INGESTION.md`). A fetcher that
 raises is isolated by the runner: the exception is logged, recorded on the
 `sources` row, and the rest of the schedule keeps running.
 
-This document describes the `BaseSource` contract, the four collection methods,
-the eleven registered fetchers, the polite-HTTP layer, the Playwright browser
-pool, and how to add a new fetcher.
+This document describes the `BaseSource` contract, the five collection methods,
+the **22 registered fetchers** (grouped by tier), the RSS/Atom feed framework,
+the polite-HTTP layer, the Playwright browser pool, the GitHub repo watchlist /
+registry, and how to add a new fetcher.
 
 ---
 
@@ -26,8 +27,8 @@ Defined in `app/sources/base.py`. Each fetcher lives in
 |-----------|------|---------|
 | `name` | `str` | Unique identifier; equals `sources.name`. Required — `@register` raises if empty. |
 | `kind` | `str` | Human-readable description of the origin. |
-| `method` | `str` | One of `api` / `rss` / `scrape` / `browser`. Default `"api"`. |
-| `tier` | `int` | `1..5` — signal-earliness priority (1 = earliest/highest). Default `5`. |
+| `method` | `str` | One of `api` / `rss` / `scrape` / `browser` / `git`. Default `"api"`. |
+| `tier` | `int` | `1..9` (CHECK, since `0009`) — signal-earliness priority (1 = earliest/highest); values in use are `1..5`. Default `5`. |
 | `cadence_seconds` | `int` | Default poll interval. Default `3600`. |
 
 ### 1.2 The abstract method
@@ -83,7 +84,8 @@ Defined in `app/ingest/service.py`; fully described in `INGESTION.md`. Fields:
 | `title` | `str \| None` | Short title. |
 | `snippet` | `str \| None` | Body/summary text (fetchers cap at 2000 chars). |
 | `cve_id` | `str \| None` | CVE if the fetcher already knows it. |
-| `native_id` | `str \| None` | Non-CVE native id (GHSA, OSV id, `GHCOMMIT:...`, ZDI-CAN, …). |
+| `native_id` | `str \| None` | Non-CVE native id (GHSA, OSV id, ZDI-CAN, …). |
+| `extra_ids` | `list[str] \| None` | Extra **declared** ids that are part of the identity and **do merge** (e.g. the other aliases of one OSV/ZDI advisory). Must **not** be used for bare CVEs merely cited in prose. |
 | `raw_html` | `str \| None` | Raw content persisted to disk when provided. |
 | `seen_at` | `datetime \| None` | **Real** publication time; falls back to fetch time. |
 | `flags` | `dict \| None` | Whitelisted candidate flags: `in_kev`, `kev_date`, `kev_source`, `has_public_poc`. |
@@ -95,36 +97,79 @@ Defined in `app/ingest/service.py`; fully described in `INGESTION.md`. Fields:
 
 ---
 
-## 2. The four collection methods
+## 2. The five collection methods
 
-The `method` attribute is declarative metadata (stored on `sources.method`); it
-tells operators how a fetcher collects and hints at the tooling used. There is
-no dispatch on it — each `fetch()` implements its own collection.
+The `method` attribute is declarative metadata (stored on `sources.method`,
+`CHECK method IN ('api','rss','scrape','browser','git')` since `0008`); it tells
+operators how a fetcher collects and hints at the tooling used. There is no
+dispatch on it — each `fetch()` implements its own collection.
 
 | `method` | Tooling | Typical use |
 |----------|---------|-------------|
-| `api` | `httpx` against a JSON/XML API | CISA KEV, VulnCheck, Red Hat, GHSA, OSV, GitHub commits |
-| `rss` | `feedparser` over an RSS/Atom feed | CERT/CC, The Hacker News |
+| `api` | `httpx` against a JSON/XML API | CISA KEV, VulnCheck, Red Hat, GHSA, OSV |
+| `rss` | `feedparser` over an RSS/Atom feed | 11 RSS fetchers (ZDI, CERT-EU, Siemens, Palo Alto, Spring, Fortinet, Veeam, Full Disclosure, oss-security, The Hacker News, …) |
 | `scrape` | `httpx` + `selectolax` on static HTML | Nessus |
 | `browser` | `BrowserPool` (Playwright, optional dependency) | JS-rendered pages (no fetcher currently uses it) |
+| `git` | `git clone --filter=blob:none` + `git log` (no REST API) | `github_commits` (top-N repo commit scan) |
+
+> `nuclei_templates` and `metasploit` declare `method="api"` but delegate to
+> `scan_single_repo()`, which now also collects via a **blobless git clone**
+> (§3.1) rather than the REST commits API.
 
 ---
 
-## 3. The eleven fetchers
+## 3. The 22 fetchers (by tier)
 
-| # | `name` | Tier | Method | Endpoint / URL | Signal | Auth | Pagination |
-|---|--------|------|--------|----------------|--------|------|------------|
-| 1 | `cisa_kev` | 1 | api | `cisa.gov/.../known_exploited_vulnerabilities.json` | CVEs exploited in the wild (authoritative KEV) | none | none (single JSON) |
-| 2 | `vulncheck_kev` | 1 | api | `{vulncheck_api_base}/index/vulncheck-kev` | Broader/earlier KEV (~80% larger than CISA) | Bearer token (`CVERADAR_VULNCHECK_TOKEN`) — inactive without it | `page`/`limit=100`, stops at `_meta.total_pages`, cap `vulncheck_max_pages` (50) |
-| 3 | `certcc_vu` | 1 | rss | `kb.cert.org/vuls/atomfeed/` | VU# notes, often precede the CVE | none | none (single feed) |
-| 4 | `redhat_csaf` | 2 | api | `access.redhat.com/hydra/rest/securitydata/cve.json` | Recent CVEs + **authoritative** CVSS v3 vector | none | `after`+`per_page=1000`+`page`, stops on short page, cap `max_pages=20` |
-| 5 | `nessus` | 3 | scrape | `tenable.com/plugins/nessus/newest` | Plugin may cite a still-**reserved** CVE | none (browser-like headers) | none (single listing) |
-| 6 | `nuclei_templates` | 3 | api | `github.com/projectdiscovery/nuclei-templates` commits | New template ≈ imminent mass exploitation | GitHub PAT recommended | commit `Link` header, cap `github_commits_max_pages` |
-| 7 | `metasploit` | 3 | api | `github.com/rapid7/metasploit-framework` commits | New exploit module = reliable exploit exists | GitHub PAT recommended | commit `Link` header, cap `github_commits_max_pages` |
-| 8 | `github_advisories` | 4 | api | `api.github.com/advisories` | GHSA + CVE + affected packages | GitHub PAT optional (raises rate limit) | `Link` header cursor, cap `github_advisories_max_pages` (30) |
-| 9 | `github_commits` | 4 | api | `api.github.com` top-N repos commits | CVE citations + pre-CVE security fixes | GitHub PAT (5000 req/h) | per-repo commit `Link` header + repo rotation cursor |
-| 10 | `osv` | 4 | api | `osv-vulnerabilities.storage.googleapis.com/{eco}/all.zip` | Ecosystem advisories, rich structured data | none | per-ecosystem `all.zip`, cap `osv_max_per_ecosystem` (3000) |
-| 11 | `thehackernews` | 5 | rss | `feeds.feedburner.com/TheHackersNews` | News, sometimes early on active campaigns | none | none (single feed) |
+Each RSS/Atom feed on tiers 1–3/5 is a **separately registered** fetcher
+generated from one row of the `_FEEDS` table in `app/sources/feeds_rss.py`
+(§3.3). The remaining fetchers are hand-written modules.
+
+### Tier 1 — earliest / highest priority
+
+| `name` | Method | Endpoint / URL | Signal | Auth |
+|--------|--------|----------------|--------|------|
+| `cisa_kev` | api | `cisa.gov/.../known_exploited_vulnerabilities.json` | CVEs exploited in the wild (authoritative KEV) | none |
+| `vulncheck_kev` | api | `{vulncheck_api_base}/index/vulncheck-kev` | Broader/earlier KEV (~80% larger than CISA) | Bearer token (`FORESHOCK_VULNCHECK_TOKEN`) — inactive without it |
+| `certcc_vu` | rss | `kb.cert.org/vuls/atomfeed/` | VU# notes, often precede the CVE | none |
+| `zdi_published` | rss | `zerodayinitiative.com/rss/published/` | Published ZDI advisories (CVE + ZDI ids) | none |
+| `zdi_upcoming` | rss | `zerodayinitiative.com/rss/upcoming/` | **Pre-CVE**: upcoming ZDI advisories anchored by `ZDI-CAN-*` (often no CVE yet) | none |
+| `certeu` | rss | `cert.europa.eu/publications/security-advisories-rss` | CERT-EU security advisories | none |
+
+### Tier 2 — vendor PSIRTs
+
+| `name` | Method | Endpoint / URL | Signal | Auth |
+|--------|--------|----------------|--------|------|
+| `redhat_csaf` | api | `access.redhat.com/hydra/rest/securitydata/cve.json` | Recent CVEs + **authoritative** CVSS v3 vector | none |
+| `siemens_cert` | rss | `cert-portal.siemens.com/productcert/rss/advisories.atom` | Siemens ProductCERT advisories | none |
+| `paloalto` | rss | `security.paloaltonetworks.com/rss.xml` | Palo Alto Networks advisories | none |
+| `spring_security` | rss | `spring.io/security.atom` | Spring Security advisories | none |
+| `fortiguard_psirt` | rss | `fortiguard.com/rss/ir.xml` | FortiGuard PSIRT IR advisories | none |
+| `veeam` | rss | `veeam.com/services/open/kb/security-feed` | Veeam security advisories | none |
+
+### Tier 3 — exploit / detection artefacts & disclosure lists
+
+| `name` | Method | Endpoint / URL | Signal | Auth |
+|--------|--------|----------------|--------|------|
+| `nessus` | scrape | `tenable.com/plugins/nessus/newest` | Plugin may cite a still-**reserved** CVE | none (browser-like headers) |
+| `nuclei_templates` | api (git) | `github.com/projectdiscovery/nuclei-templates` commits | New template ≈ imminent mass exploitation | GitHub PAT recommended |
+| `metasploit` | api (git) | `github.com/rapid7/metasploit-framework` commits | New exploit module = reliable exploit exists | GitHub PAT recommended |
+| `fulldisclosure` | rss | `seclists.org/rss/fulldisclosure.rss` | Full Disclosure mailing list | none |
+| `oss_security` | rss | `seclists.org/rss/oss-sec.rss` | oss-security mailing list | none |
+
+### Tier 4 — advisory feeds & top-N commit scan
+
+| `name` | Method | Endpoint / URL | Signal | Auth |
+|--------|--------|----------------|--------|------|
+| `github_advisories` | api | `api.github.com/advisories` | GHSA + CVE + affected packages | GitHub PAT optional (raises rate limit) |
+| `github_commits` | git | blobless clone + `git log` of the watchlisted repos | CVE citations in commit messages (often reserved) | GitHub PAT (embedded in clone URL) |
+| `osv` | api | `osv-vulnerabilities.storage.googleapis.com/{eco}/all.zip` | Ecosystem advisories, rich structured data | none |
+
+### Tier 5 — news / roundups
+
+| `name` | Method | Endpoint / URL | Signal | Auth |
+|--------|--------|----------------|--------|------|
+| `thehackernews` | rss | `feeds.feedburner.com/TheHackersNews` | News, sometimes early on active campaigns | none |
+| `zdi_blog` | rss | `zerodayinitiative.com/blog/?format=rss` | ZDI blog roundups (context) | none |
 
 Notes that apply broadly:
 
@@ -140,59 +185,67 @@ Notes that apply broadly:
 - **`github_advisories`** attaches `native_id=ghsa_id`, `cve_id=cve` (if
   assigned), and folds affected packages (`ecosystem:name range`) into the
   snippet (`... | affected: ...`).
-- **`certcc_vu` / `thehackernews`** parse the feed with `feedparser`, using the
-  entry's real `published_parsed`/`updated_parsed` as `seen_at`. `thehackernews`
-  keeps only entries whose title+summary contain `CVE-`.
+- **RSS fetchers** (`certcc_vu`, all `zdi_*`, `certeu`, the vendor PSIRTs,
+  `fulldisclosure`, `oss_security`, `thehackernews`) parse the feed with
+  `feedparser`, using the entry's real `published_parsed`/`updated_parsed` as
+  `seen_at`. A mention is only produced if the entry contains a **recognized
+  code** — see the entry→mention rule in §3.3.
 
-### 3.1 `github_commits` in detail
+### 3.1 `github_commits` in detail — blobless clone + git-log cache
 
-`app/sources/github_commits.py` watches the **top-N GitHub repositories by
-stars** and scans their commits for two kinds of early vulnerability signal:
+`app/sources/github_commits.py` watches a **registry of GitHub repositories**
+(§3.4) and scans their commits for early vulnerability signal: **commits whose
+message cites a CVE** (regex `CVE-\d{4}-\d{4,7}`, case-insensitive) — often
+reserved, not yet public in NVD/MITRE.
 
-1. **Commits citing a CVE** (regex `CVE-\d{4}-\d{4,7}`, case-insensitive) —
-   often reserved, not yet public in NVD/MITRE → mention carries that `cve_id`.
-2. **Security-fix commits with no CVE** (regex `_SECFIX`: `security fix`,
-   `vulnerabilit`, `remote code execution`, `rce`, `xss`, `sql injection`,
-   `sqli`, `auth bypass`, `ssrf`, `deserializ`, `path traversal`, `arbitrary
-   code/file`, `buffer overflow`, `use-after-free`, `privilege escalation`,
-   `out-of-bounds`) → anchored as a **pre-CVE candidate** via the synthetic id
-   `GHCOMMIT:owner/repo@<sha12>` (`native_id`), which reconciliation can later
-   merge with the CVE when it appears. Only emitted when `synthesize` is on.
+**One mention per distinct CVE** (`_mentions_from_log`): a commit message may fix
+several CVEs. The scanner collects **all distinct** CVEs in the message and emits
+**one mention per CVE**, each declaring a single `cve_id` and anchoring its own
+candidate — a "batch of N CVEs" commit becomes N independent mentions, never a
+merged block (this is the same anti-over-merge policy used across the pipeline).
 
-**Top-N repo list — star windowing + weekly cache** (`_build_repo_list`): the
-GitHub Search API caps results at 1000 per query, so the list is built with
-**descending star windows**. Starting from `stars:>=50` (floor is 50 stars), it
-paginates 10 pages × 100 = 1000 per window, records the minimum star count seen
-(`page_min`), then opens the next window `stars:{floor}..{page_min}` below it,
-until `github_top_n` (default 10000) repos are collected. The result is cached to
-`{data_dir}/github_top_repos.json` with a `built_at` timestamp; it is rebuilt
-weekly, or eagerly if the cached list is shorter than the requested
-`github_top_n` (lets you raise the setting without deleting the cache).
+**Blobless shallow clone instead of the REST API** (`_git_scan`): the old
+commit-by-commit REST scan was capped at 5000 req/h. The scanner now runs
 
-**Incremental crawl — cursor + per-repo watermark**: each run processes a
-**rotating batch** of `github_repos_per_run` (default 150) repos to respect the
-rate limit. The batch start is a cursor persisted at
-`{data_dir}/github_commits_cursor.txt`; it advances by `github_repos_per_run mod
-len(repos)` each run and **wraps** around the list (the tail wraps to the head
-so no repo is skipped). A per-repo **watermark** map
-(`{data_dir}/github_repo_state.json`, `full_name -> ISO of newest committer date
-scanned`, written atomically via a `.tmp` file + `os.replace`) makes each scan
-incremental: `since = max(N-month cutoff, watermark[repo])`.
+```
+git clone --filter=blob:none --no-checkout --quiet --shallow-since=<YYYY-MM-DD> <url> <tmp>
+git -C <tmp> log --since=<YYYY-MM-DD> --pretty=format:'%H\x1f%cI\x1f%B\x1e'
+```
 
-**Commit pagination via the `Link` header** (`_scan_repo`): GitHub returns the
-newest commits first, 100 per page. Without paginating, a repo with more than
-100 commits in the window would silently lose the rest forever (the watermark
-would jump straight to the newest). `_scan_repo` therefore follows
-`resp.links["next"]["url"]` up to `github_commits_max_pages` (default 10) pages,
-tracking the newest committer date seen to return as the new watermark. A repo
-that errors is caught (`github.repo_error`) and does not sink the batch.
+which downloads only commit/tree objects (no file contents) and reads messages
+from a local `git log`. No API rate limit, minimal transfer. The clone is written
+to a temp dir under `{data_dir}/clones` and removed in a `finally`. If a
+`FORESHOCK_GITHUB_TOKEN` is set it is embedded in the clone URL
+(`https://x-access-token:<token>@github.com/...`, never logged).
+
+**Compressed git-log cache** (`_write_gitlog_cache`): after each scan the relevant
+records — only commits that cite a CVE or match the `_SECFIX` security-language
+regex — are gzip-written to `{cache_dir}/gitlog/<owner__repo>.log.gz` (first line
+= repo name, then the `\x1e`-separated records). This is lossless for the parser
+(irrelevant commits produce nothing anyway) but tiny, and lets the extraction be
+**re-run without cloning** after a parser bug: `reextract_from_cache()` re-parses
+every cached log with the current code (zero network). It is exposed as
+`foreshock sources reextract-commits` (see `CLI.md`).
+
+**Batch scanning** (`GitHubCommitsSource.fetch`): if the registry is empty it
+bootstraps it (`harvest_references()` + `harvest_top_n()`). Each run pulls a
+`next_batch(github_repos_per_run)` (default 150) of repos, ordered unscanned-first
+(§3.4). Per repo, `since = max(cutoff, watermark)` where the cutoff is
+`github_commits_since` (fixed, default `2026-05-01`) or a relative
+`github_commits_months` (default 5) window. After scanning, the whole batch is
+marked via `update_scan()` (records `last_scanned_at` and the newest committer
+date as the new `watermark`) so it rotates and never re-scans the same commits. A
+repo that errors is caught (`github.repo_error`) and does not sink the batch.
+
+**No bare-commit anchoring by default.** `github_synthesize_candidates` defaults
+to **`False`**, so security-fix commits *without* a CVE are **not** emitted as
+synthetic `GHCOMMIT` anchors — ingestion would drop them anyway (they are not a
+`RECOGNIZED_SCHEME`, see `INGESTION.md`). Only commits that cite a real CVE
+produce mentions.
 
 `scan_single_repo(...)` is the helper used by `nuclei_templates` and
-`metasploit`: it scans **one** repo over an N-month window
-(`github_commits_months`, default 5) with `synthesize=False`, so those fetchers
-only emit commits that already cite a CVE (no synthetic GHCOMMIT noise). The
-global `github_synthesize_candidates` (default `True`) controls synthesis for the
-top-N `github_commits` fetcher.
+`metasploit`: it scans **one** repo over an N-month window (`github_commits_months`,
+default 5) with `synthesize=False`, via the same blobless clone.
 
 ### 3.2 `osv` in detail
 
@@ -241,6 +294,57 @@ falling back to `modified`; records published before the `osv_months` (default
   so `classify_kind` tags the affected products as `malware` rather than
   `product`/`distro`.
 
+### 3.3 RSS/Atom feed framework (`app/sources/feeds_rss.py`)
+
+All 11 RSS/Atom fetchers are **data-driven**: a single `_FEEDS` table of
+`(name, kind, tier, url)` rows, one dynamically generated `BaseSource` subclass
+per row (`method="rss"`, `cadence_seconds=3600`), all registered via `register`.
+Adding a feed = adding one row.
+
+Each entry is turned into mentions by `_mentions_for_entry`, applying the same
+anti-over-merge policy as the rest of the pipeline. It runs
+`extract_identifiers(title, summary)`, keeps only **recognized** schemes
+(`RECOGNIZED_SCHEMES` = CVE, ZDI-CAN, ZDI, VU, GHSA, MSRC, OSV), and then:
+
+| Entry contains | Result |
+|---|---|
+| **exactly 1 CVE** | one mention with that `cve_id`; the entry's non-CVE recognized codes (ZDI-CAN, VU, …) ride along as `extra_ids` (same vuln, they merge). |
+| **>1 CVE** | one mention **per CVE** (distinct vulns in one bulletin), each anchoring its own candidate — **no bundling**, avoids over-merge. |
+| **0 CVE but a recognized code** (e.g. a `ZDI-CAN` from an "upcoming" ZDI advisory) | one mention anchored by that code as `native_id` (**pure pre-CVE**). |
+| **no recognized id** | dropped (ingestion would drop it anyway). |
+
+This is why `zdi_upcoming` yields pre-CVE candidates: an upcoming advisory
+carries only a `ZDI-CAN-*`, which anchors a candidate that reconciliation merges
+with the CVE once it appears.
+
+### 3.4 GitHub repo watchlist / registry (`app/sources/repo_registry.py`)
+
+`github_commits` no longer keeps JSON state files. It consumes the
+`github_repos` table (migration `0010`, PK `full_name`), which **unifies every
+discovery strategy**: a repo added by several strategies is one row (dedup by
+PK), and a per-repo `watermark` guarantees no repo is re-scanned or duplicated.
+`upsert_repos` de-dups on conflict, raising `priority` to the `GREATEST` and
+filling missing `stars`.
+
+Discovery strategies (each is a `harvest_*` function; `harvest_all` runs them in
+order, exposed as `foreshock sources harvest-repos`):
+
+| `origin` | Priority | Source | Enabled |
+|---|---|---|---|
+| `top_n` | 0 | Top-N repos by stars via the GitHub Search API, descending star windows (`stars:>=50`, then `stars:{floor}..{page_min}`), up to `github_top_n` (default 10000). **Kept — additional, not a replacement.** | always |
+| `reference` | 10 | Repos cited in advisory reference URLs: `mentions.url`, `cve_reference.url`, `candidates.reference_urls[]` → `github.com/owner/repo`. | always |
+| `past_cve` | 20 | Subset of `reference` whose citing candidate **already has a CVE** (higher priority). | always |
+| `criticality` | 15 | OpenSSF Criticality Score CSV (any GitHub URL column). | opt-in via `FORESHOCK_CRITICALITY_CSV_URL` |
+| `downloads` | 15 | Top PyPI packages by 30-day downloads → each package's project repo. | opt-in via `FORESHOCK_PYPI_DOWNLOADS_TOP_N > 0` |
+
+`_extract_repo` normalizes a URL to `owner/repo`, skipping non-repo owner
+segments (`advisories`, `sponsors`, `orgs`, `security`, …) and a trailing `.git`.
+
+**Scan ordering** (`next_batch`): `ORDER BY last_scanned_at ASC NULLS FIRST,
+priority DESC, stars DESC NULLS LAST, full_name` — never-scanned repos first,
+then highest priority, then most stars. `update_scan` stamps `last_scanned_at`
+and advances `watermark`.
+
 ---
 
 ## 4. Polite HTTP (`app/sources/http.py`)
@@ -248,7 +352,7 @@ falling back to `modified`; records published before the `osv_months` (default
 All API/scrape fetchers go through this layer.
 
 - **Identifiable User-Agent**: `make_client()` sets `settings.user_agent`
-  (default `CVERadar/0.1 (+https://github.com/cveradar; early-CVE research)`),
+  (default `Foreshock/0.1 (+https://github.com/foreshock; early-CVE research)`),
   `follow_redirects=True`, and `settings.http_timeout_seconds` (30 s).
 - **robots.txt** (`allowed_by_robots`): when `settings.respect_robots` is true
   (default), the per-host `robots.txt` is fetched once and cached in
@@ -264,9 +368,11 @@ All API/scrape fetchers go through this layer.
   and worsens rate limiting (e.g. a secondary GitHub `403`). `get()` runs the
   robots check, then `client.get(...)`, then `raise_for_status()`.
 
-Note: fetchers that must not throw on a plain `4xx` (e.g. `github_commits`
-`_scan_repo`, `_build_repo_list`) call `client.get(...)` **directly** and branch
-on `resp.status_code`, bypassing `get()`'s `raise_for_status`.
+Note: code paths that must not throw on a plain `4xx` (e.g. the registry's
+`harvest_top_n`, which walks Search API pages) call `client.get(...)` **directly**
+and branch on `resp.status_code`, bypassing `get()`'s `raise_for_status`.
+`github_commits` collects via `git`, not this HTTP layer, so it is unaffected by
+the API rate limit entirely.
 
 ---
 

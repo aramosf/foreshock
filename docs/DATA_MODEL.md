@@ -10,6 +10,11 @@ schema**:
 | `0003_soft_cve` | `migrations/versions/0003_soft_cve_ref.py` | drops the FK `candidates.cve_id → published_cves.id` (soft reference) |
 | `0004_kev_flags` | `migrations/versions/0004_kev_flags.py` | `candidates.in_kev`, `kev_date`, `kev_source` + partial index |
 | `0005_rich_fields` | `migrations/versions/0005_rich_fields.py` | `affected_products.kind`; `candidates.cwe_ids`, `reference_urls`, `withdrawn` |
+| `0006_nvd_enrichment` | `migrations/versions/0006_nvd_enrichment.py` | `published_cves` enrichment columns + child tables `cve_cvss`, `cve_cwe`, `cve_cpe`, `cve_reference` |
+| `0007_soft_cve_references` | `migrations/versions/0007_soft_cve_references.py` | `cve_soft_references` (CVEs cited in prose, unanchored) |
+| `0008_source_method_git` | `migrations/versions/0008_source_method_git.py` | widens `CHECK ck_sources_method` to include `'git'` |
+| `0009_source_tier_range` | `migrations/versions/0009_source_tier_range.py` | widens `CHECK ck_sources_tier` to `tier BETWEEN 1 AND 9` |
+| `0010_github_repos_registry` | `migrations/versions/0010_github_repos_registry.py` | `github_repos` watchlist/registry (PK `full_name`, per-repo watermark) |
 
 `app/core/models.py` is a SQLModel ORM mapping **over** those tables. `migrations/env.py`
 sets `target_metadata=None`, so the models never autogenerate migrations and never
@@ -37,19 +42,31 @@ erDiagram
     product_catalog ||--o{ product_aliases : "catalog_id (FK, CASCADE)"
     product_catalog |o--o{ affected_products : "catalog_id (FK, SET NULL)"
     affected_products ||--o{ affected_version_ranges : "affected_product_id (FK, CASCADE)"
+    published_cves ||..o{ cve_cvss : "soft ref by cve_id (no FK)"
+    published_cves ||..o{ cve_cwe : "soft ref by cve_id (no FK)"
+    published_cves ||..o{ cve_cpe : "soft ref by cve_id (no FK)"
+    published_cves ||..o{ cve_reference : "soft ref by cve_id (no FK)"
+    published_cves ||..o{ cve_soft_references : "soft ref by cve_id (no FK)"
+    mentions ||--o{ cve_soft_references : "mention_id (FK, CASCADE)"
+    sources ||--o{ cve_soft_references : "source_id (FK)"
+    candidates |o--o{ cve_soft_references : "from_candidate_id (FK, SET NULL)"
 
     published_cves {
         text id PK "CVE-YYYY-NNNN"
         text state "RESERVED|PUBLISHED|REJECTED"
+        timestamptz nvd_published_at "NVD-with-data gate"
         timestamptz nvd_first_observed_at "own ground truth"
         timestamptz nvd_first_analyzed_observed_at
         jsonb raw_json
+        text primary_cvss_severity "enrichment (0006)"
+        text primary_cwe "enrichment (0006)"
+        text ssvc_exploitation "CISA ADP (0006)"
     }
     sources {
         int id PK
         text name UK
-        int tier "1..5"
-        text method "api|rss|scrape|browser"
+        int tier "1..9 (CHECK); 1..5 in use"
+        text method "api|rss|scrape|browser|git"
     }
     candidates {
         uuid id PK
@@ -115,6 +132,45 @@ erDiagram
         text fixed
         text last_affected
     }
+    cve_cvss {
+        bigint id PK
+        text cve_id "soft ref, no FK"
+        text version "2.0|3.0|3.1|4.0"
+        text source "CNA shortName|cisa-adp"
+        float base_score
+    }
+    cve_cwe {
+        bigint id PK
+        text cve_id "soft ref, no FK"
+        text cwe_id
+        text source
+    }
+    cve_cpe {
+        bigint id PK
+        text cve_id "soft ref, no FK"
+        text cpe23
+        bool vulnerable
+    }
+    cve_reference {
+        bigint id PK
+        text cve_id "soft ref, no FK"
+        text url
+        text_array tags
+    }
+    cve_soft_references {
+        bigint id PK
+        text cve_id "soft ref, no FK"
+        bigint mention_id FK
+        int source_id FK
+        uuid from_candidate_id FK "SET NULL"
+    }
+    github_repos {
+        text full_name PK "owner/repo"
+        text origin "top_n|reference|past_cve|criticality|downloads|manual"
+        int stars
+        int priority
+        text watermark "ISO of newest scanned commit"
+    }
 ```
 
 Relationship notes:
@@ -142,17 +198,38 @@ NVD 2.0 delta feed (`app/baseline/nvd.py`). PK `id` is the CVE string itself.
 | `nvd_published_at` | timestamptz | yes | — | Publication date self-reported by NVD (**may arrive back-dated / backfilled**). |
 | `nvd_last_modified_at` | timestamptz | yes | — | Last-modified date self-reported by NVD. |
 | `nvd_vuln_status` | Text | yes | — | NVD status string, e.g. `Awaiting Analysis`, `Analyzed`. |
-| `nvd_first_observed_at` | timestamptz | yes | — | **Own observation ground truth**: the first time *CVERadar* saw this CVE in the NVD delta. Sealed once via `COALESCE`. |
+| `nvd_first_observed_at` | timestamptz | yes | — | **Own observation ground truth**: the first time *Foreshock* saw this CVE in the NVD delta. Sealed once via `COALESCE`. |
 | `nvd_first_analyzed_observed_at` | timestamptz | yes | — | First time we observed this CVE in `Analyzed` state. Sealed once via `COALESCE`, only when the observed status is `Analyzed`. |
 | `cna` | Text | yes | — | CNA that owns the record. |
 | `assigner_short_name` | Text | yes | — | Assigner short name. |
-| `raw_json` | JSONB | yes | — | Original CVE 5.x record for later re-parsing. |
+| `raw_json` | JSONB | yes | — | Original CVE 5.0 record (cvelistV5: CNA + CISA-ADP containers) for later re-parsing. |
 | `ingested_at` | timestamptz | no | `now()` | Server-side insert/update timestamp. |
+| `description_en` | Text | yes | — | (`0006`) English description from the CNA container. |
+| `primary_cvss_version` | Text | yes | — | (`0006`) Version of the chosen primary CVSS (`2.0/3.0/3.1/4.0`). |
+| `primary_cvss_score` | Float | yes | — | (`0006`) Base score of the primary CVSS. |
+| `primary_cvss_severity` | Text | yes | — | (`0006`) Severity of the primary CVSS (uppercased). |
+| `primary_cvss_vector` | Text | yes | — | (`0006`) Vector of the primary CVSS. |
+| `primary_cwe` | Text | yes | — | (`0006`) First `CWE-…` weakness. |
+| `has_exploit_ref` | Boolean | yes | — | (`0006`) A reference is tagged `Exploit`. |
+| `has_patch_ref` | Boolean | yes | — | (`0006`) A reference is tagged `Patch`. |
+| `ssvc_exploitation` | Text | yes | — | (`0006`) SSVC `Exploitation` from the CISA ADP "Vulnrichment" container. |
+| `ssvc_automatable` | Text | yes | — | (`0006`) SSVC `Automatable` (CISA ADP). |
+| `ssvc_technical_impact` | Text | yes | — | (`0006`) SSVC `Technical Impact` (CISA ADP). |
+| `enriched_at` | timestamptz | yes | — | (`0006`) When `enrich-nvd` last derived these columns. |
+
+The enrichment columns are **denormalized** shortcuts for filtering/joining; the
+full detail lives in the `cve_cvss` / `cve_cwe` / `cve_cpe` / `cve_reference` child
+tables. All are populated by `foreshock baseline enrich-nvd` (`app/baseline/enrich.py`),
+a purely derived, idempotent batch — see [NVD enrichment tables](#nvd-enrichment-migration-0006)
+below and `ENRICHMENT.md`.
 
 **Constraints / indexes**
 - `CHECK ck_pubcves_state`: `state IN ('RESERVED','PUBLISHED','REJECTED')`.
 - `idx_pubcves_state (state)`, `idx_pubcves_nvd_published (nvd_published_at DESC)`,
   `idx_pubcves_assigner (assigner_short_name)`.
+- (`0006`) `idx_pcve_cvss_score (primary_cvss_score)`,
+  `idx_pcve_cvss_severity (primary_cvss_severity)`, `idx_pcve_cwe (primary_cwe)`,
+  `idx_pcve_ssvc_expl (ssvc_exploitation)`.
 
 **Why the `nvd_first_*` columns exist.** NVD frequently *backfills*: a CVE can be
 published today with `nvd_published_at` set in the past, and dates can be rewritten
@@ -170,8 +247,8 @@ Registry row per fetcher, synced from code by `sync_registry_to_db()`.
 | `id` | Integer | no | autoincrement | Primary key, referenced by `mentions.source_id`. |
 | `name` | Text | no | — | Unique fetcher name (`== BaseSource.name`). |
 | `kind` | Text | no | — | Human-readable description of the origin. |
-| `method` | Text | no | — | `api` / `rss` / `scrape` / `browser`. |
-| `tier` | Integer | no | — | Signal priority `1..5` (1 = strongest/earliest). |
+| `method` | Text | no | — | `api` / `rss` / `scrape` / `browser` / `git`. |
+| `tier` | Integer | no | — | Signal priority (1 = strongest/earliest); `CHECK 1..9`, values in use `1..5`. |
 | `enabled` | Boolean | no | `true` | Scheduler only runs enabled sources. |
 | `cadence_seconds` | Integer | no | — | Interval between runs. **Not overwritten** on re-sync (operator may tune it live). |
 | `last_success_at` | timestamptz | yes | — | Last successful run. |
@@ -180,8 +257,8 @@ Registry row per fetcher, synced from code by `sync_registry_to_db()`.
 | `created_at` | timestamptz | no | `now()` | Row creation time. |
 
 **Constraints / indexes**
-- `CHECK ck_sources_method`: `method IN ('api','rss','scrape','browser')`.
-- `CHECK ck_sources_tier`: `tier BETWEEN 1 AND 5`.
+- `CHECK ck_sources_method`: `method IN ('api','rss','scrape','browser','git')` (widened in `0008`).
+- `CHECK ck_sources_tier`: `tier BETWEEN 1 AND 9` (widened in `0009`).
 - `UNIQUE(name)`; partial `idx_sources_enabled (enabled) WHERE enabled`.
 
 ---
@@ -240,14 +317,15 @@ partial `idx_cand_in_kev (in_kev) WHERE in_kev`.
 `candidates_cve_id_fkey`. A candidate routinely references a CVE that is only
 **RESERVED** and not yet ingested into `published_cves` (or that MITRE/NVD have not
 published at all). Enforcing the FK would *reject the early signal* — the exact thing
-CVERadar exists to capture. Reconciliation is done by *lookup*
+Foreshock exists to capture. Reconciliation is done by *lookup*
 (`compute_days_ahead()` calls `session.get(PublishedCVE, cve_id)`), not by referential
 integrity. The `idx_cand_cve` index keeps that lookup cheap.
 
 **Status lifecycle**: `candidate` → `emerging` (`_refresh_aggregates` promotes on the
-first mention) → `published` (`compute_days_ahead` promotes when the CVE turns up
-`PUBLISHED` in the baseline). `merged` is the union-find tombstone; `rejected` is a
-possible terminal state.
+first mention) → `published` (`compute_days_ahead` promotes when the CVE has **NVD
+data**: `published_cves.nvd_published_at IS NOT NULL` — a RESERVED CVE or one without
+an NVD date stays pre-published). `merged` is the union-find tombstone; `rejected` is
+a possible terminal state.
 
 ### `identifiers` — deterministic anchor
 Every `(scheme, value)` belongs to exactly one candidate; this is Stage A of the
@@ -275,11 +353,18 @@ the key that makes a native id point to a single candidate and enables the merge
 | `VU` | `VU#123456` | uppercased | CERT/CC vulnerability note. |
 | `GHSA` | `GHSA-jfh8-c2jp-5v3q` | `GHSA-` + lowercase body | GitHub Security Advisory. |
 | `MSRC` | `ADV123456` | uppercased | Microsoft advisory number. |
-| `GHCOMMIT` | `GHCOMMIT:owner/repo@<sha7-40>` | preserved (case-sensitive) | **Synthetic** id anchoring a pre-CVE security fix from a GitHub commit. |
+| `GHCOMMIT` | `GHCOMMIT:owner/repo@<sha7-40>` | preserved (case-sensitive) | **Defined but NOT recognized** — a synthetic id for a bare security-fix commit. It is **not** in `RECOGNIZED_SCHEMES`, so a mention anchored only by `GHCOMMIT` is **dropped** at ingest and never stored. |
 | `OSV` | `PYSEC-2026-1`, `GO-2026-1`, `RUSTSEC-2026-0001`, `GSD-2026-1`, `MAL-2026-1`, `OSV-2026-1` | uppercased | OSV ecosystem advisory ids (PyPI/Go/Rust/malware/generic) that anchor advisories that may predate a CVE. |
 
 The list order is the "native" priority: `primary_native()` returns the first
 non-CVE id, used to label a mention when no CVE is present.
+
+**Recognition policy.** `RECOGNIZED_SCHEMES = {CVE, ZDI-CAN, ZDI, VU, GHSA, MSRC,
+OSV}`. Ingestion **drops** any mention that does not anchor to at least one
+recognized scheme — nothing is stored without a CVE or an equivalent official code.
+`GHCOMMIT` is intentionally excluded, so no `GHCOMMIT` rows exist in `identifiers`
+anymore (this is why the old `backfill-products` `GHCOMMIT` heuristic no longer
+matches). See `INGESTION.md` §2.
 
 ### `mentions` — raw observations
 One row per appearance of a vulnerability in a source (a mention may carry no CVE).
@@ -365,7 +450,7 @@ verbatim in source text (Red Hat, MSRC, CNA…) or from structured feeds (OSV
 `persist_cvss_vectors`, `source='osv'`), scored with the `cvss` library. `derived` rows
 are built from the 8 base metrics the LLM inferred, only when **all 8** are present
 (`derive_from_metrics`); otherwise no numeric score is written and a `severity_hint`
-is used instead. CVERadar never invents a number.
+is used instead. Foreshock never invents a number.
 
 ### `epss_scores` — history
 FIRST.org exploit-prediction scores, kept as a full time series.
@@ -477,6 +562,129 @@ Structured version ranges per affected product, OSV / CVE-5.0 style.
 
 **Index**: `idx_ranges_affected_product (affected_product_id)`. `persist_affected()`
 replaces a product's ranges wholesale on upsert (delete-then-insert) to stay idempotent.
+
+---
+
+## NVD enrichment (migration `0006`)
+
+Four **normalized child tables** derived from `published_cves.raw_json` (CVE JSON
+5.0). `cve_id` is a **soft reference** to `published_cves.id` (no FK: a CVE can be
+enriched from an ADP container before its baseline row exists). `enrich_all`
+(`app/baseline/enrich.py`, `foreshock baseline enrich-nvd`) is idempotent via
+**delete-by-cve + insert**. See `ENRICHMENT.md`.
+
+### `cve_cvss`
+Every CVSS metric found across the CNA and ADP containers (multi-row per CVE).
+
+| Column | Type | Null | Default | Purpose |
+|---|---|---|---|---|
+| `id` | BigInteger | no | autoincrement | Primary key. |
+| `cve_id` | Text | no | — | Soft ref to `published_cves.id`. |
+| `version` | Text | no | — | `2.0` / `3.0` / `3.1` / `4.0`. |
+| `source` | Text | no | — | CNA `shortName`, or `cisa-adp`. |
+| `type` | Text | yes | — | `Primary` / `Secondary` (from the metric). |
+| `vector` | Text | yes | — | CVSS vector string. |
+| `base_score` | Float | yes | — | Base score. |
+| `base_severity` | Text | yes | — | Severity (uppercased). |
+| `exploitability_score` | Float | yes | — | Sub-score. |
+| `impact_score` | Float | yes | — | Sub-score. |
+| `recorded_at` | timestamptz | no | `now()` | Insert time. |
+
+**Indexes**: `idx_cve_cvss_cve (cve_id)`, `idx_cve_cvss_score (base_score)`.
+
+### `cve_cwe`
+Declared weaknesses (multi-row per CVE).
+
+| Column | Type | Null | Default | Purpose |
+|---|---|---|---|---|
+| `id` | BigInteger | no | autoincrement | Primary key. |
+| `cve_id` | Text | no | — | Soft ref. |
+| `cwe_id` | Text | no | — | `CWE-79` or free-text description when no id. |
+| `description` | Text | yes | — | Weakness text (when a `cweId` was present). |
+| `source` | Text | yes | — | Container source. |
+| `recorded_at` | timestamptz | no | `now()` | Insert time. |
+
+**Indexes**: `idx_cve_cwe_cve (cve_id)`, `idx_cve_cwe_cwe (cwe_id)`.
+
+### `cve_cpe`
+Affected products as CPE 2.3 strings (multi-row per CVE).
+
+| Column | Type | Null | Default | Purpose |
+|---|---|---|---|---|
+| `id` | BigInteger | no | autoincrement | Primary key. |
+| `cve_id` | Text | no | — | Soft ref. |
+| `cpe23` | Text | no | — | CPE 2.3 string. |
+| `vulnerable` | Boolean | yes | — | `False` when the container `defaultStatus` is `unaffected`. |
+| `version_start` / `version_start_type` | Text | yes | — | (reserved; currently NULL). |
+| `version_end` / `version_end_type` | Text | yes | — | (reserved; currently NULL). |
+| `source` | Text | yes | — | Container source. |
+| `recorded_at` | timestamptz | no | `now()` | Insert time. |
+
+**Indexes**: `idx_cve_cpe_cve (cve_id)`, `idx_cve_cpe_cpe (cpe23)`.
+
+### `cve_reference`
+Reference URLs with their tags (multi-row per CVE; deduped by URL across containers).
+
+| Column | Type | Null | Default | Purpose |
+|---|---|---|---|---|
+| `id` | BigInteger | no | autoincrement | Primary key. |
+| `cve_id` | Text | no | — | Soft ref. |
+| `url` | Text | no | — | Reference URL. |
+| `tags` | ARRAY(Text) | yes | — | e.g. `Exploit`, `Patch`, `Vendor Advisory`. |
+| `source` | Text | yes | — | Container source. |
+| `recorded_at` | timestamptz | no | `now()` | Insert time. |
+
+**Indexes**: `idx_cve_ref_cve (cve_id)`, GIN `idx_cve_ref_tags (tags)`.
+
+---
+
+## Soft CVE references (migration `0007`)
+
+### `cve_soft_references`
+A CVE **cited in a note's prose** (a GHSA body, commit message, news item) that is
+**not** the note's own anchored CVE. Deliberately decoupled from identity: it does
+**not** anchor, does **not** merge, and is **not** in `identifiers` or the
+union-find. It exists to *count and contextualize* CVEs (often not yet published)
+that appear somewhere, without collapsing distinct vulnerabilities. Populated by
+`_record_soft_references` in `app/ingest/service.py`.
+
+| Column | Type | Null | Default | Purpose |
+|---|---|---|---|---|
+| `id` | BigInteger | no | autoincrement | Primary key. |
+| `cve_id` | Text | no | — | The cited CVE (**soft ref**, no FK — may be unpublished). |
+| `mention_id` | BigInteger | no | — | FK → `mentions.id` `ON DELETE CASCADE`. |
+| `source_id` | Integer | no | — | FK → `sources.id`. |
+| `from_candidate_id` | UUID | yes | — | FK → `candidates.id` `ON DELETE SET NULL` — the note's candidate (drill-down context). |
+| `context` | Text | yes | — | Snippet/title of the note (≤500 chars). |
+| `seen_at` | timestamptz | no | `now()` | Insert time. |
+
+**Constraints / indexes**: `UNIQUE(mention_id, cve_id)` (`uq_soft_ref_mention_cve`,
+the idempotency key); `idx_soft_ref_cve (cve_id)`, `idx_soft_ref_source (source_id)`.
+
+---
+
+## GitHub repo registry (migration `0010`)
+
+### `github_repos`
+Unified watchlist of GitHub repositories scanned by `github_commits`
+(`app/sources/repo_registry.py`). PK `full_name` de-dups a repo added by several
+discovery strategies; the `watermark` makes each scan incremental (no repo is
+re-scanned or duplicated). Replaces the old JSON state files.
+
+| Column | Type | Null | Default | Purpose |
+|---|---|---|---|---|
+| `full_name` | Text | no | — | Primary key = `owner/repo`. |
+| `origin` | Text | no | — | `top_n` / `reference` / `past_cve` / `criticality` / `downloads` / `manual`. |
+| `stars` | Integer | yes | — | Star count (from the Search API / top-N). |
+| `priority` | Integer | no | `0` | Scan priority (raised to `GREATEST` on conflict). |
+| `watermark` | Text | yes | — | ISO of the newest committer date already scanned. |
+| `first_seen_at` | timestamptz | no | `now()` | Row creation. |
+| `last_scanned_at` | timestamptz | yes | — | Last scan time (NULL = never scanned → scanned first). |
+
+**Indexes**: `idx_ghrepos_scan (last_scanned_at, priority, stars)` (the scan
+ordering: unscanned first, then priority, then stars), `idx_ghrepos_origin (origin)`.
+**No FK** — the registry is independent of the tracking tables (though it is
+*populated* from `mentions` / `cve_reference` / `candidates.reference_urls`).
 
 ---
 

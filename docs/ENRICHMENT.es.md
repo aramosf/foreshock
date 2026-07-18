@@ -6,6 +6,15 @@ afectados y **CVSS**. Orquestado por
 `app/enrichment/service.py::enrich_candidate()` (requiere sesión abierta, **no**
 hace commit).
 
+> **Dos caminos de enriquecimiento distintos.** Este documento cubre el
+> enriquecimiento de **candidates** (Capa 3, LLM + CVSS autoritativo/derivado
+> sobre el texto de las menciones). Existe además un paso **puramente derivado**
+> — **enriquecimiento estructurado NVD** (`app/baseline/enrich.py`,
+> `foreshock baseline enrich-nvd`) — que parsea el CVE JSON 5.0 ya almacenado en
+> `published_cves.raw_json` a tablas estructuradas (`cve_cvss` / `cve_cwe` /
+> `cve_cpe` / `cve_reference`) y columnas desnormalizadas en `published_cves`,
+> sin LLM y sin red. Ver [§8](#8-enriquecimiento-estructurado-nvd-enrich-nvd).
+
 ---
 
 ## Principio: el LLM extrae MÉTRICAS, no un número CVSS
@@ -61,7 +70,7 @@ priorizando `authoritative` sobre `derived`, versión más alta y score más alt
 ## Proveedores LLM (`app/enrichment/llm.py`)
 
 Diseño **provider-neutral** sobre `httpx` (sin acoplar a un SDK). Se elige con
-`get_provider()` según `CVERADAR_LLM_PROVIDER`:
+`get_provider()` según `FORESHOCK_LLM_PROVIDER`:
 
 | `llm_provider` | Clase | Endpoint |
 |---|---|---|
@@ -70,7 +79,7 @@ Diseño **provider-neutral** sobre `httpx` (sin acoplar a un SDK). Se elige con
 | `anthropic` | `AnthropicProvider` | `{base}/v1/messages` (`anthropic-version: 2023-06-01`). |
 | `ollama` | `OllamaProvider` | `{base}/api/chat` con `format=json`, local. |
 
-Variables de entorno (prefijo `CVERADAR_`): `LLM_PROVIDER`, `LLM_MODEL`
+Variables de entorno (prefijo `FORESHOCK_`): `LLM_PROVIDER`, `LLM_MODEL`
 (default `mock-model`), `LLM_API_KEY`, `LLM_BASE_URL` (p.ej. Ollama
 `http://ollama:11434`), `LLM_MAX_TOKENS` (default `1024`).
 
@@ -144,5 +153,53 @@ def should_reenrich(candidate, *, reenrich_hours, min_new_mentions,
 ```
 
 Se re-enriquece si nunca se hizo, si pasó suficiente tiempo
-(`CVERADAR_ENRICHMENT_REENRICH_HOURS`, default `24`) o si llegaron bastantes
-menciones nuevas (`CVERADAR_ENRICHMENT_REENRICH_MIN_MENTIONS`, default `3`).
+(`FORESHOCK_ENRICHMENT_REENRICH_HOURS`, default `24`) o si llegaron bastantes
+menciones nuevas (`FORESHOCK_ENRICHMENT_REENRICH_MIN_MENTIONS`, default `3`).
+
+---
+
+## 8. Enriquecimiento estructurado NVD (`enrich-nvd`)
+
+`app/baseline/enrich.py` deriva datos oficiales estructurados desde
+`published_cves.raw_json` — el registro **CVE JSON 5.0** de cvelistV5, que lleva
+un container **CNA** y uno o más containers **CISA ADP ("Vulnrichment")**. Es
+**puramente derivado**: sin LLM, sin red, solo lee lo que ya está en la BD.
+Punto de entrada `foreshock baseline enrich-nvd` (CLI).
+
+`parse_record(cve_id, raw)` es una función **pura y testeable** que devuelve un
+`Enrichment`; `enrich_all(batch_size=2000)` es el driver por lotes
+**idempotente** (borra-por-cve + inserta, paginado por keyset sobre `id`),
+re-ejecutable sin duplicar.
+
+### 8.1 Qué extrae (CNA primero, luego ADP)
+
+- **CVSS** (`_parse_metrics`) — cualquier bloque `cvssV2_0`/`cvssV2`/`cvssV3_0`/
+  `cvssV3_1`/`cvssV4_0` → una fila `cve_cvss` `{version, source, type, vector,
+  base_score, base_severity, exploitability_score, impact_score}`. `source` es el
+  `providerMetadata.shortName` del container (o `cisa-adp` para el CISA ADP).
+- **SSVC** (también `_parse_metrics`) — una métrica con `other.type == "ssvc"`
+  (del container CISA ADP Vulnrichment) rellena `ssvc_exploitation`,
+  `ssvc_automatable`, `ssvc_technical_impact` (gana el primer valor).
+- **CWE** (`_parse_problem_types`) → filas `cve_cwe` (`cweId`, o la descripción
+  de texto libre).
+- **CPE** (`_parse_affected`) → filas `cve_cpe` por cada string `affected[].cpes[]`
+  que empieza por `cpe:` (`vulnerable = defaultStatus != "unaffected"`).
+- **Referencias** (`_parse_references`) → filas `cve_reference` `{url, tags,
+  source}`, deduplicadas por URL entre containers; un tag `patch` fija
+  `has_patch_ref`, un tag `exploit` fija `has_exploit_ref`.
+- **`description_en`** — primer valor `descriptions[]` en inglés del CNA.
+
+### 8.2 CVSS / CWE primarios (desnormalizados en `published_cves`)
+
+`_pick_primary_cvss` elige el score "primario" entre todas las filas CVSS
+recogidas con `base_score` no nulo, ordenando por: **CNA-propietario** (source
+distinto de `CVE`/`cisa-adp`) > `type == "Primary"` > **versión más alta**
+(`4.0 > 3.1 > 3.0 > 2.0`). Rellena `primary_cvss_version/score/severity/vector`.
+El CWE primario es el primer id `CWE-…`. Estos, más `has_exploit_ref`/
+`has_patch_ref`, los tres campos SSVC, `description_en` y `enriched_at`, se
+escriben de vuelta en `published_cves` en un UPDATE por lotes con `executemany`.
+Las filas de detalle van a las cuatro tablas hijas (`DATA_MODEL.md`).
+
+Como es borra-por-cve + inserta por lote, re-ejecutar `enrich-nvd` después de que
+el baseline traiga nuevo `raw_json` simplemente refresca los datos derivados sin
+duplicados.

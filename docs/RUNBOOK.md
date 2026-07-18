@@ -1,7 +1,7 @@
-# CVERadar — Operations Runbook
+# Foreshock — Operations Runbook
 
 End-to-end guide to start, load, operate, and recover the whole system. Everything
-runs in Docker. This is the single source of truth for **running** CVERadar; for
+runs in Docker. This is the single source of truth for **running** Foreshock; for
 design see `ARCHITECTURE.md`, for the data model `DATA_MODEL.md`, for sources
 `SOURCES.md`.
 
@@ -40,9 +40,9 @@ from `docker/Dockerfile` — see the pitfall in §9):
   `git check-ignore .env`):
 
   ```
-  CVERADAR_GITHUB_TOKEN=ghp_xxx        # raises GitHub rate limit + clone limits
-  CVERADAR_VULNCHECK_TOKEN=vulncheck_xxx
-  CVERADAR_NVD_API_KEY=xxx             # speeds up the NVD full sync
+  FORESHOCK_GITHUB_TOKEN=ghp_xxx        # raises GitHub rate limit + clone limits
+  FORESHOCK_VULNCHECK_TOKEN=vulncheck_xxx
+  FORESHOCK_NVD_API_KEY=xxx             # speeds up the NVD full sync
   ```
 
 Without tokens the system still runs; token-gated sources just fetch less.
@@ -85,8 +85,8 @@ Manual equivalent (if you prefer step-by-step):
 ```bash
 docker compose up -d
 docker compose stop sources-worker baseline-worker
-docker compose run --rm sources-worker cveradar baseline nvd-full
-docker compose run --rm sources-worker cveradar baseline epss-full
+docker compose run --rm sources-worker foreshock baseline nvd-full
+docker compose run --rm sources-worker foreshock baseline epss-full
 # then the re-ingest procedure in §6
 ```
 
@@ -100,9 +100,9 @@ and schedule each **enabled** source at its `cadence_seconds`. Enable/disable an
 cadence changes are picked up **hot** (re-reconciled every 60 s):
 
 ```bash
-docker compose run --rm sources-worker cveradar sources list
-docker compose run --rm sources-worker cveradar sources disable <name>
-docker compose run --rm sources-worker cveradar sources enable  <name>
+docker compose run --rm sources-worker foreshock sources list
+docker compose run --rm sources-worker foreshock sources disable <name>
+docker compose run --rm sources-worker foreshock sources enable  <name>
 ```
 
 While the workers are **stopped**, nothing scheduled runs — this is intentional
@@ -159,7 +159,9 @@ ecosystem → the other signal sources → `github_commits` (blobless clone) →
 
 ---
 
-## 7. The 11 sources
+## 7. The 22 sources
+
+**API / git / KEV (the original 11):**
 
 | Tier | Source | What it brings |
 |---|---|---|
@@ -172,12 +174,32 @@ ecosystem → the other signal sources → `github_commits` (blobless clone) →
 | 3 | `nessus` | Plugin advisories |
 | 4 | `osv` | The backbone: ~13 package ecosystems (carries the full GHSA catalog via aliases) |
 | 4 | `github_advisories` | Freshest GHSA (≈3k, mostly dup of OSV) |
-| 4 | `github_commits` | **Blobless clone + `git log`** of top-N repos since a fixed cutoff; commits citing a CVE |
+| 4 | `github_commits` | **Blobless clone + `git log`** of top-N + watchlist repos; commits citing a CVE |
 | 5 | `thehackernews` | News |
+
+**RSS/Atom fetchers (`feeds_rss.py`, 11 new):**
+
+| Tier | Source | What it brings |
+|---|---|---|
+| 1 | `zdi_published` | ZDI published advisories (many CVEs) |
+| 1 | `zdi_upcoming` | ZDI upcoming — **pre-CVE via ZDI-CAN** (no CVE yet) |
+| 1 | `certeu` | CERT-EU advisories |
+| 2 | `siemens_cert` | Siemens ProductCERT (ICS/OT) |
+| 2 | `paloalto` | Palo Alto Networks PSIRT |
+| 2 | `spring_security` | Spring advisories |
+| 2 | `fortiguard_psirt` | Fortinet PSIRT |
+| 2 | `veeam` | Veeam advisories |
+| 3 | `fulldisclosure` | Full Disclosure mailing list |
+| 3 | `oss_security` | oss-security mailing list |
+| 5 | `zdi_blog` | ZDI blog roundups (high CVE volume) |
+
+The RSS framework converts each entry to mentions safely: **1 CVE** → one mention bundling
+its non-CVE aliases; **multiple CVEs** → one mention per CVE (no over-merge); **ZDI-CAN
+only** → anchored pre-CVE; no recognized code → dropped.
 
 ### The commit source
 
-`github_commits`: top-10k popular repos, commits since `CVERADAR_GITHUB_COMMITS_SINCE`
+`github_commits`: top-10k popular repos, commits since `FORESHOCK_GITHUB_COMMITS_SINCE`
 (fixed `2026-05-01`). It uses `git clone --filter=blob:none --shallow-since=… --no-checkout`
 + `git log` (no REST rate limit; only commit metadata transferred). It anchors the commit
 to the CVE it cites; **extra CVEs mentioned in the message are stored as soft
@@ -194,7 +216,7 @@ commits (those citing a CVE or security-fix language) of every repo to a gzipped
 cache **without cloning anything**:
 
 ```bash
-docker compose run --rm sources-worker cveradar sources reextract-commits
+docker compose run --rm sources-worker foreshock sources reextract-commits
 ```
 
 This mirrors OSV's cached-zip pattern: raw signal is archived so a parser fix never
@@ -233,7 +255,7 @@ FROM cve_ids ci LEFT JOIN published_cves p ON p.id=ci.cve;
 ```
 
 ### NVD enrichment
-`cveradar baseline enrich-nvd` derives, from `published_cves.raw_json` (CVE JSON 5.0),
+`foreshock baseline enrich-nvd` derives, from `published_cves.raw_json` (CVE JSON 5.0),
 structured `cve_cvss` / `cve_cwe` / `cve_cpe` / `cve_reference` tables plus
 denormalized `published_cves` columns (`primary_cvss_*`, `primary_cwe`,
 `has_exploit_ref`, `ssvc_*`, …). Idempotent; re-runnable.
@@ -265,10 +287,10 @@ an over-merge — investigate before trusting the data.
 - **Tests truncate the DB in `DATABASE_URL`.** The integration test fixture
   `TRUNCATE`s (including `published_cves`). Always run tests against an isolated DB:
   ```bash
-  docker compose exec -T postgres psql -U cveradar -d cveradar -c "CREATE DATABASE cveradar_test;"
-  docker compose run --rm -e DATABASE_URL=postgresql+psycopg://cveradar:cveradar@postgres:5432/cveradar_test \
+  docker compose exec -T postgres psql -U cveradar -d cveradar -c "CREATE DATABASE foreshock_test;"
+  docker compose run --rm -e DATABASE_URL=postgresql+psycopg://cveradar:cveradar@postgres:5432/foreshock_test \
     -v "$(pwd)/migrations:/app/migrations" migrate
-  docker compose run --rm -e DATABASE_URL=postgresql+psycopg://cveradar:cveradar@postgres:5432/cveradar_test \
+  docker compose run --rm -e DATABASE_URL=postgresql+psycopg://cveradar:cveradar@postgres:5432/foreshock_test \
     -v "$(pwd)/tests:/app/tests" -v "$(pwd)/pyproject.toml:/app/pyproject.toml" \
     migrate bash -lc "uv pip install --system --no-cache pytest pytest-asyncio respx && pytest /app/tests -q"
   ```

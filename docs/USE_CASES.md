@@ -1,8 +1,8 @@
-# Use cases — questions CVERadar answers that MITRE / NVD / OSV cannot
+# Use cases — questions Foreshock answers that MITRE / NVD / OSV cannot
 
 **Framing.** MITRE, NVD, OSV and the KEV catalogs are the **finish line**: they
 record a vulnerability once it has an assigned, published, scored identifier.
-CVERadar watches the **race** — the interval between the first public signal that
+Foreshock watches the **race** — the interval between the first public signal that
 a vulnerability exists (a commit, a ZDI reservation, a CERT/CC note, an ecosystem
 advisory, an exploit module) and the moment the official catalog catches up. The
 catalogs cannot answer "what is emerging right now and how far ahead of NVD are
@@ -18,7 +18,7 @@ shipped features.
 
 ## 1. What vulnerabilities have no official CVE *right now*?
 
-**Answer today** — `cveradar pending`.
+**Answer today** — `foreshock pending`.
 
 A candidate is **pending** when it is live (`merged_into IS NULL`) and either has
 no `cve_id`, or its `cve_id` is **not `PUBLISHED`** in our baseline:
@@ -35,23 +35,23 @@ WHERE c.merged_into IS NULL
 ```
 
 ```bash
-cveradar pending --kind all --format json
-cveradar emerging list --since 24h --min-mentions 2     # live view, newest first
+foreshock pending --kind all --format json
+foreshock emerging list --since 24h --min-mentions 2     # live view, newest first
 ```
 
 **Why the catalogs can't**: NVD/MITRE only list *assigned and published* CVEs; an
 advisory that is only RESERVED, or a fix commit with no CVE at all, does not exist
-for them. CVERadar tracks it under a native or synthetic anchor (`ZDI-CAN`, `VU#`,
+for them. Foreshock tracks it under a native or synthetic anchor (`ZDI-CAN`, `VU#`,
 `GHSA`, `GHCOMMIT:owner/repo@sha`, OSV id) from `first_seen_at`.
 
 ---
 
 ## 2. How many days of lead does each source give us over NVD?
 
-**Answer today** — `cveradar stats`.
+**Answer today** — `foreshock stats`.
 
 ```bash
-cveradar stats --format json
+foreshock stats --format json
 ```
 
 Reports, per source, the average `days_ahead_vs_nvd_present` — the gap between our
@@ -63,35 +63,35 @@ in NVD (`nvd_first_observed_at`, our own backfill-immune clock), de-duplicated p
 **Why the catalogs can't**: NVD knows its own `published`/`lastModified` dates but
 has no notion of "when did an external radar first see this", and its
 self-reported dates are subject to backfill. The lead metric only exists because
-CVERadar stamps its own observation time.
+Foreshock stamps its own observation time.
 
 ---
 
 ## 3. Which software accumulates the most vulnerabilities with no official CVE?
 
-**Answer today** — `cveradar pending --kind product`.
+**Answer today** — `foreshock pending --kind product`.
 
 ```bash
-cveradar pending --kind product --top 30
-cveradar pending --kind distro     # per-distro security notes
-cveradar pending --kind malware    # OSV MAL-* records
+foreshock pending --kind product --top 30
+foreshock pending --kind distro     # per-distro security notes
+foreshock pending --kind malware    # OSV MAL-* records
 ```
 
 Ranks product names by the number of pending candidates naming them, split by
 `affected_products.kind` so a real library, a distro advisory, and a malware
-package are never conflated. `cveradar trend --kind product --months 12` shows the
+package are never conflated. `foreshock trend --kind product --months 12` shows the
 same set as a monthly time series bucketed by `first_seen_at` (hockey-stick
 detection).
 
 **Why the catalogs can't**: they can rank *published* CVEs per product, but not
 the *pre-publication backlog* — the software with many advisories still working
-through reservation/assignment. That backlog is CVERadar-only.
+through reservation/assignment. That backlog is Foreshock-only.
 
 ---
 
 ## Threat anticipation (the core value)
 
-The catalogs answer "what happened". CVERadar is built to answer "what is *about
+The catalogs answer "what happened". Foreshock is built to answer "what is *about
 to* happen". The following are the anticipation use cases.
 
 ### 4. Exploit before CVE — code exists to attack something not yet cataloged
@@ -226,9 +226,9 @@ the `candidates` model.
 
 | Use case | Status | Entry point |
 |---|---|---|
-| 1. Vulns with no official CVE now | Available | `cveradar pending`, `emerging` |
-| 2. Lead days per source | Available | `cveradar stats` |
-| 3. Software with most pending CVEs | Available | `cveradar pending --kind`, `trend` |
+| 1. Vulns with no official CVE now | Available | `foreshock pending`, `emerging` |
+| 2. Lead days per source | Available | `foreshock stats` |
+| 3. Software with most pending CVEs | Available | `foreshock pending --kind`, `trend` |
 | 4. Exploit-before-CVE (PoC × reserved × not-in-KEV) | Available (SQL) | nuclei/metasploit × pending × `in_kev` |
 | 5. Pre-KEV prediction *P(KEV in 30d)* | **Future (Layer 4)** | label + features ready; no model |
 | 6. Mention emergence velocity / acceleration | Partial (SQL) / Future | `mentions.seen_at` windows |

@@ -9,6 +9,14 @@ requirements, PoC availability, affected products, CVSS scores, and a qualitativ
 The guiding principle: **never invent a CVSS number.** The LLM extracts *base
 metrics*, and the score is computed deterministically with the `cvss` library.
 
+> **Two distinct enrichment paths.** This document covers the **candidate**
+> enrichment (Layer 3, LLM + authoritative/derived CVSS over mention text). A
+> separate, **purely derived** pass — **NVD structured enrichment**
+> (`app/baseline/enrich.py`, `foreshock baseline enrich-nvd`) — parses the CVE JSON
+> 5.0 already stored in `published_cves.raw_json` into structured tables (`cve_cvss`
+> / `cve_cwe` / `cve_cpe` / `cve_reference`) and denormalized `published_cves`
+> columns, with no LLM and no network. See [§8](#8-nvd-structured-enrichment-enrich-nvd).
+
 ---
 
 ## 1. `enrich_candidate` flow (`service.py`)
@@ -221,3 +229,48 @@ Returns `True` if the candidate has never been enriched
 `reenrich_hours` (setting `enrichment_reenrich_hours`, default 24), or at least
 `min_new_mentions` new mentions arrived since (setting
 `enrichment_reenrich_min_mentions`, default 3).
+
+---
+
+## 8. NVD structured enrichment (`enrich-nvd`)
+
+`app/baseline/enrich.py` derives structured, official data from
+`published_cves.raw_json` — the **CVE JSON 5.0** record from cvelistV5, which
+carries a **CNA** container and one or more **CISA ADP ("Vulnrichment")**
+containers. It is **purely derived**: no LLM, no network, reads only what is
+already in the DB. Entry point `foreshock baseline enrich-nvd` (CLI).
+
+`parse_record(cve_id, raw)` is a **pure, testable** function returning an
+`Enrichment`; `enrich_all(batch_size=2000)` is the **idempotent** batch driver
+(delete-by-cve + insert, keyset-paged by `id`), re-runnable without duplicating.
+
+### 8.1 What it extracts (CNA first, then ADP)
+
+- **CVSS** (`_parse_metrics`) — any `cvssV2_0`/`cvssV2`/`cvssV3_0`/`cvssV3_1`/
+  `cvssV4_0` block → a `cve_cvss` row `{version, source, type, vector, base_score,
+  base_severity, exploitability_score, impact_score}`. `source` is the container's
+  `providerMetadata.shortName` (or `cisa-adp` for the CISA ADP).
+- **SSVC** (also `_parse_metrics`) — a metric with `other.type == "ssvc"` (from the
+  CISA ADP Vulnrichment container) fills `ssvc_exploitation`, `ssvc_automatable`,
+  `ssvc_technical_impact` (first value wins).
+- **CWE** (`_parse_problem_types`) → `cve_cwe` rows (`cweId`, else the free-text
+  description).
+- **CPE** (`_parse_affected`) → `cve_cpe` rows for each `affected[].cpes[]` string
+  starting with `cpe:` (`vulnerable = defaultStatus != "unaffected"`).
+- **References** (`_parse_references`) → `cve_reference` rows `{url, tags, source}`,
+  deduped by URL across containers; a `patch` tag sets `has_patch_ref`, an `exploit`
+  tag sets `has_exploit_ref`.
+- **`description_en`** — first English `descriptions[]` value from the CNA.
+
+### 8.2 Primary CVSS / CWE (denormalized on `published_cves`)
+
+`_pick_primary_cvss` chooses the "primary" score among all collected CVSS rows with
+a non-null base score, ranked by: **CNA-proprietary** (source not `CVE`/`cisa-adp`)
+> `type == "Primary"` > **highest version** (`4.0 > 3.1 > 3.0 > 2.0`). It fills
+`primary_cvss_version/score/severity/vector`. The primary CWE is the first `CWE-…`
+id. These, plus `has_exploit_ref`/`has_patch_ref`, the three SSVC fields,
+`description_en` and `enriched_at`, are written back onto `published_cves` in a
+batched `executemany` UPDATE. Detail rows go to the four child tables (`DATA_MODEL.md`).
+
+Because it is delete-by-cve + insert per batch, re-running `enrich-nvd` after the
+baseline pulls new `raw_json` simply refreshes the derived data with no duplicates.

@@ -1,6 +1,6 @@
 # Code review
 
-Summary of the adversarial review of CVERadar and the fixes it produced. The
+Summary of the adversarial review of Foreshock and the fixes it produced. The
 bulk of the correctness fixes landed in commit `1f0809b` ("fix: correctness bugs
 from full code review"); the OSV `published`-window fix and rich-persistence work
 are `e46bff9` / `671cf9d`. Deferred items are things the review identified but

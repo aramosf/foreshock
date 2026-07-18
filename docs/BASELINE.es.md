@@ -42,8 +42,8 @@ def upsert_published(session, record) -> None  # ON CONFLICT (id) DO UPDATE
   y **no pisa** los `nvd_*`. Un JSON malo no tumba el sync
   (`cvelist.parse_error`).
 
-Cadencia: `CVERADAR_CVELIST_SYNC_SECONDS` (default `900` = 15 min). Directorio:
-`CVERADAR_CVELIST_REPO_DIR` (default `/data/cvelistV5`).
+Cadencia: `FORESHOCK_CVELIST_SYNC_SECONDS` (default `900` = 15 min). Directorio:
+`FORESHOCK_CVELIST_REPO_DIR` (default `/data/cvelistV5`).
 
 ---
 
@@ -71,10 +71,10 @@ def upsert_nvd(session, record, observed_at) -> None
   - `observed_at = end` (ahora) es nuestro propio reloj.
 - Si el CVE aún no existe en `published_cves`, se crea con `state='PUBLISHED'`.
 - Sin `apiKey`, respeta el rate limit público con pausa de `6s` entre páginas
-  (`_RATE_LIMIT_SLEEP`); con `CVERADAR_NVD_API_KEY` envía la cabecera `apiKey` y
+  (`_RATE_LIMIT_SLEEP`); con `FORESHOCK_NVD_API_KEY` envía la cabecera `apiKey` y
   no espera.
 
-Cadencia: `CVERADAR_NVD_DELTA_SECONDS` (default `7200` = 2 h). Estos timestamps
+Cadencia: `FORESHOCK_NVD_DELTA_SECONDS` (default `7200` = 2 h). Estos timestamps
 alimentan `days_ahead_vs_nvd_present` / `_analyzed` (ver `ARCHITECTURE.md`).
 
 ---
@@ -99,5 +99,5 @@ def upsert_epss(session, record, model_version) -> None
 - `upsert_epss` hace `ON CONFLICT (cve_id, scored_date) DO UPDATE`; como la PK
   incluye la fecha, acumula snapshots en lugar de sobrescribir.
 
-Cadencia: `CVERADAR_EPSS_SYNC_SECONDS` (default `86400` = diario). La vista
+Cadencia: `FORESHOCK_EPSS_SYNC_SECONDS` (default `86400` = diario). La vista
 `epss_current` expone el snapshot más reciente por CVE.
