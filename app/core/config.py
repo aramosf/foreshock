@@ -1,4 +1,4 @@
-"""Configuración central de CVERadar (pydantic-settings).
+"""Configuración central de Foreshock (pydantic-settings).
 
 Todo se parametriza por variables de entorno (12-factor). Los defaults
 apuntan al docker-compose local. Nunca se hardcodean secretos.
@@ -15,7 +15,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix="CVERADAR_",
+        env_prefix="FORESHOCK_",
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
@@ -84,7 +84,7 @@ class Settings(BaseSettings):
 
     # --- Fetchers / scraping educado ---
     user_agent: str = Field(
-        default="CVERadar/0.1 (+https://github.com/cveradar; early-CVE research)"
+        default="Foreshock/0.1 (+https://github.com/foreshock; early-CVE research)"
     )
     http_timeout_seconds: float = Field(default=30.0)
     max_retries: int = Field(default=3)

@@ -2,7 +2,7 @@
 
 Motivo: un candidate puede referenciar un CVE que solo está RESERVADO y aún no
 ha sido ingerido por el baseline (o que MITRE/NVD aún no publican). Forzar el FK
-impediría registrar la señal temprana — justo la premisa de CVERadar. La
+impediría registrar la señal temprana — justo la premisa de Foreshock. La
 reconciliación con published_cves se hace por lookup, no por integridad
 referencial.
 

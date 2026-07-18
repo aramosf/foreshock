@@ -1,15 +1,15 @@
-"""CLI de operación y consulta de CVERadar (typer).
+"""CLI de operación y consulta de Foreshock (typer).
 
 Ejemplos:
-  cveradar db init
-  cveradar sources sync
-  cveradar sources list
-  cveradar sources run osv
-  cveradar baseline sync
-  cveradar emerging list --since 24h --tier 1 --min-mentions 2
-  cveradar cve show CVE-2026-12345
-  cveradar enrich CVE-2026-12345
-  cveradar stats
+  foreshock db init
+  foreshock sources sync
+  foreshock sources list
+  foreshock sources run osv
+  foreshock baseline sync
+  foreshock emerging list --since 24h --tier 1 --min-mentions 2
+  foreshock cve show CVE-2026-12345
+  foreshock enrich CVE-2026-12345
+  foreshock stats
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ from app.core.models import (
     Source,
 )
 
-app = typer.Typer(help="CVERadar — radar temprano de vulnerabilidades", no_args_is_help=True)
+app = typer.Typer(help="Foreshock — radar temprano de vulnerabilidades", no_args_is_help=True)
 sources_app = typer.Typer(help="Gestión de fuentes", no_args_is_help=True)
 baseline_app = typer.Typer(help="Sincronización del estado canónico", no_args_is_help=True)
 db_app = typer.Typer(help="Base de datos / migraciones", no_args_is_help=True)

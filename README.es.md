@@ -1,4 +1,4 @@
-# CVERadar
+# Foreshock
 
 **Radar temprano de vulnerabilidades**: detecta, correlaciona y enriquece CVEs
 *antes* de que MITRE/NVD los publiquen oficialmente, midiendo los "días de
@@ -56,7 +56,7 @@ flowchart LR
         DATA["candidates · identifiers · mentions<br/>cvss_scores · epss_scores · affected_products"]
         VIEW["vistas: radar · cvss_selected · epss_current"]
     end
-    CLI["CLI cveradar"]
+    CLI["CLI foreshock"]
     CVELIST --> JOBS
     NVD --> JOBS
     EPSSAPI --> JOBS
@@ -90,17 +90,17 @@ docker compose up -d postgres redis
 docker compose run --rm migrate            # aplica migraciones
 ```
 
-Operación con la CLI (`cveradar`, dentro de cualquier imagen del proyecto):
+Operación con la CLI (`foreshock`, dentro de cualquier imagen del proyecto):
 
 ```bash
-cveradar sources sync                       # registra los fetchers en la BD
-cveradar sources list                       # estado de las fuentes
-cveradar sources run redhat_csaf            # ejecuta un fetcher una vez
-cveradar baseline sync                      # fuerza sync cvelist+NVD+EPSS
-cveradar emerging list --since 24h --tier 1 --min-mentions 2
-cveradar cve show CVE-2026-12345            # timeline + enriquecimiento
-cveradar enrich CVE-2026-12345              # LLM + CVSS
-cveradar stats                              # días de ventaja por fuente
+foreshock sources sync                       # registra los fetchers en la BD
+foreshock sources list                       # estado de las fuentes
+foreshock sources run redhat_csaf            # ejecuta un fetcher una vez
+foreshock baseline sync                      # fuerza sync cvelist+NVD+EPSS
+foreshock emerging list --since 24h --tier 1 --min-mentions 2
+foreshock cve show CVE-2026-12345            # timeline + enriquecimiento
+foreshock enrich CVE-2026-12345              # LLM + CVSS
+foreshock stats                              # días de ventaja por fuente
 ```
 
 ## Fuentes implementadas (una por tier + GitHub commits)
@@ -114,7 +114,7 @@ cveradar stats                              # días de ventaja por fuente
 | `github_commits` | 4 | api | **Top-N repos + changelog N meses** (CVE reservado / fix de seguridad pre-CVE) |
 | `thehackernews` | 5 | rss | Noticias de explotación activa |
 
-`github_commits` vigila los **top-N repos** (`CVERADAR_GITHUB_TOP_N`, por defecto
+`github_commits` vigila los **top-N repos** (`FORESHOCK_GITHUB_TOP_N`, por defecto
 10.000, escalable a 100.000+) y escanea sus commits de los últimos N meses. Es
 **cacheado e incremental**: la lista de repos se cachea (rebuild semanal), se
 procesan por lotes con un cursor rotatorio, y cada repo mantiene un *watermark*

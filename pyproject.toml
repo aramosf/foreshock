@@ -1,7 +1,7 @@
 [project]
-name = "cveradar"
+name = "foreshock"
 version = "0.1.0"
-description = "CVERadar — radar temprano de vulnerabilidades"
+description = "Foreshock — radar temprano de vulnerabilidades"
 requires-python = ">=3.12"
 dependencies = [
     # DB / migraciones
@@ -32,7 +32,7 @@ dependencies = [
 ]
 
 [project.scripts]
-cveradar = "app.cli:app"
+foreshock = "app.cli:app"
 
 [dependency-groups]
 dev = [

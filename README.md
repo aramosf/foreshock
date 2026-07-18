@@ -1,4 +1,4 @@
-# CVERadar
+# Foreshock
 
 **Early vulnerability radar**: detects, correlates and enriches vulnerabilities
 *before* MITRE/NVD publish them officially, and measures the **lead days** each source
@@ -9,10 +9,10 @@ signal from public sources into a Postgres 16 database, an ingestion/reconciliat
 pipeline, LLM + CVSS enrichment, and an operations/query CLI.
 
 > **Framing.** MITRE (cvelistV5) and OSV are the finish line — the authoritative record of
-> what a vulnerability *is*. CVERadar doesn't replace them; it watches the **race** that
+> what a vulnerability *is*. Foreshock doesn't replace them; it watches the **race** that
 > happens before they cross that line (reserved id, exploit template, security commit, KEV
 > entry) and timestamps everyone's position. See
-> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#what-cveradar-answers-that-mitreosv-cannot).
+> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#what-foreshock-answers-that-mitreosv-cannot).
 
 ---
 
@@ -58,7 +58,7 @@ flowchart LR
         DATA["candidates · identifiers · mentions<br/>cvss_scores · epss_scores · affected_products"]
         VIEW["views: radar · cvss_selected · epss_current"]
     end
-    CLI["CLI cveradar"]
+    CLI["CLI foreshock"]
     CVELIST --> JOBS
     NVD --> JOBS
     EPSSAPI --> JOBS
@@ -103,82 +103,82 @@ docker compose up -d postgres redis
 docker compose run --rm migrate            # apply Alembic migrations
 ```
 
-Configuration is 12-factor via environment variables (prefix `CVERADAR_`, plus
+Configuration is 12-factor via environment variables (prefix `FORESHOCK_`, plus
 `DATABASE_URL` / `REDIS_URL`), read from the environment or a local `.env`. Defaults point
 at the docker-compose stack. Common ones:
 
 ```bash
-CVERADAR_LLM_PROVIDER=mock            # mock | openai | anthropic | ollama
-CVERADAR_LLM_MODEL=mock-model
-CVERADAR_LLM_API_KEY=                 # for openai/anthropic
-CVERADAR_NVD_API_KEY=                 # raises NVD rate limit
-CVERADAR_GITHUB_TOKEN=                # PAT -> 5000 req/h
-CVERADAR_GITHUB_TOP_N=10000           # popular repos to watch (scales to 100k+)
-CVERADAR_GITHUB_REPOS_PER_RUN=150     # incremental crawl batch size
-CVERADAR_VULNCHECK_TOKEN=             # free token from vulncheck.com
-CVERADAR_OSV_ECOSYSTEMS=PyPI,Go,crates.io,RubyGems,Packagist
+FORESHOCK_LLM_PROVIDER=mock            # mock | openai | anthropic | ollama
+FORESHOCK_LLM_MODEL=mock-model
+FORESHOCK_LLM_API_KEY=                 # for openai/anthropic
+FORESHOCK_NVD_API_KEY=                 # raises NVD rate limit
+FORESHOCK_GITHUB_TOKEN=                # PAT -> 5000 req/h
+FORESHOCK_GITHUB_TOP_N=10000           # popular repos to watch (scales to 100k+)
+FORESHOCK_GITHUB_REPOS_PER_RUN=150     # incremental crawl batch size
+FORESHOCK_VULNCHECK_TOKEN=             # free token from vulncheck.com
+FORESHOCK_OSV_ECOSYSTEMS=PyPI,Go,crates.io,RubyGems,Packagist
 ```
 
-## CLI (`cveradar`)
+## CLI (`foreshock`)
 
-The `cveradar` entry point (`app/cli.py`, Typer) is available inside any project image.
+The `foreshock` entry point (`app/cli.py`, Typer) is available inside any project image.
 Query commands accept `--format table|json|csv` (`-f`).
 
 ### `db` — migrations
 ```bash
-cveradar db init                           # alembic upgrade head
+foreshock db init                           # alembic upgrade head
 ```
 
 ### `sources` — fetcher management
 ```bash
-cveradar sources sync                      # register code fetchers into the sources table
-cveradar sources list                      # status: tier, method, enabled, cadence, last run/error
-cveradar sources enable  <name>            # enable a source (picked up live within ~60s)
-cveradar sources disable <name>            # disable a source (removed from scheduler live)
-cveradar sources run     <name>            # run one fetcher once and print {fetched,created,duplicate,errors}
+foreshock sources sync                      # register code fetchers into the sources table
+foreshock sources list                      # status: tier, method, enabled, cadence, last run/error
+foreshock sources enable  <name>            # enable a source (picked up live within ~60s)
+foreshock sources disable <name>            # disable a source (removed from scheduler live)
+foreshock sources run     <name>            # run one fetcher once and print {fetched,created,duplicate,errors}
 ```
 
 ### `baseline` — canonical state
 ```bash
-cveradar baseline sync                     # force cvelistV5 + NVD + EPSS now
-cveradar baseline sync --nvd-hours 6       # widen the NVD delta window (default 3)
-cveradar baseline sync --full-cvelist      # reprocess the whole cvelistV5 clone
+foreshock baseline sync                     # force cvelistV5 + NVD + EPSS now
+foreshock baseline sync --nvd-hours 6       # widen the NVD delta window (default 3)
+foreshock baseline sync --full-cvelist      # reprocess the whole cvelistV5 clone
 ```
 
 ### `emerging` — emerging candidates
 ```bash
-cveradar emerging list --since 24h --tier 1 --min-mentions 2
-cveradar emerging list --source osv --limit 100 --format json
+foreshock emerging list --since 24h --tier 1 --min-mentions 2
+foreshock emerging list --source osv --limit 100 --format json
 #   --since 24h|7d|2w   --source <name>   --tier <1..5>
 #   --min-mentions <n>  --limit <n>       --format table|json|csv
 ```
 
 ### `cve` — timeline + enrichment
 ```bash
-cveradar cve show CVE-2026-12345           # ids, CVSS rows, EPSS, and the full mention timeline
-cveradar cve show <candidate-uuid>         # also accepts a candidate id (for pre-CVE candidates)
+foreshock cve show CVE-2026-12345           # ids, CVSS rows, EPSS, and the full mention timeline
+foreshock cve show <candidate-uuid>         # also accepts a candidate id (for pre-CVE candidates)
 ```
 
 ### `enrich` — LLM + CVSS
 ```bash
-cveradar enrich CVE-2026-12345             # run Layer-3 enrichment on a candidate (by CVE or uuid)
+foreshock enrich CVE-2026-12345             # run Layer-3 enrichment on a candidate (by CVE or uuid)
 ```
 
 ### `stats` — lead days per source
 ```bash
-cveradar stats                             # avg days_ahead_vs_nvd_present per source + promotion rate
-cveradar stats --format json
+foreshock stats                             # avg days_ahead_vs_nvd_present per source + promotion rate
+foreshock stats --format json
 ```
 
 ### `pending` — the flagship question
 ```bash
-cveradar pending --kind product --top 20   # software with the most vulns lacking an official CVE
+foreshock pending --kind product --top 20   # software with the most vulns lacking an official CVE
 #   --kind product|distro|malware|all   --top <n>   --format table|json|csv
 ```
 
 ### `trend` — pending vulns over time
 ```bash
-cveradar trend --kind product --months 12 --granularity month
+foreshock trend --kind product --months 12 --granularity month
 #   --kind product|distro|malware|all   --granularity month|year
 #   --months <n>   --format table|json|csv
 # Buckets candidates by first_seen_at (earliest radar signal) to reveal growth / hockey-stick.
@@ -186,15 +186,15 @@ cveradar trend --kind product --months 12 --granularity month
 
 ### `backfill-products` — derive affected software for old candidates
 ```bash
-cveradar backfill-products                 # fill affected_products where missing
-cveradar backfill-products --batch 2000    # commit every N candidates (default 1000)
+foreshock backfill-products                 # fill affected_products where missing
+foreshock backfill-products --batch 2000    # commit every N candidates (default 1000)
 # Derives software from GHCOMMIT repo / 'affected:' snippet / owner/repo title prefix.
 # Idempotent; OSV already populates this at ingest time, so this covers the rest.
 ```
 
 **The flagship question** this project answers — *"how many identified,
 software-associated vulnerabilities have no official public CVE, and which software has the
-most pending?"* — is `cveradar pending`:
+most pending?"* — is `foreshock pending`:
 
 ```text
               Top software (kind=product)
@@ -232,8 +232,8 @@ not yet `PUBLISHED` in `published_cves`. Numbers above are illustrative.
 `in_kev` / `kev_date` / `kev_source` (exploited-in-the-wild signal, and ground truth for a
 future prediction layer). `nuclei_templates` / `metasploit` catch **exploit/detection
 artifacts before the CVE is public**. `github_commits` watches the top-N repos
-(`CVERADAR_GITHUB_TOP_N`, default 10,000, scalable to 100,000+), scans their last
-`CVERADAR_GITHUB_COMMITS_MONTHS` months of commits incrementally (cached repo list, rotating
+(`FORESHOCK_GITHUB_TOP_N`, default 10,000, scalable to 100,000+), scans their last
+`FORESHOCK_GITHUB_COMMITS_MONTHS` months of commits incrementally (cached repo list, rotating
 cursor, per-repo watermark), and can synthesize `GHCOMMIT` candidates for security fixes
 that cite no CVE. See [`docs/SOURCES.md`](docs/SOURCES.md).
 
@@ -267,7 +267,7 @@ docker compose run --rm --no-deps \
 
 ## Documentation
 
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — processes, data flow, and what CVERadar answers that MITRE/OSV cannot
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — processes, data flow, and what Foreshock answers that MITRE/OSV cannot
 - [`docs/DATA_MODEL.md`](docs/DATA_MODEL.md) — every table, column, constraint, index and view
 - [`docs/INGESTION.md`](docs/INGESTION.md) — ingestion and reconciliation pipeline
 - [`docs/SOURCES.md`](docs/SOURCES.md) — fetchers and how to add one

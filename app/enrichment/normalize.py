@@ -1,4 +1,4 @@
-"""Canonicalización de nombres de software (vendor/product) — CVERadar.
+"""Canonicalización de nombres de software (vendor/product) — Foreshock.
 
 Enlaza un nombre "sucio" leído de una fuente contra el vocabulario canónico
 (`product_catalog`) por capas, de barato a caro. El LLM se usa SOLO como

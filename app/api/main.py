@@ -1,4 +1,4 @@
-"""API de solo lectura + frontend estático de CVERadar.
+"""API de solo lectura + frontend estático de Foreshock.
 
 Sirve:
 - /api/*  -> JSON (trend, pending, emerging, candidate, software, stats)
@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from app.api import queries as q
 from app.core.db import get_session
 
-app = FastAPI(title="CVERadar API", version="0.1.0")
+app = FastAPI(title="Foreshock API", version="0.1.0")
 
 _STATIC = os.path.join(os.path.dirname(__file__), "static")
 

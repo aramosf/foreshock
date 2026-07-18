@@ -1,4 +1,4 @@
-"""Fixtures de test para CVERadar.
+"""Fixtures de test para Foreshock.
 
 - Los tests unitarios no requieren BD.
 - Los tests de integración piden la fixture `db`, que limpia todas las tablas

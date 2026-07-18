@@ -1,7 +1,7 @@
 """Tier 1 — VulnCheck KEV.
 
 Catálogo de CVEs explotados más amplio y temprano que el de CISA (~80% más).
-Requiere un token gratuito (CVERADAR_VULNCHECK_TOKEN); si no hay token, la fuente
+Requiere un token gratuito (FORESHOCK_VULNCHECK_TOKEN); si no hay token, la fuente
 queda inactiva (devuelve []).
 """
 

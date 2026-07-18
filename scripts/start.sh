@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# start.sh — arranque unificado de TODO el sistema CVERadar (en Docker).
+# start.sh — arranque unificado de TODO el sistema Foreshock (en Docker).
 #
 # Servicios (docker-compose.yml):
 #   postgres        Base de datos (volumen persistente pgdata)
@@ -20,9 +20,9 @@
 #   ./scripts/start.sh --status        Muestra estado y sale
 #
 # Requisitos: Docker + docker compose. Tokens opcionales en .env
-#   CVERADAR_GITHUB_TOKEN=...      (sube el rate limit de GitHub / clones)
-#   CVERADAR_VULNCHECK_TOKEN=...   (fuente VulnCheck KEV)
-#   CVERADAR_NVD_API_KEY=...       (acelera el full sync de NVD)
+#   FORESHOCK_GITHUB_TOKEN=...      (sube el rate limit de GitHub / clones)
+#   FORESHOCK_VULNCHECK_TOKEN=...   (fuente VulnCheck KEV)
+#   FORESHOCK_NVD_API_KEY=...       (acelera el full sync de NVD)
 # ============================================================================
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -67,8 +67,8 @@ if [ "${1:-}" = "--full-load" ]; then
   $COMPOSE stop sources-worker baseline-worker
 
   echo ">> 2) Baseline full: NVD (~270k) + EPSS (~350k)…"
-  $COMPOSE run --rm sources-worker cveradar baseline nvd-full
-  $COMPOSE run --rm sources-worker cveradar baseline epss-full
+  $COMPOSE run --rm sources-worker foreshock baseline nvd-full
+  $COMPOSE run --rm sources-worker foreshock baseline epss-full
 
   echo ">> 3) Re-ingest histórico de la capa radar (en background)…"
   echo ">>    (trunca la capa radar y re-ingiere todo; baseline intacto)"

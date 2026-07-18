@@ -1,4 +1,4 @@
-"""Cálculo y parseo de CVSS v3.x/v4.0 — CVERadar.
+"""Cálculo y parseo de CVSS v3.x/v4.0 — Foreshock.
 
 Dos caminos (nunca inventar un número):
   1. AUTORITATIVO: se extraen vectores CVSS verbatim del texto de la fuente
