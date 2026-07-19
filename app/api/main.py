@@ -76,7 +76,7 @@ def api_pending(
     tech: str | None = None,
     period: str | None = None,
     granularity: str = Query("month", pattern="^(month|year)$"),
-    maturity: str = Query("all", pattern="^(all|sin_cve|cve_reservado)$"),
+    maturity: str = Query("all", pattern="^(all|pre_cve|cve_reserved)$"),
     s: Session = Depends(db),
 ) -> dict:
     return q.pending_top(s, kind, top, tech, period, granularity, maturity)

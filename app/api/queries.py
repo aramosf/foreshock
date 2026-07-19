@@ -49,12 +49,12 @@ PENDING_WHERE_SQL = (
 )
 
 # Desglose de `pending` por madurez del identificador (las DOS métricas que
-# pide producto): "sin_cve" = identificada solo por códigos nativos (ZDI-CAN,
-# GHSA, RUSTSEC, VU#...) sin CVE todavía; "cve_reservado" = ya tiene CVE pero
+# pide producto): "pre_cve" = identificada solo por códigos nativos (ZDI-CAN,
+# GHSA, RUSTSEC, VU#...) sin CVE todavía; "cve_reserved" = ya tiene CVE pero
 # MITRE/NVD no publican contenido (reservado o sin ficha) — no se sabe qué es.
 MATURITY_SQL = {
-    "sin_cve": "c.cve_id IS NULL",
-    "cve_reservado": "c.cve_id IS NOT NULL",
+    "pre_cve": "c.cve_id IS NULL",
+    "cve_reserved": "c.cve_id IS NOT NULL",
 }
 
 # Variante booleana (sin exigir producto) para etiquetar filas que ya vienen
@@ -149,7 +149,7 @@ def pending_top(session: Session, kind: str = "product", top: int = 20,
                 granularity: str = "month",
                 maturity: str = "all") -> dict[str, Any]:
     """Ranking de software con más vulns pendientes + desglose por kind y por
-    madurez (sin_cve | cve_reservado).
+    madurez (pre_cve | cve_reserved).
 
     Agrega en SQL (count DISTINCT / GROUP BY) en vez de traer las filas y
     contarlas en Python."""

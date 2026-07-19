@@ -453,8 +453,8 @@ def pending(
     kind: str = typer.Option("product", help="product | distro | malware | all"),
     tech: str | None = typer.Option(None, help="filtra por tecnología (substring)"),
     maturity: str = typer.Option(
-        "all", help="all | sin_cve (aún sin CVE: ZDI/GHSA/RUSTSEC…) | "
-        "cve_reservado (CVE asignado pero MITRE/NVD sin contenido)"),
+        "all", help="all | pre_cve (aún sin CVE: ZDI/GHSA/RUSTSEC…) | "
+        "cve_reserved (CVE asignado pero MITRE/NVD sin contenido)"),
     fmt: str = typer.Option("table", "--format", "-f", help="table | json | csv"),
 ) -> None:
     """Vulnerabilidades identificadas en otras fuentes, con tecnología asociada,
@@ -474,9 +474,9 @@ def pending(
         "kind": kind, "maturity": maturity,
     }
     if "by_maturity" in result:
-        meta["sin_cve"] = result["by_maturity"]["sin_cve"]
-        meta["cve_reservado"] = result["by_maturity"]["cve_reservado"]
-    _emit(fmt, ["software", "cves_pendientes"], data, meta=meta,
+        meta["pre_cve"] = result["by_maturity"]["pre_cve"]
+        meta["cve_reserved"] = result["by_maturity"]["cve_reserved"]
+    _emit(fmt, ["software", "pending_vulns"], data, meta=meta,
           title=f"Top software (kind={kind})")
 
 
@@ -504,10 +504,10 @@ def trend(
     if fmt == "table":
         peak = max(n for _, n in rows)
         data = [(p, n, "█" * max(1, round(40 * n / peak))) for p, n in rows]
-        _emit("table", ["periodo", "pendientes", ""], data,
+        _emit("table", ["period", "pending", ""], data,
               meta={"kind": kind, "months": months}, title=f"Tendencia (kind={kind})")
     else:
-        _emit(fmt, ["periodo", "pendientes"], rows, meta={"kind": kind, "months": months})
+        _emit(fmt, ["period", "pending"], rows, meta={"kind": kind, "months": months})
 
 
 @app.command("backfill-products")

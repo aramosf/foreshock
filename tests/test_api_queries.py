@@ -155,14 +155,14 @@ def test_healthz_y_cabeceras_seguridad(db) -> None:
 
 
 def test_pending_desglose_por_madurez(pending_dataset, session: Session) -> None:
-    """Las DOS métricas de producto: sin_cve (pre-CVE) y cve_reservado
+    """Las DOS métricas de producto: pre_cve (aún sin CVE) y cve_reserved
     (CVE asignado pero MITRE/NVD sin contenido)."""
     out = q.pending_top(session, kind="all", top=10)
-    assert out["by_maturity"] == {"sin_cve": 1, "cve_reservado": 2}
+    assert out["by_maturity"] == {"pre_cve": 1, "cve_reserved": 2}
 
-    solo_precve = q.pending_top(session, kind="all", top=10, maturity="sin_cve")
+    solo_precve = q.pending_top(session, kind="all", top=10, maturity="pre_cve")
     assert solo_precve["total"] == 1
-    solo_resv = q.pending_top(session, kind="all", top=10, maturity="cve_reservado")
+    solo_resv = q.pending_top(session, kind="all", top=10, maturity="cve_reserved")
     assert solo_resv["total"] == 2
 
     with pytest.raises(ValueError):
