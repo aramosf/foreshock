@@ -22,14 +22,20 @@ from app.core.logging import get_logger
 from app.ingest.identifiers import RECOGNIZED_SCHEMES, extract_identifiers
 from app.ingest.service import FetchedMention
 from app.sources.base import BaseSource, FetchContext, register
+from app.sources.http import get
 
 log = get_logger(__name__)
 
-_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-       "(KHTML, like Gecko) Chrome/124 Safari/537.36")
+# UA de navegador SOLO para feeds que lo exijan de verdad (bloqueo por WAF):
+# se activa por-feed con `browser_ua=True` en _FEEDS. Por defecto se usa el
+# User-Agent identificable del proyecto (settings.user_agent, vía make_client).
+_BROWSER_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/124 Safari/537.36")
 
-# (name, kind, tier, url). Verificados vía probe: devuelven entradas con CVE/ZDI-CAN.
-_FEEDS: list[tuple[str, str, int, str]] = [
+# (name, kind, tier, url[, browser_ua]). Verificados vía probe: devuelven
+# entradas con CVE/ZDI-CAN. El 5º campo opcional (bool) activa el UA de
+# navegador SOLO para ese feed (ninguno lo necesita hoy).
+_FEEDS: list[tuple] = [
     ("zdi_published", "Zero Day Initiative — published advisories", 1,
      "https://www.zerodayinitiative.com/rss/published/"),
     ("zdi_upcoming", "Zero Day Initiative — upcoming (pre-CVE, ZDI-CAN)", 1,
@@ -84,10 +90,14 @@ def _mentions_for_entry(title: str, summary: str, url: str | None,
     return []
 
 
-async def _fetch_feed(ctx: FetchContext, url: str) -> list[FetchedMention]:
-    resp = await ctx.http.get(url, headers={"User-Agent": _UA},
-                              follow_redirects=True, timeout=30.0)
-    resp.raise_for_status()
+async def _fetch_feed(ctx: FetchContext, url: str, browser_ua: bool = False,
+                      ) -> list[FetchedMention]:
+    # http.get(): retries con backoff + archivado del crudo + UA del proyecto
+    # (antes se puenteaba con ctx.http.get y un UA Chrome falso fijo).
+    # respect_robots=False: son feeds OFICIALES publicados para ser consumidos;
+    # robots.txt aplica a crawlers, no a esto (ver docstring de get()).
+    headers = {"User-Agent": _BROWSER_UA} if browser_ua else None
+    resp = await get(ctx.http, url, respect_robots=False, headers=headers, timeout=30.0)
     parsed = feedparser.parse(resp.content)
     out: list[FetchedMention] = []
     for entry in parsed.entries:
@@ -103,15 +113,17 @@ class _RssFeedSource(BaseSource):
     method = "rss"
     cadence_seconds = 3600
     feed_url = ""
+    browser_ua = False   # opt-in por feed: UA de navegador si el WAF lo exige
 
     async def fetch(self, ctx: FetchContext) -> list[FetchedMention]:
-        return await _fetch_feed(ctx, self.feed_url)
+        return await _fetch_feed(ctx, self.feed_url, browser_ua=self.browser_ua)
 
 
 # Registra un fetcher por feed (clases generadas dinámicamente).
-for _name, _kind, _tier, _url in _FEEDS:
+for _name, _kind, _tier, _url, *_rest in _FEEDS:
     register(type(
         f"Rss_{_name}",
         (_RssFeedSource,),
-        {"name": _name, "kind": _kind, "tier": _tier, "feed_url": _url},
+        {"name": _name, "kind": _kind, "tier": _tier, "feed_url": _url,
+         "browser_ua": bool(_rest and _rest[0])},
     ))

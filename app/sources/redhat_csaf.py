@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+from dateutil.parser import isoparse
+
 from app.core.config import get_settings
 from app.sources.base import BaseSource, FetchContext, register
 from app.sources.http import get
@@ -32,7 +34,8 @@ class RedHatCSAFSource(BaseSource):
         after = (datetime.now(UTC) - timedelta(days=lookback)).strftime("%Y-%m-%d")
         out: list[FetchedMention] = []
         for page in range(1, self.max_pages + 1):
-            resp = await get(ctx.http, API,
+            # API JSON oficial -> robots.txt no aplica (ver docstring de get()).
+            resp = await get(ctx.http, API, respect_robots=False,
                              params={"after": after, "per_page": self.per_page, "page": page})
             data = resp.json()
             if not data:
@@ -57,12 +60,24 @@ class RedHatCSAFSource(BaseSource):
                 snippet = f"[{severity}] {desc}"
             if vector:
                 snippet = f"{snippet} | CVSS: {vector}"
+            # seen_at = fecha REAL de publicación en Red Hat (señal temprana),
+            # no el momento del fetch (que infla days_ahead/first_seen).
+            seen = None
+            pub = item.get("public_date")
+            if pub:
+                try:
+                    seen = isoparse(pub)
+                    if seen.tzinfo is None:
+                        seen = seen.replace(tzinfo=UTC)
+                except (ValueError, TypeError):
+                    seen = None
             out.append(
                 FetchedMention(
                     url=item.get("resource_url"),
                     title=desc[:200] if desc else cve,
                     snippet=snippet[:2000] if snippet else None,
                     cve_id=cve,
+                    seen_at=seen,
                 )
             )
         return out

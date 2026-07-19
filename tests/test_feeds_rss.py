@@ -29,6 +29,23 @@ def test_zdi_can_only_pre_cve():
     assert ms[0].native_id == "ZDI-CAN-27000"
 
 
+def test_certcc_single_cve_bundles_vu():
+    # Nota CERT/CC: 1 CVE + VU# -> una mención con el VU# declarado como alias.
+    ms = _mentions_for_entry("VU#123456: Overflow in FooDaemon",
+                             "Tracked as CVE-2026-4000.", "u", None)
+    assert len(ms) == 1
+    assert ms[0].cve_id == "CVE-2026-4000"
+    assert ms[0].extra_ids == ["VU#123456"]
+
+
+def test_certcc_vu_only_pre_cve():
+    # Nota sin CVE todavía -> ancla por el VU# (señal pre-NVD pura).
+    ms = _mentions_for_entry("VU#654321: Vulnerability in BarLib", "", "u", None)
+    assert len(ms) == 1
+    assert ms[0].cve_id is None
+    assert ms[0].native_id == "VU#654321"
+
+
 def test_no_recognized_id_is_dropped():
     ms = _mentions_for_entry("Generic security news, no identifiers", "blah blah", "u", None)
     assert ms == []

@@ -25,7 +25,8 @@ class CisaKevSource(BaseSource):
     cadence_seconds = 3600
 
     async def fetch(self, ctx: FetchContext) -> list[FetchedMention]:
-        resp = await get(ctx.http, FEED)
+        # Feed JSON oficial -> robots.txt no aplica (ver docstring de get()).
+        resp = await get(ctx.http, FEED, respect_robots=False)
         data = resp.json()
         out: list[FetchedMention] = []
         for v in data.get("vulnerabilities", []):

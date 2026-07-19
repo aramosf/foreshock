@@ -3,11 +3,22 @@
 Regla de oro del proyecto: no scrapear GHSA; usar la API. Trae ghsa_id, cve_id
 (si asignado), resumen, y `vulnerabilities` con paquete (ecosystem+name) y
 rangos de versión -> alimenta affected_products de forma estructurada.
+
+Ventana incremental: en vez de re-descargar `max_pages` (30) páginas cada hora,
+se usa el filtro `updated` de la API (rango ISO 8601) con un lookback de
+2*cadencia. Elección documentada: la ingesta es idempotente (content_hash), así
+que basta con cubrir con margen el hueco desde la última ejecución; 2 cadencias
+absorben una corrida perdida y ordenar por `updated` (no `published`) captura
+también advisories antiguos que acaban de recibir CVE o rangos afectados. El
+backfill histórico se hace con una corrida manual subiendo el lookback.
 """
 
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime, timedelta
+
+from dateutil.parser import isoparse
 
 from app.core.config import get_settings
 from app.sources.base import BaseSource, FetchContext, register
@@ -18,6 +29,9 @@ API = "https://api.github.com/advisories"
 
 # Extrae la URL de la página siguiente del header Link (paginación por cursor).
 _NEXT = re.compile(r'<([^>]+)>;\s*rel="next"')
+
+# Lookback = _LOOKBACK_CADENCES * cadence_seconds (ver docstring del módulo).
+_LOOKBACK_CADENCES = 2
 
 
 @register
@@ -34,21 +48,44 @@ class GitHubAdvisoriesSource(BaseSource):
         if settings.github_token:
             headers["Authorization"] = f"Bearer {settings.github_token}"
 
+        since = datetime.now(UTC) - timedelta(
+            seconds=_LOOKBACK_CADENCES * self.cadence_seconds)
         out: list[FetchedMention] = []
         url: str | None = API
         params: dict[str, object] | None = {
-            "per_page": 100, "sort": "published", "direction": "desc"
+            "per_page": 100, "sort": "updated", "direction": "desc",
+            # Filtro de fecha de la API (rango ISO 8601): solo lo actualizado
+            # desde `since` -> normalmente 1 página en vez de 30.
+            "updated": f">={since.strftime('%Y-%m-%dT%H:%M:%SZ')}",
         }
         pages = 0
-        # Paginación por header Link hasta github_advisories_max_pages.
+        # Paginación por header Link hasta github_advisories_max_pages (cota de
+        # seguridad; con el filtro `updated` rara vez pasa de la primera página).
         while url and pages < settings.github_advisories_max_pages:
-            resp = await get(ctx.http, url, params=params, headers=headers)
-            out.extend(self._parse(resp.json()))
+            # API JSON oficial -> robots.txt no aplica (ver docstring de get()).
+            resp = await get(ctx.http, url, respect_robots=False,
+                             params=params, headers=headers)
+            batch = resp.json()
+            out.extend(self._parse(batch))
             pages += 1
+            # Cinturón y tirantes: si el servidor ignorase el filtro, cortamos
+            # en cuanto el item más viejo de la página quede fuera de la ventana.
+            oldest = self._oldest_updated(batch)
+            if oldest is not None and oldest < since:
+                break
             m = _NEXT.search(resp.headers.get("Link", ""))
             url = m.group(1) if m else None
             params = None  # la URL 'next' ya lleva el cursor
         return out
+
+    @staticmethod
+    def _oldest_updated(data: list[dict]) -> datetime | None:
+        oldest: datetime | None = None
+        for adv in data:
+            dt = _parse_dt(adv.get("updated_at"))
+            if dt is not None and (oldest is None or dt < oldest):
+                oldest = dt
+        return oldest
 
     @staticmethod
     def _parse(data: list[dict]) -> list[FetchedMention]:
@@ -68,6 +105,9 @@ class GitHubAdvisoriesSource(BaseSource):
             snippet = summary
             if pkgs:
                 snippet = f"{summary} | affected: {', '.join(pkgs[:10])}"
+            # seen_at = fecha REAL de publicación del advisory (fallback: última
+            # actualización), no el momento del fetch.
+            seen = _parse_dt(adv.get("published_at")) or _parse_dt(adv.get("updated_at"))
             out.append(
                 FetchedMention(
                     url=adv.get("html_url"),
@@ -75,6 +115,18 @@ class GitHubAdvisoriesSource(BaseSource):
                     snippet=snippet[:2000] if snippet else None,
                     cve_id=cve,
                     native_id=ghsa,
+                    seen_at=seen,
                 )
             )
         return out
+
+
+def _parse_dt(val: str | None) -> datetime | None:
+    """ISO 8601 -> datetime UTC-aware (None si falta o no parsea)."""
+    if not val:
+        return None
+    try:
+        dt = isoparse(val)
+    except (ValueError, TypeError):
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)

@@ -34,11 +34,14 @@ class VulnCheckKevSource(BaseSource):
         headers = {"Authorization": f"Bearer {settings.vulncheck_token}"}
         out: list[FetchedMention] = []
         page = 1
+        limit = 100
         while page <= settings.vulncheck_max_pages:
+            # API JSON oficial -> robots.txt no aplica (ver docstring de get()).
             resp = await get(
                 ctx.http,
                 f"{settings.vulncheck_api_base}/index/vulncheck-kev",
-                params={"page": page, "limit": 100},
+                respect_robots=False,
+                params={"page": page, "limit": limit},
                 headers=headers,
             )
             body = resp.json()
@@ -67,7 +70,17 @@ class VulnCheckKevSource(BaseSource):
                         )
                     )
             meta = body.get("_meta") or {}
-            if page >= int(meta.get("total_pages", page)):
-                break
+            total_pages = meta.get("total_pages")
+            if total_pages is not None:
+                if page >= int(total_pages):
+                    break
+            else:
+                # Payload inesperado (sin _meta.total_pages): antes esto cortaba
+                # SIEMPRE en la página 1. Se loguea y se sigue paginando mientras
+                # la página venga llena (una página corta = última).
+                log.warning("vulncheck.missing_total_pages", page=page,
+                            meta_keys=sorted(meta.keys()))
+                if len(items) < limit:
+                    break
             page += 1
         return out

@@ -8,8 +8,11 @@ un fetcher que falla no tumba el worker (lo garantiza run_source).
 from __future__ import annotations
 
 import asyncio
+import signal
+from datetime import datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import select
 
 from app.core.db import get_session
@@ -47,26 +50,43 @@ def _reconcile_jobs(scheduler: AsyncIOScheduler) -> None:
     for name, cadence in enabled.items():
         job = scheduler.get_job(name)
         if job is None:                            # nueva habilitada -> añadir
+            # next_run_time=now: la primera ejecución es INMEDIATA al arrancar
+            # (con solo el intervalo, la primera corrida tardaría `cadence` s).
             scheduler.add_job(_run, "interval", seconds=cadence, args=[name],
-                              id=name, max_instances=1, jitter=30)
+                              id=name, max_instances=1, jitter=30,
+                              next_run_time=datetime.now())
             log.info("sources.job_added", source=name, cadence=cadence)
         elif getattr(job.trigger, "interval", None) and \
                 job.trigger.interval.total_seconds() != cadence:  # cadencia cambiada
-            scheduler.reschedule_job(name, trigger="interval", seconds=cadence)
+            # IntervalTrigger explícito para CONSERVAR el jitter (pasar
+            # trigger="interval" a secas lo perdería).
+            scheduler.reschedule_job(
+                name, trigger=IntervalTrigger(seconds=cadence, jitter=30))
             log.info("sources.job_rescheduled", source=name, cadence=cadence)
 
 
 async def main() -> None:
     configure_logging()
     sync_registry_to_db()
-    scheduler = AsyncIOScheduler()
+    # misfire_grace_time=None: una ejecución que llega tarde (worker parado,
+    # fetch largo) se lanza igualmente en vez de descartarse en silencio.
+    scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": None})
     _reconcile_jobs(scheduler)
     # Re-sincroniza cada 60 s con la BD (enable/disable/cadencia en caliente).
     scheduler.add_job(_reconcile_jobs, "interval", seconds=60, args=[scheduler],
                       id="_reconcile", max_instances=1)
     scheduler.start()
     log.info("sources.worker_started", count=len(scheduler.get_jobs()))
-    await asyncio.Event().wait()
+
+    # Salida limpia con SIGTERM/SIGINT (docker stop, Ctrl-C): se para el
+    # scheduler y se sale sin traceback.
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, stop.set)
+    await stop.wait()
+    log.info("sources.worker_stopping")
+    scheduler.shutdown(wait=False)
 
 
 if __name__ == "__main__":

@@ -56,7 +56,6 @@ class Settings(BaseSettings):
     # relativa y NO rueda con el tiempo -> el borde inferior queda anclado.
     github_commits_since: str = Field(default="2026-05-01")
     github_repos_per_run: int = Field(default=150)    # repos por ejecución (crawl incremental)
-    github_commits_max_pages: int = Field(default=10)  # páginas de commits/repo (100/pág)
     # Política: NO sintetizar candidates GHCOMMIT desnudos (commit de seguridad sin
     # CVE/código). La ingesta los descartaría (RECOGNIZED_SCHEMES), así que no se
     # emiten. Un commit que cita un CVE/GHSA real sí entra por ese código.

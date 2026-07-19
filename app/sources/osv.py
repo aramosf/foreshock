@@ -65,12 +65,27 @@ def _affected(rec: dict, is_malware: bool) -> tuple[list[AffectedInput], list[st
         ranges: list[VersionRangeInput] = []
         for r in a.get("ranges") or []:
             vtype = r.get("type")
+            # Un range OSV puede traer VARIOS pares introduced->fixed (p.ej.
+            # [{introduced:0},{fixed:1.2},{introduced:2.0},{fixed:2.5}]): cada
+            # `introduced` ABRE un rango nuevo y `fixed`/`last_affected` lo
+            # cierran. Colapsarlos en uno solo perdería los pares intermedios.
             intro = fixed = last = None
+            open_range = False
             for ev in r.get("events") or []:
-                intro = ev.get("introduced", intro)
-                fixed = ev.get("fixed", fixed)
-                last = ev.get("last_affected", last)
-            if intro or fixed or last:
+                if "introduced" in ev:
+                    if open_range:
+                        ranges.append(VersionRangeInput(
+                            introduced=intro, fixed=fixed, last_affected=last,
+                            version_type=vtype))
+                    intro, fixed, last = ev.get("introduced"), None, None
+                    open_range = True
+                if "fixed" in ev:
+                    fixed = ev.get("fixed")
+                    open_range = True
+                if "last_affected" in ev:
+                    last = ev.get("last_affected")
+                    open_range = True
+            if open_range and (intro or fixed or last):
                 ranges.append(VersionRangeInput(
                     introduced=intro, fixed=fixed, last_affected=last, version_type=vtype))
         items.append(AffectedInput(
@@ -122,24 +137,45 @@ class OsvSource(BaseSource):
                         cap: int) -> list[FetchedMention]:
         # Descarga cacheada a disco (reusa el zip si es reciente; lo conserva para
         # recreaciones). ZipFile lee las entradas de forma perezosa -> sin OOM.
-        out: list[FetchedMention] = []
+        # El cap NO se aplica en orden del zip (alfabético: descartaría los
+        # advisories más recientes): primero se recolecta TODO lo que cae en la
+        # ventana, se ordena por `modified` DESC y se corta después.
+        collected: list[tuple[datetime, FetchedMention]] = []
+        epoch = datetime.min.replace(tzinfo=UTC)  # sin fecha -> al final
         key = f"osv_{eco.replace('/', '_').replace(' ', '_')}.zip"
         zip_path = await cached_download(ctx.http, BUCKET.format(eco=eco), key=key)
         with zipfile.ZipFile(zip_path) as zf:
             for name in zf.namelist():
                 if not name.endswith(".json"):
                     continue
-                if cap > 0 and len(out) >= cap:
-                    break
                 try:
                     rec = json.loads(zf.read(name))
                 except (json.JSONDecodeError, KeyError):
                     continue
                 m = self._to_mention(rec, cutoff)
                 if m is not None:
-                    out.append(m)
+                    collected.append((self._modified_at(rec) or epoch, m))
+        collected.sort(key=lambda t: t[0], reverse=True)
+        out = [m for _, m in (collected[:cap] if cap > 0 else collected)]
+        if cap > 0 and len(collected) > cap:
+            log.warning("osv.eco_capped", ecosystem=eco, cap=cap,
+                        discarded=len(collected) - cap)
         log.info("osv.eco_done", ecosystem=eco, mentions=len(out))
         return out
+
+    @staticmethod
+    def _modified_at(rec: dict) -> datetime | None:
+        """Fecha `modified` (fallback `published`) UTC-aware, para ordenar el cap."""
+        for field in ("modified", "published"):
+            val = rec.get(field)
+            if not val:
+                continue
+            try:
+                dt = isoparse(val)
+            except (ValueError, TypeError):
+                continue
+            return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+        return None
 
     @staticmethod
     def _to_mention(rec: dict, cutoff: datetime | None) -> FetchedMention | None:

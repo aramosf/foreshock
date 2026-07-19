@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 import time
 
 import httpx
@@ -60,12 +61,23 @@ async def cached_download(client: httpx.AsyncClient, url: str, key: str,
         log.info("cache.reuse", key=key, age_s=int(time.time() - os.path.getmtime(path)))
         return path
 
-    tmp = path + ".tmp"
-    async with client.stream("GET", url, timeout=300.0) as resp:
-        resp.raise_for_status()
-        with open(tmp, "wb") as fh:
-            async for chunk in resp.aiter_bytes():
-                fh.write(chunk)
-    os.replace(tmp, path)  # publicación atómica
+    # Nombre temporal ÚNICO (dos workers descargando la misma key no se pisan
+    # el .tmp a medias) + os.replace atómico.
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=key + ".", suffix=".tmp")
+    os.close(fd)
+    try:
+        async with client.stream("GET", url, timeout=300.0) as resp:
+            resp.raise_for_status()
+            with open(tmp, "wb") as fh:
+                async for chunk in resp.aiter_bytes():
+                    fh.write(chunk)
+        os.replace(tmp, path)  # publicación atómica
+    except BaseException:
+        # No dejamos temporales huérfanos si la descarga falla a medias.
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
     log.info("cache.downloaded", key=key, size=os.path.getsize(path))
     return path

@@ -33,9 +33,11 @@ class LLMProvider(abc.ABC):
 class MockProvider(LLMProvider):
     """Extracción heurística determinista (sin red). Útil sin API key y en tests."""
 
+    # \b en AMBAS ramas de cada alternancia: sin él, "mysqli" casaba _SQLI y
+    # cualquier sufijo tipo "xss..." casaba _XSS por precedencia de la alternancia.
     _RCE = re.compile(r"\b(rce|remote code execution|code execution)\b", re.I)
-    _SQLI = re.compile(r"\bsql[\s-]?injection|sqli\b", re.I)
-    _XSS = re.compile(r"\bxss|cross[\s-]?site scripting\b", re.I)
+    _SQLI = re.compile(r"\b(?:sql[\s-]?injection|sqli)\b", re.I)
+    _XSS = re.compile(r"\b(?:xss|cross[\s-]?site scripting)\b", re.I)
     _AUTHB = re.compile(r"\bauth(entication)?\s*bypass\b", re.I)
     _POC = re.compile(r"\b(poc|proof[\s-]?of[\s-]?concept|exploit)\b", re.I)
     _URL = re.compile(r"https?://\S+")
@@ -180,8 +182,13 @@ async def enrich(cve_id: str | None, snippets: list[str],
                  provider: LLMProvider | None = None) -> tuple[EnrichmentOut, str]:
     """Ejecuta el enriquecimiento. Devuelve (resultado validado, método)."""
     settings = get_settings()
-    provider = provider or get_provider(settings)
-    method = f"{settings.llm_provider}:{settings.llm_model}"
+    if provider is None:
+        provider = get_provider(settings)
+        method = f"{settings.llm_provider}:{settings.llm_model}"
+    else:
+        # Provider inyectado (tests, CLI): etiqueta con el provider REAL usado,
+        # no con el de settings, para que enrichment_method no mienta.
+        method = provider.__class__.__name__.removesuffix("Provider").lower()
     raw = await provider.complete(SYSTEM_PROMPT, build_user_prompt(cve_id, snippets))
     data = _extract_json(raw)
     return EnrichmentOut.model_validate(data), method

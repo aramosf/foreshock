@@ -26,9 +26,13 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     # seguridad sin CVE asignado: GHCOMMIT:owner/repo@<sha7-40>.
     ("GHCOMMIT", re.compile(r"\bGHCOMMIT:[\w.-]+/[\w.-]+@[0-9a-fA-F]{7,40}\b")),
     # IDs de OSV por ecosistema (anclan advisories que aún no tienen CVE).
+    # SENSIBLE a mayúsculas y sin permitir prefijo/sufijo tipo slug: los ids
+    # reales de OSV son siempre mayúsculas, y con IGNORECASE un slug de URL como
+    # "lets-go-2024-06-30-release" o "mal-2025-01-report" producía anclas falsas
+    # (GO-2024-06, MAL-2025-01) que creaban candidates espurios y colisiones.
     ("OSV", re.compile(
-        r"\b(?:PYSEC-\d{4}-\d+|GO-\d{4}-\d+|RUSTSEC-\d{4}-\d{4}|"
-        r"GSD-\d{4}-\d+|MAL-\d{4}-\d+|OSV-\d{4}-\d+)\b", re.IGNORECASE)),
+        r"(?<![\w-])(?:PYSEC-\d{4}-\d+|GO-\d{4}-\d+|RUSTSEC-\d{4}-\d{4}|"
+        r"GSD-\d{4}-\d+|MAL-\d{4}-\d+|OSV-\d{4}-\d+)\b(?!-\d)")),
 ]
 
 # Esquemas que cuentan como "código de vulnerabilidad reconocido". Una mención

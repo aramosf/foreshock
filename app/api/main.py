@@ -12,9 +12,10 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.api import queries as q
@@ -23,6 +24,29 @@ from app.core.db import get_session
 app = FastAPI(title="Foreshock API", version="0.1.0")
 
 _STATIC = os.path.join(os.path.dirname(__file__), "static")
+
+# Cabeceras de seguridad básicas para el dashboard estático.
+# PENDIENTE (fuera de alcance): autenticación — la API es de solo lectura y se
+# asume desplegada en red de confianza; no exponer a Internet sin proxy/auth.
+_SEC_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    # CSP conservadora: solo recursos propios. style 'unsafe-inline' porque
+    # index.html lleva su <style>; scripts inline y de terceros quedan vetados.
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
+        "base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+    ),
+}
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next) -> Response:
+    response = await call_next(request)
+    for k, v in _SEC_HEADERS.items():
+        response.headers.setdefault(k, v)
+    return response
 
 
 def db() -> Iterator[Session]:
@@ -104,6 +128,15 @@ def api_stats(s: Session = Depends(db)) -> dict:
 
 @app.get("/healthz")
 def healthz() -> dict:
+    """Healthcheck real: verifica conectividad con la BD (503 si no responde)."""
+    try:
+        session = get_session()
+        try:
+            session.execute(text("SELECT 1"))
+        finally:
+            session.close()
+    except Exception as exc:  # BD caída / red / credenciales
+        raise HTTPException(status_code=503, detail="database unavailable") from exc
     return {"ok": True}
 
 

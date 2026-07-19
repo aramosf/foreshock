@@ -15,20 +15,21 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 from dateutil.parser import isoparse
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.db import session_scope
 from app.core.logging import get_logger
-from app.core.models import EPSSScore
+from app.core.models import Candidate, EPSSScore
 from app.sources.cache import cached_download
 from app.sources.http import get, make_client
 
 log = get_logger(__name__)
 
-_BATCH_SIZE = 100  # CVEs por petición cuando se filtra por lista
-_RECENT_LIMIT = 200  # top-N más recientes cuando no se filtra
+_BATCH_SIZE = 100  # CVEs por petición cuando se filtra por lista (param cve= de FIRST)
+_TOP_LIMIT = 200  # top-N global POR SCORE cuando no se filtra (no "más recientes")
 # Volcado masivo de FIRST: TODAS las puntuaciones EPSS actuales (~270k CVEs).
 EPSS_BULK_URL = "https://epss.cyentia.com/epss_scores-current.csv.gz"
 _FULL_COMMIT_EVERY = 5000
@@ -103,12 +104,28 @@ def _ingest_payload(data: dict[str, Any]) -> tuple[str | None, int, int]:
     return model_version, ingested, skipped
 
 
+def tracked_cve_ids() -> list[str]:
+    """CVE ids que el radar SIGUE: candidates activos (no fusionados) con CVE.
+
+    Es la población cuyo histórico EPSS interesa acumular a diario; el top-200
+    global por score NO la cubre (la mayoría de los CVEs seguidos son recientes
+    y con score aún bajo).
+    """
+    with session_scope() as session:
+        rows = session.execute(
+            select(Candidate.cve_id)
+            .where(Candidate.merged_into.is_(None), Candidate.cve_id.is_not(None))
+            .distinct()
+        ).scalars().all()
+    return sorted(rows)
+
+
 async def sync_epss(cve_ids: list[str] | None = None) -> dict[str, int]:
     """Ingesta scores EPSS desde FIRST.org (idempotente, con histórico).
 
-    - Si ``cve_ids`` se aporta: consulta filtrando por ``?cve=...`` en lotes de
-      100 CVEs.
-    - Si no: trae la primera página de los CVE con mayor EPSS
+    - Si ``cve_ids`` se aporta: consulta filtrando por ``?cve=...`` (lista
+      separada por comas) en lotes de 100 CVEs.
+    - Si no: trae la primera página del top global POR SCORE
       (``?order=!epss&limit=200``).
 
     Devuelve métricas de ingesta.
@@ -121,11 +138,11 @@ async def sync_epss(cve_ids: list[str] | None = None) -> dict[str, int]:
         if cve_ids:
             batches = _chunks(cve_ids, _BATCH_SIZE)
         else:
-            batches = [None]  # una única petición de los más recientes
+            batches = [None]  # una única petición del top global por score
 
         for batch in batches:
             if batch is None:
-                params: dict[str, Any] = {"order": "!epss", "limit": _RECENT_LIMIT}
+                params: dict[str, Any] = {"order": "!epss", "limit": _TOP_LIMIT}
             else:
                 params = {"cve": ",".join(batch)}
             resp = await get(client, settings.epss_api_base, params=params)

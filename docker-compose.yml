@@ -1,9 +1,19 @@
+# Password de Postgres parametrizada: exporta POSTGRES_PASSWORD (o ponla en
+# .env) — el default 'foreshock' es SOLO para desarrollo local. En producción
+# fija un valor fuerte ANTES del primer arranque (el volumen pgdata conserva
+# la password inicial).
+x-database-url: &database-url postgresql+psycopg://foreshock:${POSTGRES_PASSWORD:-foreshock}@postgres:5432/foreshock
+
+# Nombre de proyecto FIJO: contenedores/volúmenes/imágenes se llaman foreshock-*
+# independientemente del nombre del directorio.
+name: foreshock
+
 services:
   postgres:
     image: postgres:16
     environment:
       POSTGRES_USER: foreshock
-      POSTGRES_PASSWORD: foreshock
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-foreshock}
       POSTGRES_DB: foreshock
     ports:
       - "5432:5432"
@@ -32,7 +42,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     environment:
-      DATABASE_URL: postgresql+psycopg://foreshock:foreshock@postgres:5432/foreshock
+      DATABASE_URL: *database-url
     depends_on:
       postgres:
         condition: service_healthy
@@ -42,7 +52,7 @@ services:
   baseline-worker:
     build: { context: ., dockerfile: docker/Dockerfile }
     environment:
-      DATABASE_URL: postgresql+psycopg://foreshock:foreshock@postgres:5432/foreshock
+      DATABASE_URL: *database-url
       REDIS_URL: redis://redis:6379/0
       FORESHOCK_DATA_DIR: /data
       FORESHOCK_RAW_HTML_DIR: /data/raw
@@ -59,10 +69,13 @@ services:
   sources-worker:
     build: { context: ., dockerfile: docker/Dockerfile }
     environment:
-      DATABASE_URL: postgresql+psycopg://foreshock:foreshock@postgres:5432/foreshock
+      DATABASE_URL: *database-url
       REDIS_URL: redis://redis:6379/0
       FORESHOCK_DATA_DIR: /data
       FORESHOCK_RAW_HTML_DIR: /data/raw
+      # start.sh --full-load lanza `foreshock baseline nvd-full` en este
+      # contenedor: sin la API key el full sync va a ritmo anónimo (lentísimo).
+      FORESHOCK_NVD_API_KEY: ${FORESHOCK_NVD_API_KEY:-}
       FORESHOCK_LLM_PROVIDER: ${FORESHOCK_LLM_PROVIDER:-mock}
       FORESHOCK_LLM_API_KEY: ${FORESHOCK_LLM_API_KEY:-}
       FORESHOCK_LLM_MODEL: ${FORESHOCK_LLM_MODEL:-mock-model}
@@ -90,12 +103,19 @@ services:
   api:
     build: { context: ., dockerfile: docker/Dockerfile }
     environment:
-      DATABASE_URL: postgresql+psycopg://foreshock:foreshock@postgres:5432/foreshock
+      DATABASE_URL: *database-url
     depends_on:
       migrate: { condition: service_completed_successfully }
     ports:
       - "8000:8000"
     command: ["uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      # /healthz hace SELECT 1 contra la BD; la imagen no trae curl -> urllib.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     restart: unless-stopped
 
 volumes:

@@ -15,6 +15,13 @@ from app.sources.repo_registry import _extract_repo, next_batch, update_scan, up
     ("https://gitlab.com/foo/bar", None),                      # no es github
     ("https://example.com/x", None),
     (None, None),
+    # Host anclado: ni subdominios ni hosts falsos ni sufijos de dominio.
+    ("https://gist.github.com/owner/abc123", None),            # gist -> fuera
+    ("https://evilgithub.com/owner/repo", None),               # host falso
+    ("https://github.com.evil.org/owner/repo", None),          # sufijo falso
+    ("https://www.github.com/owner/repo", "owner/repo"),       # www. sí vale
+    ("github.com/owner/repo", "owner/repo"),                   # sin esquema
+    ("ver https://github.com/owner/repo para el fix", "owner/repo"),  # embebido
 ])
 def test_extract_repo(url, expected):
     assert _extract_repo(url) == expected
@@ -34,7 +41,7 @@ def test_upsert_dedup_and_priority(session, db):
     assert got[0][0] == "a/b" and got[0][1] == 20 and got[0][2] == 100  # stars conservadas
 
 
-def test_next_batch_orders_unscanned_then_priority(session, db):
+def test_next_batch_orders_priority_and_excludes_recent(session, db):
     upsert_repos(session, {
         "pop/repo": {"origin": "top_n", "stars": 9999},
         "ref/repo": {"origin": "past_cve"},   # prioridad alta
@@ -43,7 +50,9 @@ def test_next_batch_orders_unscanned_then_priority(session, db):
     batch = next_batch(session, 10)
     names = [b[0] for b in batch]
     assert names[0] == "ref/repo"     # proven-relevant primero pese a menos estrellas
-    # Tras escanear ref/repo, el siguiente lote lo pone al final (last_scanned_at).
+    # Tras escanear ref/repo, queda EXCLUIDO del lote (escaneado hace < N horas):
+    # la prioridad manda de verdad y no hay round-robin plano.
     update_scan(session, "ref/repo", "2026-07-01T00:00:00+00:00")
     session.flush()
-    assert next_batch(session, 10)[0][0] == "pop/repo"
+    nxt = next_batch(session, 10)
+    assert [b[0] for b in nxt] == ["pop/repo"]

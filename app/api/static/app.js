@@ -5,6 +5,16 @@ const el = (n, a) => { const e = document.createElementNS(SVGNS, n); for (const 
 const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 const fmtN = n => (n == null ? "—" : Number(n).toLocaleString());
 
+// TODO dato externo (títulos, paquetes OSV, mensajes de commit…) pasa por esc()
+// antes de interpolarse en innerHTML: cubre texto Y atributos (comillas incluidas).
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+// Solo se enlazan URLs http(s); cualquier otro esquema (javascript:, data:…)
+// se muestra como texto plano.
+function safeUrl(u) { const s = String(u ?? ""); return /^https?:\/\//i.test(s) ? s : null; }
+
 const state = { gran: "month", months: 12, kind: "product", tech: "", period: null };
 let SERIES = [];
 
@@ -18,7 +28,8 @@ async function loadAll() {
   drawChart();
   await Promise.all([loadPending(), loadEmerging()]);
   $("#chartnote").textContent =
-    "Publicados = CVEs oficiales (cvelist). Pre-publicados = candidates sin CVE oficial, por primera detección. " +
+    "Publicados = CVEs oficiales (cvelist). Pre-publicados = CVEs identificados en otras fuentes " +
+    "que NVD aún no ha publicado, por primera detección. " +
     (state.period ? `Filtrando por ${state.period}. ` : "") +
     "OSV/GitHub tienen ventana de captación: los periodos antiguos pueden estar sesgados.";
 }
@@ -67,7 +78,7 @@ fig.addEventListener("mousemove", e => {
   const r = $("#s-pub").getBoundingClientRect(), fr = fig.getBoundingClientRect();
   tt.style.left = (r.left - fr.left + x / W * r.width) + "px"; tt.style.top = (r.top - fr.top + 6) + "px"; tt.style.opacity = 1;
   const d = SERIES[i];
-  tt.innerHTML = `<div class="m">${d.period}</div>
+  tt.innerHTML = `<div class="m">${esc(d.period)}</div>
     <div class="row"><span>Publicados</span><b>${fmtN(d.published)}</b></div>
     <div class="row"><span>Pre-publicados</span><b>${fmtN(d.pre_published)}</b></div>`;
 });
@@ -80,11 +91,13 @@ fig.addEventListener("click", e => {
 });
 
 // ---------- tables ----------
+// Sin handlers inline (los bloquea la CSP y obligarían a escapar contexto JS):
+// las filas llevan data-* escapado y un listener delegado por tabla.
 async function loadPending() {
   const d = await j(`/api/pending?${qs({ kind: state.kind, top: 25, tech: state.tech, period: state.period, granularity: state.gran })}`);
   $("#pcount").textContent = `· ${fmtN(d.total)} pendientes (product=${d.by_kind.product || 0} · malware=${d.by_kind.malware || 0} · distro=${d.by_kind.distro || 0})`;
   $("#ptbody").innerHTML = d.top.map(r =>
-    `<tr onclick="openSoftware('${r.software.replace(/'/g, "")}')"><td>${r.software}</td><td class="num">${r.pending}</td></tr>`).join("")
+    `<tr data-software="${esc(r.software)}"><td>${esc(r.software)}</td><td class="num">${fmtN(r.pending)}</td></tr>`).join("")
     || `<tr><td colspan="2" class="muted">sin datos</td></tr>`;
 }
 async function loadEmerging() {
@@ -94,33 +107,51 @@ async function loadEmerging() {
     const label = r.cve_id || (r.id.slice(0, 8) + "…");
     const kev = r.in_kev ? '<span class="pill kev">KEV</span>' : "";
     const sev = r.cvss != null ? r.cvss : (r.severity_hint || "");
-    return `<tr onclick="openCandidate('${r.cve_id || r.id}')"><td class="mono">${label} ${kev}</td>
-      <td>${r.vuln_type || '<span class="muted">—</span>'}</td><td class="num">${sev}</td>
-      <td class="num">${r.source_count}</td><td class="muted">${(r.sources || "").split(",")[0] || ""}</td></tr>`;
+    return `<tr data-key="${esc(r.cve_id || r.id)}"><td class="mono">${esc(label)} ${kev}</td>
+      <td>${r.vuln_type ? esc(r.vuln_type) : '<span class="muted">—</span>'}</td><td class="num">${esc(sev)}</td>
+      <td class="num">${fmtN(r.source_count)}</td><td class="muted">${esc((r.sources || "").split(",")[0] || "")}</td></tr>`;
   }).join("") || `<tr><td colspan="5" class="muted">sin datos</td></tr>`;
 }
+$("#ptbody").addEventListener("click", e => {
+  const tr = e.target.closest("tr[data-software]");
+  if (tr) openSoftware(tr.dataset.software);
+});
+$("#etbody").addEventListener("click", e => {
+  const tr = e.target.closest("tr[data-key]");
+  if (tr) openCandidate(tr.dataset.key);
+});
 
 // ---------- drawer (deepdive) ----------
 const drawer = $("#drawer"), dbody = $("#dbody");
 function closeDrawer() { drawer.classList.remove("open"); }
-function esc(s) { return (s || "").replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c])); }
+$("#dclose").addEventListener("click", closeDrawer);
+// Las filas generadas dentro del drawer también navegan por delegación.
+dbody.addEventListener("click", e => {
+  const tr = e.target.closest("tr[data-key]");
+  if (tr) openCandidate(tr.dataset.key);
+});
 async function openCandidate(key) {
   drawer.classList.add("open"); dbody.innerHTML = "<p class='muted'>cargando…</p>";
   const d = await j(`/api/candidate/${encodeURIComponent(key)}`);
-  const cvss = d.cvss.map(c => `${c.version} <b>${c.base_score ?? "?"}</b> ${c.base_severity || ""} <span class="muted">(${c.provenance}/${c.source})</span>`).join("<br>") || "—";
-  const aff = d.affected.map(a => `${a.ecosystem ? a.ecosystem + ":" : ""}${a.product} <span class="muted">${a.kind || ""}</span>`).join("<br>") || "—";
-  const tl = d.timeline.map(t => `<div class="ev"><div class="d">${(t.seen_at || "").slice(0, 16).replace("T", " ")} · ${t.source}</div>
-    <div>${esc(t.title)}</div>${t.url ? `<a href="${t.url}" target="_blank">${t.url.slice(0, 60)}</a>` : ""}</div>`).join("");
-  dbody.innerHTML = `<h3>${d.cve_id || "(pre-CVE)"} ${d.in_kev ? '<span class="pill kev">KEV</span>' : ""}</h3>
-    <div class="kv"><b>estado</b>${d.status}</div>
-    <div class="kv"><b>tipo / vector</b>${d.vuln_type || "—"} / ${d.attack_vector || "—"}</div>
+  const cvss = d.cvss.map(c => `${esc(c.version)} <b>${esc(c.base_score ?? "?")}</b> ${esc(c.base_severity || "")} <span class="muted">(${esc(c.provenance)}/${esc(c.source)})</span>`).join("<br>") || "—";
+  const aff = d.affected.map(a => `${a.ecosystem ? esc(a.ecosystem) + ":" : ""}${esc(a.product)} <span class="muted">${esc(a.kind || "")}</span>`).join("<br>") || "—";
+  const tl = d.timeline.map(t => {
+    const u = safeUrl(t.url);
+    const link = u ? `<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(u.slice(0, 60))}</a>`
+      : (t.url ? `<span class="mono">${esc(String(t.url).slice(0, 60))}</span>` : "");
+    return `<div class="ev"><div class="d">${esc((t.seen_at || "").slice(0, 16).replace("T", " "))} · ${esc(t.source)}</div>
+    <div>${esc(t.title)}</div>${link}</div>`;
+  }).join("");
+  dbody.innerHTML = `<h3>${esc(d.cve_id || "(pre-CVE)")} ${d.in_kev ? '<span class="pill kev">KEV</span>' : ""}</h3>
+    <div class="kv"><b>estado</b>${esc(d.status)}</div>
+    <div class="kv"><b>tipo / vector</b>${esc(d.vuln_type || "—")} / ${esc(d.attack_vector || "—")}</div>
     <div class="kv"><b>PoC público</b>${d.has_public_poc ? "sí" : "—"}</div>
-    <div class="kv"><b>días ventaja NVD</b>present=${d.days_ahead_present ?? "—"} · analyzed=${d.days_ahead_analyzed ?? "—"}</div>
-    <div class="kv"><b>EPSS</b>${d.epss ? d.epss.score + " (pct " + d.epss.percentile + ")" : "—"}</div>
-    <div class="kv"><b>CWE</b>${(d.cwe_ids || []).join(", ") || "—"}</div>
+    <div class="kv"><b>días ventaja NVD</b>present=${esc(d.days_ahead_present ?? "—")} · analyzed=${esc(d.days_ahead_analyzed ?? "—")}</div>
+    <div class="kv"><b>EPSS</b>${d.epss ? esc(d.epss.score + " (pct " + d.epss.percentile + ")") : "—"}</div>
+    <div class="kv"><b>CWE</b>${esc((d.cwe_ids || []).join(", ") || "—")}</div>
     <div class="kv"><b>CVSS</b><div>${cvss}</div></div>
     <div class="kv"><b>afectados</b><div>${aff}</div></div>
-    <div class="kv"><b>ids</b><div class="mono">${d.identifiers.map(i => i.scheme + ":" + i.value).join(" · ")}</div></div>
+    <div class="kv"><b>ids</b><div class="mono">${esc(d.identifiers.map(i => i.scheme + ":" + i.value).join(" · "))}</div></div>
     <h4>Timeline</h4><div class="tl">${tl || '<span class="muted">—</span>'}</div>`;
 }
 async function openSoftware(name) {
@@ -128,12 +159,12 @@ async function openSoftware(name) {
   let eco = "", prod = name;
   if (name.includes(":")) { [eco, prod] = name.split(":", 2); }
   const d = await j(`/api/software?${qs({ name: prod, ecosystem: eco, granularity: state.gran, months: state.months })}`);
-  const rows = d.candidates.slice(0, 60).map(c => `<tr onclick="openCandidate('${c.cve_id || c.id}')">
-    <td class="mono">${c.cve_id || c.id.slice(0, 8)}</td><td>${c.pending ? '<span class="pill pre">pendiente</span>' : 'publicado'}</td>
+  const rows = d.candidates.slice(0, 60).map(c => `<tr data-key="${esc(c.cve_id || c.id)}">
+    <td class="mono">${esc(c.cve_id || c.id.slice(0, 8))}</td><td>${c.pending ? '<span class="pill pre">pendiente</span>' : (c.cve_id ? "publicado" : "pre-CVE")}</td>
     <td>${c.in_kev ? '<span class="pill kev">KEV</span>' : ""}</td></tr>`).join("");
   dbody.innerHTML = `<h3>${esc(name)}</h3>
-    <div class="kv"><b>total identificados</b>${d.total}</div>
-    <div class="kv"><b>pendientes (sin CVE oficial)</b>${d.pending}</div>
+    <div class="kv"><b>total identificados</b>${fmtN(d.total)}</div>
+    <div class="kv"><b>pendientes (NVD aún sin publicar)</b>${fmtN(d.pending)}</div>
     <h4>Vulnerabilidades</h4>
     <table><thead><tr><th>CVE/id</th><th>Estado</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
 }

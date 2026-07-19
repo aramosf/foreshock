@@ -1,23 +1,41 @@
 """baseline-worker: sincroniza el estado canónico en bucle.
 
-Ejecuta cvelistV5 / NVD / EPSS en sus cadencias (Settings) con APScheduler.
-Corre una pasada al arrancar y luego según intervalo. Un fallo en una fuente
-se aísla (lo maneja el propio service) y no tumba el worker.
+Ejecuta cvelistV5 / NVD / EPSS / enriquecimiento en sus cadencias (Settings)
+con APScheduler. La primera pasada se programa VÍA el scheduler
+(``next_run_time=now``) para que respete ``max_instances=1`` y no se solape con
+el job de intervalo. Un fallo en una fuente se aísla y no tumba el worker.
+
+Notas de diseño:
+- ``misfire_grace_time=None``: sin él (default 1 s), un disparo que coincide
+  con trabajo largo se DESCARTA en silencio; con None siempre se ejecuta.
+- Los jobs con fetch async (NVD/EPSS) escriben en BD con el motor SÍNCRONO;
+  para no bloquear el event loop del scheduler se ejecuta la corrutina entera
+  en un hilo aparte con su propio loop (``asyncio.to_thread(asyncio.run, ...)``);
+  es lo menos invasivo: separar fetch async de la escritura BD obligaría a
+  reestructurar los módulos de ingesta.
+- SIGTERM/SIGINT paran el scheduler y salen limpiamente.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
+from datetime import UTC, datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from app.baseline.epss import sync_epss
 from app.baseline.cvelist import sync_cvelist
+from app.baseline.enrich import enrich_all
+from app.baseline.epss import sync_epss, tracked_cve_ids
 from app.baseline.nvd import sync_nvd_delta
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 
 log = get_logger("baseline.worker")
+
+# Cadencia del enriquecimiento incremental (diario por defecto).
+_ENRICH_SYNC_SECONDS = int(os.environ.get("ENRICH_SYNC_SECONDS", "86400"))
 
 
 async def _cvelist_job() -> None:
@@ -28,38 +46,67 @@ async def _cvelist_job() -> None:
 
 
 async def _nvd_job() -> None:
+    # Corre en hilo con su propio event loop: la escritura BD es síncrona y no
+    # debe bloquear el loop del scheduler. La reconciliación del KPI
+    # (days_ahead/promoción de candidates) va DENTRO de sync_nvd_delta.
     try:
-        await sync_nvd_delta()
+        await asyncio.to_thread(asyncio.run, sync_nvd_delta())
     except Exception as exc:  # noqa: BLE001
         log.error("baseline.nvd_error", error=str(exc))
 
 
 async def _epss_job() -> None:
+    """Sincroniza EPSS de los CVEs QUE EL RADAR SIGUE (candidates activos con
+    CVE) — es lo que acumula el histórico útil — y complementa con el top-200
+    global por score."""
+    def _run() -> None:
+        cve_ids = tracked_cve_ids()  # consulta síncrona a BD (en hilo)
+        if cve_ids:
+            asyncio.run(sync_epss(cve_ids=cve_ids))
+        asyncio.run(sync_epss())  # complemento: top global por score
+
     try:
-        await sync_epss()
+        await asyncio.to_thread(_run)
     except Exception as exc:  # noqa: BLE001
         log.error("baseline.epss_error", error=str(exc))
+
+
+async def _enrich_job() -> None:
+    """Enriquecimiento estructurado incremental (raw_json -> tablas cve_*)."""
+    try:
+        await asyncio.to_thread(enrich_all)
+    except Exception as exc:  # noqa: BLE001
+        log.error("baseline.enrich_error", error=str(exc))
 
 
 async def main() -> None:
     configure_logging()
     settings = get_settings()
-    scheduler = AsyncIOScheduler()
+    # misfire_grace_time=None: nunca descartar un disparo por llegar tarde.
+    scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": None})
+    now = datetime.now(UTC)
+    # next_run_time=now: la primera pasada entra POR el scheduler y respeta
+    # max_instances=1 (antes se ejecutaba inline y podía solaparse con el job).
     scheduler.add_job(_cvelist_job, "interval", seconds=settings.cvelist_sync_seconds,
-                      id="cvelist", max_instances=1)
+                      id="cvelist", max_instances=1, next_run_time=now)
     scheduler.add_job(_nvd_job, "interval", seconds=settings.nvd_delta_seconds,
-                      id="nvd", max_instances=1)
+                      id="nvd", max_instances=1, next_run_time=now)
     scheduler.add_job(_epss_job, "interval", seconds=settings.epss_sync_seconds,
-                      id="epss", max_instances=1)
+                      id="epss", max_instances=1, next_run_time=now)
+    scheduler.add_job(_enrich_job, "interval", seconds=_ENRICH_SYNC_SECONDS,
+                      id="enrich-nvd", max_instances=1, next_run_time=now)
     scheduler.start()
     log.info("baseline.worker_started")
 
-    # Pasada inicial inmediata.
-    await _cvelist_job()
-    await _nvd_job()
-    await _epss_job()
+    # Salida limpia con SIGTERM/SIGINT (docker stop, Ctrl-C).
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, stop.set)
 
-    await asyncio.Event().wait()  # bloquea para siempre
+    await stop.wait()
+    log.info("baseline.worker_stopping")
+    scheduler.shutdown(wait=True)
 
 
 if __name__ == "__main__":

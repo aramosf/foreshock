@@ -83,10 +83,14 @@ def _apply_candidate_updates(session: Session, candidate: Candidate,
         persist_cvss_vectors(session, candidate.id, m.cvss_vectors, source="osv")
     if m.affected:
         persist_affected(session, candidate.id, m.affected)
+    # Listas: UNIÓN preservando orden, no last-writer-wins — una fuente con menos
+    # CWEs/referencias no debe borrar lo aportado por otra.
     if m.cwe_ids:
-        candidate.cwe_ids = m.cwe_ids
+        candidate.cwe_ids = list(dict.fromkeys([*(candidate.cwe_ids or []), *m.cwe_ids]))
     if m.reference_urls:
-        candidate.reference_urls = m.reference_urls[:50]
+        candidate.reference_urls = list(dict.fromkeys(
+            [*(candidate.reference_urls or []), *m.reference_urls]
+        ))[:50]
     if m.withdrawn is not None:
         candidate.withdrawn = m.withdrawn
 
@@ -119,6 +123,24 @@ def _days(a: datetime | None, b: datetime | None) -> int | None:
     return round((a - b).total_seconds() / 86400)
 
 
+# Si nuestra primera observación en NVD llega más de este margen DESPUÉS de la
+# fecha de publicación que declara NVD, la observación no es señal temprana
+# (arranque tardío del radar, nvd-full retroactivo): el KPI "present/analyzed"
+# sería una ventaja espuria y se deja a NULL.
+_OBSERVATION_LAG_MAX_DAYS = 30
+
+
+def _observed_days(observed: datetime | None, published: datetime | None,
+                   first_seen: datetime) -> int | None:
+    if observed is None:
+        return None
+    if published is not None:
+        lag = _days(observed, published)
+        if lag is not None and lag > _OBSERVATION_LAG_MAX_DAYS:
+            return None
+    return _days(observed, first_seen)
+
+
 def compute_days_ahead(session: Session, candidate: Candidate) -> None:
     """Recalcula los tres deltas de ventaja frente a NVD si hay CVE reconciliado."""
     if not candidate.cve_id or candidate.first_seen_at is None:
@@ -128,14 +150,60 @@ def compute_days_ahead(session: Session, candidate: Candidate) -> None:
         return
     fs = candidate.first_seen_at
     candidate.days_ahead_vs_nvd_published = _days(pub.nvd_published_at, fs)
-    candidate.days_ahead_vs_nvd_present = _days(pub.nvd_first_observed_at, fs)
-    candidate.days_ahead_vs_nvd_analyzed = _days(pub.nvd_first_analyzed_observed_at, fs)
+    candidate.days_ahead_vs_nvd_present = _observed_days(
+        pub.nvd_first_observed_at, pub.nvd_published_at, fs)
+    candidate.days_ahead_vs_nvd_analyzed = _observed_days(
+        pub.nvd_first_analyzed_observed_at, pub.nvd_published_at, fs)
     # "Published" = la META es NVD CON DATOS (nvd_published_at). Un CVE reservado o
     # solo en MITRE/cvelist sin fecha de NVD sigue siendo PRE-publicado para nosotros.
     if pub.nvd_published_at is not None and candidate.status in ("candidate", "emerging"):
         candidate.status = "published"
         if candidate.promoted_at is None:
             candidate.promoted_at = datetime.now(UTC)
+
+
+def reconcile_pending_days_ahead(session: Session, limit: int | None = None) -> int:
+    """Recalcula days_ahead/promoción para candidates cuyo CVE ya está en el
+    baseline pero que no han recibido menciones nuevas desde entonces.
+
+    Sin esto, el KPI solo se computaba al ingerir una mención nueva y quedaba
+    NULL para el caso típico (el CVE se publica DESPUÉS de la última mención).
+    Pensado para ejecutarse tras cada sync del baseline NVD. Devuelve cuántos
+    candidates se actualizaron.
+    """
+    stmt = (
+        select(Candidate)
+        .join(PublishedCVE, PublishedCVE.id == Candidate.cve_id)
+        .where(
+            Candidate.merged_into.is_(None),
+            Candidate.status.in_(("candidate", "emerging", "published")),
+            (
+                Candidate.days_ahead_vs_nvd_present.is_(None)
+                | Candidate.status.in_(("candidate", "emerging"))
+            ),
+        )
+    )
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    updated = 0
+    for candidate in session.execute(stmt).scalars():
+        before = (
+            candidate.status,
+            candidate.days_ahead_vs_nvd_published,
+            candidate.days_ahead_vs_nvd_present,
+            candidate.days_ahead_vs_nvd_analyzed,
+        )
+        compute_days_ahead(session, candidate)
+        after = (
+            candidate.status,
+            candidate.days_ahead_vs_nvd_published,
+            candidate.days_ahead_vs_nvd_present,
+            candidate.days_ahead_vs_nvd_analyzed,
+        )
+        if after != before:
+            updated += 1
+    session.flush()
+    return updated
 
 
 def _record_soft_references(session: Session, mention_id: int, source_id: int,
@@ -219,8 +287,11 @@ def ingest_mention(session: Session, source_id: int, m: FetchedMention) -> Inges
                   schemes=sorted({i.scheme for i in ids}))
         return IngestResult(candidate_id="", mention_id=None, created=False, duplicate=False)
 
-    cve = m.cve_id or primary_cve(ids)
-    native = m.native_id or primary_native(ids)
+    # Canónicos extraídos primero (upper/strip vía extract_identifiers); el valor
+    # crudo del fetcher solo como fallback (p.ej. un native fuera de esquema como
+    # "SSA-123456" de Siemens), saneado para no duplicar por espacios.
+    cve = primary_cve(ids) or (m.cve_id.strip().upper() if m.cve_id else None)
+    native = primary_native(ids) or (m.native_id.strip() if m.native_id else None)
 
     chash = content_hash(
         cve=cve, native=native, title=m.title, snippet=m.snippet, url=m.url
@@ -233,14 +304,19 @@ def ingest_mention(session: Session, source_id: int, m: FetchedMention) -> Inges
         )
     ).scalar_one_or_none()
     if existing is not None:
-        # Mención duplicada, PERO los flags/extras van al CANDIDATE, no a la mención:
-        # una reemisión que ahora añade in_kev o productos debe aplicarse igualmente.
-        candidate = session.get(Candidate, existing.candidate_id)
-        if candidate is not None:
-            _apply_candidate_updates(session, candidate, m)
-            session.flush()
+        # Mención duplicada, PERO la identidad y los extras van al CANDIDATE:
+        # una reemisión con un alias nuevo en extra_ids (que no cambia el hash)
+        # debe adjuntar el identifier y fusionar igualmente, y una que ahora
+        # añade in_kev o productos debe aplicarse. resolve_candidate es
+        # idempotente (adjunta lo que falte y devuelve el root vivo tras
+        # cualquier fusión, aunque la mención apuntara a un tombstone).
+        candidate = resolve_candidate(session, ids)
+        _apply_candidate_updates(session, candidate, m)
+        _refresh_aggregates(session, candidate)
+        compute_days_ahead(session, candidate)
+        session.flush()
         return IngestResult(
-            candidate_id=str(existing.candidate_id),
+            candidate_id=str(candidate.id),
             mention_id=existing.id,
             created=False,
             duplicate=True,

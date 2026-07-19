@@ -20,6 +20,36 @@ from app.enrichment.schema import CVSSMetricsOut
 # Vectores CVSS embebidos en texto.
 _VECTOR_RE = re.compile(r"CVSS:(3\.[01]|4\.0)/[A-Z]+:[A-Z]+(?:/[A-Z]+:[A-Z]+)+", re.IGNORECASE)
 
+# Claves de métrica válidas por versión mayor. El regex de arriba es codicioso y
+# puede "comerse" texto contiguo con forma de métrica (p.ej. ".../A:H/SEE:BELOW"),
+# lo que invalidaba el vector entero y descartaba un vector autoritativo válido:
+# se trunca en el primer segmento con clave desconocida.
+_METRICS_V3 = frozenset({
+    "AV", "AC", "PR", "UI", "S", "C", "I", "A", "E", "RL", "RC", "CR", "IR",
+    "AR", "MAV", "MAC", "MPR", "MUI", "MS", "MC", "MI", "MA",
+})
+_METRICS_V4 = frozenset({
+    "AV", "AC", "AT", "PR", "UI", "VC", "VI", "VA", "SC", "SI", "SA", "E",
+    "CR", "IR", "AR", "MAV", "MAC", "MAT", "MPR", "MUI", "MVC", "MVI", "MVA",
+    "MSC", "MSI", "MSA", "S", "AU", "R", "V", "RE", "U",
+})
+
+
+def _trim_vector(vector: str, version: str) -> str | None:
+    """Corta el vector en el primer segmento cuya clave no es una métrica CVSS
+    de esa versión. Devuelve None si no queda ningún segmento válido."""
+    valid = _METRICS_V4 if version.startswith("4") else _METRICS_V3
+    prefix, *segments = vector.split("/")
+    kept: list[str] = []
+    for seg in segments:
+        key, _, _ = seg.partition(":")
+        if key not in valid:
+            break
+        kept.append(seg)
+    if not kept:
+        return None
+    return "/".join([prefix, *kept])
+
 _AV = {"network": "N", "adjacent": "A", "local": "L", "physical": "P"}
 _AC = {"low": "L", "high": "H"}
 _PR = {"none": "N", "low": "L", "high": "H"}
@@ -59,11 +89,14 @@ def parse_authoritative(text: str | None) -> list[CVSSResult]:
     out: list[CVSSResult] = []
     seen: set[str] = set()
     for m in _VECTOR_RE.finditer(text):
-        vector = m.group(0).upper()
+        version = m.group(1)
+        trimmed = _trim_vector(m.group(0).upper(), version)
+        if trimmed is None:
+            continue
+        vector = trimmed
         if vector in seen:
             continue
         seen.add(vector)
-        version = m.group(1)
         score, severity = _score_severity(vector, version)
         if score is None:
             continue
@@ -113,9 +146,23 @@ def derive_from_metrics(metrics: CVSSMetricsOut | None) -> CVSSResult | None:
 
 _TYPE_WEIGHT = {
     "rce": 4, "remote code execution": 4, "auth bypass": 3, "authbypass": 3,
-    "sqli": 3, "deserialization": 4, "ssrf": 2, "xss": 2, "csrf": 2,
-    "info leak": 1, "dos": 2, "privilege escalation": 3, "lpe": 3,
+    "sqli": 3, "sql injection": 3, "deserialization": 4, "ssrf": 2, "xss": 2,
+    "cross-site scripting": 2, "csrf": 2, "info leak": 1, "dos": 2,
+    "denial of service": 2, "privilege escalation": 3, "lpe": 3,
 }
+
+
+def _type_weight(vuln_type: str) -> int:
+    """Peso del tipo de vulnerabilidad. vuln_type es texto libre del LLM
+    ("SQL Injection", "Remote Code Execution (RCE)"): tras normalizar, si no hay
+    match exacto se busca la clave conocida como subcadena."""
+    key = vuln_type.strip().lower()
+    if key in _TYPE_WEIGHT:
+        return _TYPE_WEIGHT[key]
+    for known, weight in _TYPE_WEIGHT.items():
+        if known in key:
+            return weight
+    return 1
 
 
 def severity_hint(
@@ -126,7 +173,7 @@ def severity_hint(
         return None
     score = 0
     if vuln_type:
-        score += _TYPE_WEIGHT.get(vuln_type.strip().lower(), 1)
+        score += _type_weight(vuln_type)
     if attack_vector == "network":
         score += 2
     elif attack_vector == "adjacent":

@@ -1,9 +1,10 @@
-"""Consultas de solo lectura para la API (y reutilizables por la CLI).
+"""Consultas de solo lectura para la API (y reutilizadas por la CLI).
 
 Devuelven estructuras JSON-friendly (dicts/listas). El concepto central:
 - "published"      = CVEs oficialmente publicados (published_cves, state=PUBLISHED).
-- "pre_published"  = candidates SIN CVE oficial (pre-CVE o cve_id no publicado),
-                     por su primera detección (first_seen_at).
+- "pre_published"  = pendientes ("pending"): CVEs identificados en otras fuentes
+                     que NVD aún no ha publicado, por su primera detección
+                     (first_seen_at). Ver PENDING_WHERE_SQL.
 """
 
 from __future__ import annotations
@@ -18,6 +19,34 @@ import datetime as _dt
 
 # Allowlist de granularidad -> (unidad date_trunc, formato to_char).
 _GRAN = {"month": ("month", "YYYY-MM"), "year": ("year", "YYYY")}
+
+# ----------------------------------------------------------------- pending
+# Definición CANÓNICA de "pending" — la métrica central del proyecto: CVEs
+# identificados en otras fuentes (candidates con cve_id) que NVD aún no ha
+# publicado (sin fila en published_cves o con nvd_published_at NULL), con
+# tecnología asociada (affected_products). Excluye tombstones fusionados.
+# La CLI (app/cli.py) reutiliza estas funciones: NO dupliques este fragmento.
+_PENDING_CORE_SQL = (
+    "c.cve_id IS NOT NULL"
+    " AND NOT EXISTS (SELECT 1 FROM published_cves p"
+    " WHERE p.id = c.cve_id AND p.nvd_published_at IS NOT NULL)"
+    " AND EXISTS (SELECT 1 FROM affected_products ap0 WHERE ap0.candidate_id = c.id)"
+)
+PENDING_WHERE_SQL = "c.merged_into IS NULL AND " + _PENDING_CORE_SQL
+
+# Variante booleana (sin exigir producto) para etiquetar filas que ya vienen
+# unidas a affected_products, p.ej. en software_detail.
+PENDING_EXPR_SQL = (
+    "( c.cve_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM published_cves p"
+    " WHERE p.id = c.cve_id AND p.nvd_published_at IS NOT NULL) )"
+)
+
+
+def _like_pattern(term: str, *, contains: bool = True) -> str:
+    """Escapa los comodines LIKE (%, _) y la barra invertida del input del
+    usuario; usar siempre junto a ESCAPE '\\' en la query."""
+    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%" if contains else escaped
 
 
 def _period_bounds(period: str, granularity: str) -> tuple[_dt.datetime, _dt.datetime] | None:
@@ -36,17 +65,18 @@ def _period_bounds(period: str, granularity: str) -> tuple[_dt.datetime, _dt.dat
 
 
 def _pending_filter(kind: str | None, tech: str | None) -> tuple[str, dict[str, Any]]:
-    """Fragmento SQL + params para restringir candidates pendientes por kind/tecnología."""
+    """Fragmento SQL (sin 'AND' inicial) + params para restringir candidates
+    por kind/tecnología de sus affected_products."""
     clauses = []
     params: dict[str, Any] = {}
     if kind and kind != "all":
         clauses.append("ap.kind = :kind")
         params["kind"] = kind
     if tech:
-        clauses.append("ap.product ILIKE :tech")
-        params["tech"] = f"%{tech}%"
+        clauses.append("ap.product ILIKE :tech ESCAPE '\\'")
+        params["tech"] = _like_pattern(tech)
     if clauses:
-        frag = (" AND EXISTS (SELECT 1 FROM affected_products ap "
+        frag = ("EXISTS (SELECT 1 FROM affected_products ap "
                 "WHERE ap.candidate_id = c.id AND " + " AND ".join(clauses) + ")")
         return frag, params
     return "", params
@@ -54,34 +84,34 @@ def _pending_filter(kind: str | None, tech: str | None) -> tuple[str, dict[str, 
 
 def trend_series(session: Session, granularity: str = "month", months: int = 12,
                  kind: str | None = None, tech: str | None = None) -> list[dict[str, Any]]:
-    """Serie temporal: publicados vs pre-publicados por periodo (mes/año)."""
+    """Serie temporal: publicados vs pendientes (pre-publicados) por periodo.
+
+    El cutoff se alinea al inicio del periodo (date_trunc) para que el bucket
+    más antiguo sea COMPLETO; con `now() - N*30 días` quedaba cortado a mitad.
+    """
     unit, fmt = _GRAN.get(granularity, _GRAN["month"])
-    cutoff = _dt.datetime.now(_dt.UTC) - _dt.timedelta(days=30 * max(1, months))
+    months = max(1, months)
 
     pub = session.execute(text(f"""
         SELECT to_char(date_trunc('{unit}', cvelist_published_at), '{fmt}') AS period,
                count(*) AS n
         FROM published_cves
-        WHERE state='PUBLISHED' AND cvelist_published_at >= :cutoff
+        WHERE state='PUBLISHED'
+          AND cvelist_published_at >= date_trunc('{unit}', now()) - make_interval(months => :months)
         GROUP BY 1
-    """), {"cutoff": cutoff}).all()
+    """), {"months": months}).all()
 
     frag, params = _pending_filter(kind, tech)
-    params["cutoff"] = cutoff
+    params["months"] = months
+    and_frag = f"AND {frag}" if frag else ""
     pre = session.execute(text(f"""
-        WITH pending AS (
-          SELECT c.id, c.first_seen_at
-          FROM candidates c
-          WHERE c.merged_into IS NULL
-            AND ( c.cve_id IS NULL OR NOT EXISTS (
-                  SELECT 1 FROM published_cves p
-                  WHERE p.id=c.cve_id AND p.state='PUBLISHED') )
-            {frag}
-            AND c.first_seen_at >= :cutoff
-        )
-        SELECT to_char(date_trunc('{unit}', first_seen_at), '{fmt}') AS period,
-               count(DISTINCT id) AS n
-        FROM pending GROUP BY 1
+        SELECT to_char(date_trunc('{unit}', c.first_seen_at), '{fmt}') AS period,
+               count(DISTINCT c.id) AS n
+        FROM candidates c
+        WHERE {PENDING_WHERE_SQL}
+          {and_frag}
+          AND c.first_seen_at >= date_trunc('{unit}', now()) - make_interval(months => :months)
+        GROUP BY 1
     """), params).all()
 
     merged: dict[str, dict[str, Any]] = {}
@@ -97,7 +127,10 @@ def trend_series(session: Session, granularity: str = "month", months: int = 12,
 def pending_top(session: Session, kind: str = "product", top: int = 20,
                 tech: str | None = None, period: str | None = None,
                 granularity: str = "month") -> dict[str, Any]:
-    """Ranking de software con más vulns pendientes + desglose por kind."""
+    """Ranking de software con más vulns pendientes + desglose por kind.
+
+    Agrega en SQL (count DISTINCT / GROUP BY) en vez de traer las filas y
+    contarlas en Python."""
     extra = ""
     params: dict[str, Any] = {}
     if period:
@@ -105,34 +138,39 @@ def pending_top(session: Session, kind: str = "product", top: int = 20,
         if bounds:
             extra = " AND c.first_seen_at >= :pstart AND c.first_seen_at < :pend"
             params["pstart"], params["pend"] = bounds
-    rows = session.execute(text(f"""
-        SELECT c.id, a.product, a.kind
-        FROM candidates c
-        LEFT JOIN affected_products a ON a.candidate_id = c.id
-        WHERE c.merged_into IS NULL
-          AND ( c.cve_id IS NULL OR NOT EXISTS (
-                SELECT 1 FROM published_cves p WHERE p.id=c.cve_id AND p.state='PUBLISHED') )
-          {extra}
+
+    total = session.execute(text(
+        f"SELECT count(*) FROM candidates c WHERE {PENDING_WHERE_SQL}{extra}"
+    ), params).scalar_one()
+
+    by_kind = session.execute(text(f"""
+        SELECT a.kind, count(DISTINCT c.id) AS n
+        FROM candidates c JOIN affected_products a ON a.candidate_id = c.id
+        WHERE {PENDING_WHERE_SQL}{extra}
+        GROUP BY a.kind
     """), params).all()
-    from collections import Counter
-    cands: dict = {}
-    for cand, product, k in rows:
-        cands.setdefault(cand, set())
-        if product:
-            cands[cand].add((product, k))
-    by_kind: Counter = Counter()
-    counter: Counter = Counter()
-    for prods in cands.values():
-        for k in {kk for _, kk in prods}:
-            by_kind[k] += 1
-        for product, k in prods:
-            if (kind == "all" or k == kind) and (not tech or tech.lower() in product.lower()):
-                counter[product] += 1
+
+    filt = ""
+    if kind != "all":
+        filt = " AND a.kind = :kind"
+        params["kind"] = kind
+    if tech:
+        filt += " AND a.product ILIKE :tech ESCAPE '\\'"
+        params["tech"] = _like_pattern(tech)
+    params["top"] = top
+    rows = session.execute(text(f"""
+        SELECT a.product, count(DISTINCT c.id) AS pending
+        FROM candidates c JOIN affected_products a ON a.candidate_id = c.id
+        WHERE {PENDING_WHERE_SQL}{extra}{filt}
+        GROUP BY a.product
+        ORDER BY pending DESC, a.product
+        LIMIT :top
+    """), params).all()
     return {
-        "total": len(cands),
-        "by_kind": dict(by_kind),
+        "total": int(total),
+        "by_kind": {k: int(n) for k, n in by_kind if k is not None},
         "kind": kind,
-        "top": [{"software": s, "pending": n} for s, n in counter.most_common(top)],
+        "top": [{"software": s, "pending": int(n)} for s, n in rows],
     }
 
 
@@ -155,8 +193,8 @@ def emerging_list(session: Session, *, since_days: int | None = None, source: st
     if in_kev:
         where.append("c.in_kev IS TRUE")
     if pending_only:
-        where.append("( c.cve_id IS NULL OR NOT EXISTS (SELECT 1 FROM published_cves p "
-                     "WHERE p.id=c.cve_id AND p.state='PUBLISHED') )")
+        # Definición canónica de pending (merged_into ya está filtrado arriba).
+        where.append(_PENDING_CORE_SQL)
     if source or tier is not None:
         sub = ["SELECT 1 FROM mentions m JOIN sources s ON s.id=m.source_id "
                "WHERE m.candidate_id=c.id"]
@@ -170,7 +208,7 @@ def emerging_list(session: Session, *, since_days: int | None = None, source: st
     if kind or tech:
         frag, fparams = _pending_filter(kind, tech)
         if frag:
-            where.append(frag.lstrip(" AND "))
+            where.append(frag)
             params.update(fparams)
     where_sql = " AND ".join(where)
 
@@ -196,7 +234,8 @@ def emerging_list(session: Session, *, since_days: int | None = None, source: st
 def candidate_detail(session: Session, key: str) -> dict[str, Any] | None:
     """Deepdive de una nota/candidate: ids, cvss, epss, afectados, refs, timeline."""
     cid = session.execute(
-        text("SELECT id FROM candidates WHERE cve_id=:k AND merged_into IS NULL LIMIT 1"),
+        text("SELECT id FROM candidates WHERE cve_id=:k AND merged_into IS NULL "
+             "ORDER BY first_seen_at LIMIT 1"),
         {"k": key.upper()}).scalar_one_or_none()
     if cid is None:
         try:
@@ -247,14 +286,19 @@ def software_detail(session: Session, ecosystem: str, name: str,
                     granularity: str = "month", months: int = 24) -> dict[str, Any]:
     """Deepdive por tecnología: publicados vs pendientes de un paquete + su serie."""
     unit, fmt = _GRAN.get(granularity, _GRAN["month"])
-    params = {"eco": ecosystem, "name": name, "since": f"{months} months"}
-    cands = session.execute(text("""
+    params = {
+        # Match exacto case-insensitive: se escapan los comodines del input.
+        "eco": _like_pattern(ecosystem, contains=False) if ecosystem else "",
+        "name": _like_pattern(name, contains=False),
+        "months": max(1, months),
+    }
+    cands = session.execute(text(f"""
         SELECT DISTINCT c.id, c.cve_id, c.first_seen_at, c.in_kev,
-               ( c.cve_id IS NULL OR NOT EXISTS (SELECT 1 FROM published_cves p
-                 WHERE p.id=c.cve_id AND p.state='PUBLISHED') ) AS pending
+               {PENDING_EXPR_SQL} AS pending
         FROM candidates c JOIN affected_products a ON a.candidate_id=c.id
-        WHERE c.merged_into IS NULL AND a.product ILIKE :name
-          AND ( :eco='' OR a.ecosystem ILIKE :eco )
+        WHERE c.merged_into IS NULL AND a.product ILIKE :name ESCAPE '\\'
+          AND ( :eco='' OR a.ecosystem ILIKE :eco ESCAPE '\\' )
+          AND c.first_seen_at >= date_trunc('{unit}', now()) - make_interval(months => :months)
         ORDER BY c.first_seen_at DESC NULLS LAST
     """), params).mappings().all()
     series: dict[str, dict[str, int]] = {}

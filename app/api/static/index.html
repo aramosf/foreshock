@@ -107,13 +107,13 @@
   <div class="card">
     <div class="legend">
       <span><span class="sw" style="background:var(--pub)"></span>Publicados oficialmente</span>
-      <span><span class="sw" style="background:var(--pre)"></span>Pre-publicados (sin CVE oficial)</span>
+      <span><span class="sw" style="background:var(--pre)"></span>Pre-publicados (NVD aún sin publicar)</span>
       <span class="muted" id="hint">— clic en un periodo para filtrar las tablas</span>
     </div>
     <figure id="fig" style="margin:0;position:relative">
       <div class="ptitle">CVEs publicados oficialmente / periodo</div>
       <svg id="s-pub" viewBox="0 0 960 190" preserveAspectRatio="none"></svg>
-      <div class="ptitle">Pre-publicados — detectados sin CVE oficial / periodo</div>
+      <div class="ptitle">Pre-publicados — identificados, aún sin publicar en NVD / periodo</div>
       <svg id="s-pre" viewBox="0 0 960 190" preserveAspectRatio="none"></svg>
       <div id="tt"></div>
     </figure>
@@ -135,7 +135,8 @@
   </div>
 </div>
 
-<div id="drawer"><button class="x" onclick="closeDrawer()">×</button><div id="dbody"></div></div>
+<!-- Sin onclick inline: la CSP (script-src 'self') lo bloquea; app.js hace el binding. -->
+<div id="drawer"><button class="x" id="dclose">×</button><div id="dbody"></div></div>
 <script src="/static/app.js"></script>
 </body>
 </html>

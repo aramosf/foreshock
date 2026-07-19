@@ -33,7 +33,13 @@ from app.core.models import Mention as MentionRow
 
 log = get_logger(__name__)
 
-_GH = re.compile(r"github\.com/([A-Za-z0-9][\w.-]*)/([A-Za-z0-9][\w.-]*)")
+# Solo el host github.com (con www. opcional): el lookbehind negativo evita
+# casar subdominios (gist.github.com) o hosts falsos (evilgithub.com); exigir
+# '/' justo tras el host evita github.com.evil.org.
+_GH = re.compile(
+    r"(?:^|(?<=[^\w.-]))(?:https?://)?(?:www\.)?github\.com/"
+    r"([A-Za-z0-9][\w.-]*)/([A-Za-z0-9][\w.-]*)"
+)
 _SKIP_OWNERS = {
     "advisories", "sponsors", "marketplace", "orgs", "users", "about", "security",
     "blog", "features", "topics", "collections", "apps", "notifications", "settings",
@@ -144,6 +150,10 @@ async def harvest_top_n(client: httpx.AsyncClient, settings: Settings) -> dict[s
                 params={"q": q, "sort": "stars", "order": "desc", "per_page": 100, "page": page},
             )
             if resp.status_code != 200:
+                # Típicamente 403 por rate limit de la Search API sin token:
+                # visible en logs (antes se cortaba en silencio con menos repos).
+                log.warning("registry.top_n_http_error", status=resp.status_code,
+                            query=q, page=page, body=resp.text[:200])
                 break
             items = resp.json().get("items", [])
             if not items:
@@ -157,6 +167,11 @@ async def harvest_top_n(client: httpx.AsyncClient, settings: Settings) -> dict[s
             if len(repos) >= settings.github_top_n:
                 break
         if page_min is None or page_min <= floor:
+            break
+        if upper is not None and page_min >= upper:
+            # Sin progreso: >1000 repos con las mismas estrellas (límite de la
+            # Search API). Repetir la misma franja iteraría para siempre.
+            log.warning("registry.top_n_no_progress", stars=page_min, repos=len(repos))
             break
         upper = page_min
     with session_scope() as session:
@@ -229,18 +244,41 @@ async def harvest_all(client: httpx.AsyncClient, settings: Settings) -> dict[str
 
 
 # --- Consumo por github_commits ----------------------------------------------
+# No re-escanear un repo antes de N horas: sin esta exclusión, ordenar por
+# last_scanned_at convierte todo en un round-robin plano y la prioridad nunca
+# manda (los repos proven-relevant esperan detrás de los 10k por estrellas).
+RESCAN_MIN_HOURS = 6
+
+
 def next_batch(session, n: int) -> list[tuple[str, str | None]]:
-    """Siguiente lote a escanear: nunca escaneados primero, luego prioridad y estrellas."""
+    """Siguiente lote a escanear: se EXCLUYE lo escaneado hace < RESCAN_MIN_HOURS
+    y se ordena por prioridad DESC, nunca-escaneados primero, estrellas DESC.
+    NOTA: el índice de github_repos se crea exactamente con esta ordenación
+    (priority DESC, last_scanned_at ASC NULLS FIRST, stars DESC NULLS LAST);
+    no cambiar una sin la otra."""
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import or_
+
+    threshold = datetime.now(UTC) - timedelta(hours=RESCAN_MIN_HOURS)
     rows = session.execute(
         select(GithubRepo.full_name, GithubRepo.watermark)
+        .where(or_(GithubRepo.last_scanned_at.is_(None),
+                   GithubRepo.last_scanned_at < threshold))
         .order_by(
-            GithubRepo.last_scanned_at.asc().nulls_first(),
             GithubRepo.priority.desc(),
+            GithubRepo.last_scanned_at.asc().nulls_first(),
             GithubRepo.stars.desc().nulls_last(),
-            GithubRepo.full_name,
         ).limit(n)
     ).all()
     return [(r[0], r[1]) for r in rows]
+
+
+def get_watermark(session, full_name: str) -> str | None:
+    """Watermark actual de un repo del registro (None si no existe/sin escanear)."""
+    return session.execute(
+        select(GithubRepo.watermark).where(GithubRepo.full_name == full_name)
+    ).scalar_one_or_none()
 
 
 def update_scan(session, full_name: str, watermark: str | None) -> None:

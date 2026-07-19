@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import bindparam, delete, insert, select, update
+from sqlalchemy import bindparam, delete, insert, or_, select, update
 
 from app.core.db import session_scope
 from app.core.logging import get_logger
@@ -283,19 +283,33 @@ def _persist_batch(session, enrichments: list[Enrichment]) -> None:
     session.execute(upd, params)
 
 
-def enrich_all(batch_size: int = 2000) -> dict[str, int]:
-    """Recorre TODA published_cves por lotes (keyset por id), parsea raw_json y
-    persiste el enriquecimiento. Idempotente: reejecutable sin duplicar."""
+def enrich_all(batch_size: int = 2000, full: bool = False) -> dict[str, int]:
+    """Recorre published_cves por lotes (keyset por id), parsea raw_json y
+    persiste el enriquecimiento. Idempotente: reejecutable sin duplicar.
+
+    Por defecto es INCREMENTAL: solo procesa los CVEs nunca enriquecidos
+    (``enriched_at IS NULL``) o cuyo registro cvelist cambió después del último
+    enriquecimiento (``cvelist_updated_at > enriched_at``). Con ``full=True``
+    reprocesa todo el histórico (útil tras cambiar el parser).
+    """
     stats = {"processed": 0, "cvss": 0, "cwe": 0, "cpe": 0, "refs": 0}
+    col = PublishedCVE.__table__.c
     last_id = ""
     while True:
         with session_scope() as session:
-            rows = session.execute(
-                select(PublishedCVE.__table__.c.id, PublishedCVE.__table__.c.raw_json)
-                .where(PublishedCVE.__table__.c.id > last_id)
-                .order_by(PublishedCVE.__table__.c.id)
+            stmt = (
+                select(col.id, col.raw_json)
+                .where(col.id > last_id)
+                .order_by(col.id)
                 .limit(batch_size)
-            ).all()
+            )
+            if not full:
+                # Incremental: pendientes de enriquecer o re-tocados por cvelist.
+                stmt = stmt.where(or_(
+                    col.enriched_at.is_(None),
+                    col.cvelist_updated_at > col.enriched_at,
+                ))
+            rows = session.execute(stmt).all()
             if not rows:
                 break
             enrichments = [parse_record(cid, raw) for cid, raw in rows]
@@ -309,5 +323,5 @@ def enrich_all(batch_size: int = 2000) -> dict[str, int]:
             last_id = rows[-1][0]
         if stats["processed"] % (batch_size * 10) == 0:
             log.info("enrich.progress", **stats)
-    log.info("enrich.done", **stats)
+    log.info("enrich.done", full=full, **stats)
     return stats

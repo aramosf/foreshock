@@ -23,6 +23,8 @@ import sys
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from pathlib import Path
+
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -92,7 +94,15 @@ def _parse_since(s: str | None) -> datetime | None:
 @db_app.command("init")
 def db_init() -> None:
     """Aplica las migraciones Alembic (alembic upgrade head)."""
-    res = subprocess.run(["alembic", "upgrade", "head"], check=False)
+    # No depender del CWD: localiza el alembic.ini de la raíz del repo relativo
+    # a este fichero y ejecuta alembic desde ahí (script_location es relativa).
+    repo_root = Path(__file__).resolve().parents[1]
+    ini = repo_root / "alembic.ini"
+    if ini.exists():
+        res = subprocess.run(["alembic", "-c", str(ini), "upgrade", "head"],
+                             check=False, cwd=repo_root)
+    else:  # instalación empaquetada sin alembic.ini junto al código
+        res = subprocess.run(["alembic", "upgrade", "head"], check=False)
     raise typer.Exit(res.returncode)
 
 
@@ -223,6 +233,20 @@ def baseline_enrich_nvd(
     console.print(enrich_all(batch_size=batch))
 
 
+@baseline_app.command("reconcile")
+def baseline_reconcile(
+    limit: int | None = typer.Option(None, help="máximo de candidates a procesar"),
+) -> None:
+    """Recalcula el KPI days_ahead y promociona candidates cuyo CVE ya publicó
+    NVD. Crítico tras un sync del baseline: sin esto, `pending` acumula falsos
+    positivos (candidates que siguen 'candidate' con el CVE ya en NVD)."""
+    from app.ingest.service import reconcile_pending_days_ahead
+
+    with session_scope() as session:
+        updated = reconcile_pending_days_ahead(session, limit=limit)
+    console.print(f"[green]reconcile: {updated} candidates actualizados[/green]")
+
+
 # ---------------------------------------------------------------- emerging
 @app.command("emerging")
 def emerging(
@@ -330,8 +354,13 @@ def cve(action: str = typer.Argument("show"), cve_id: str = typer.Argument(...))
 
 
 def _find_candidate(session, key: str) -> Candidate | None:
+    # Puede haber tombstones fusionados con el mismo cve_id: se excluyen y se
+    # toma el más antiguo (mismo criterio que candidate_detail en la API).
     c = session.execute(
-        select(Candidate).where(Candidate.cve_id == key.upper())
+        select(Candidate)
+        .where(Candidate.cve_id == key.upper(), Candidate.merged_into.is_(None))
+        .order_by(Candidate.first_seen_at)
+        .limit(1)
     ).scalar_one_or_none()
     if c is not None:
         return c
@@ -346,14 +375,15 @@ def _find_candidate(session, key: str) -> Candidate | None:
 @app.command("enrich")
 def enrich_cmd(cve_id: str = typer.Argument(...)) -> None:
     """Enriquece un candidate (LLM + CVSS) por CVE o id."""
-    from app.enrichment.service import enrich_candidate
-
-    with session_scope() as session:
+    # La búsqueda cierra su sesión ANTES de lanzar el enriquecimiento: si no,
+    # quedaría una transacción ociosa abierta durante todo el asyncio.run.
+    with get_session() as session:
         candidate = _find_candidate(session, cve_id)
-        if candidate is None:
-            console.print(f"[red]no encontrado: {cve_id}[/red]")
-            raise typer.Exit(1)
-        ok = asyncio.run(_enrich_wrap(candidate.id))
+        cid = candidate.id if candidate is not None else None
+    if cid is None:
+        console.print(f"[red]no encontrado: {cve_id}[/red]")
+        raise typer.Exit(1)
+    ok = asyncio.run(_enrich_wrap(cid))
     console.print("[green]enriquecido[/green]" if ok else "[yellow]sin datos[/yellow]")
 
 
@@ -362,6 +392,19 @@ async def _enrich_wrap(cid: uuid.UUID) -> bool:
 
     with session_scope() as session:
         return await enrich_candidate(session, cid)
+
+
+@app.command("enrich-batch")
+def enrich_batch(
+    limit: int = typer.Option(50, help="máximo de candidates a enriquecer"),
+) -> None:
+    """Enriquece en lote los candidates pendientes de enriquecimiento.
+
+    Imprime el resumen {enriched, skipped, errors}. El servicio gestiona sus
+    propias sesiones."""
+    from app.enrichment.service import enrich_pending
+
+    console.print(asyncio.run(enrich_pending(limit=limit)))
 
 
 # ------------------------------------------------------------------- stats
@@ -399,57 +442,31 @@ def stats(
 
 
 # ----------------------------------------------------- pending / trend
-# Lee de affected_products (persistido). Una fila por (candidate, producto);
-# candidates sin producto salen con product/kind NULL.
-_PENDING_AP_SQL = text("""
-SELECT c.id, c.first_seen_at, a.product, a.kind
-FROM candidates c
-LEFT JOIN affected_products a ON a.candidate_id = c.id
-WHERE c.merged_into IS NULL
-  AND ( c.cve_id IS NULL
-     OR NOT EXISTS (SELECT 1 FROM published_cves p
-                    WHERE p.id = c.cve_id AND p.state = 'PUBLISHED') )
-""")
-
-
-def _load_pending(session) -> list[tuple]:
-    """[(candidate_id, first_seen, product, kind)] para candidates sin CVE oficial."""
-    return list(session.execute(_PENDING_AP_SQL))
+# La definición canónica de "pending" (la métrica central) y sus agregados
+# viven en app/api/queries.py y se REUTILIZAN aquí: la CLI es solo capa de
+# presentación (tabla/JSON/CSV). No dupliques el SQL en este módulo.
 
 
 @app.command("pending")
 def pending(
     top: int = typer.Option(20, help="nº de software en el ranking"),
     kind: str = typer.Option("product", help="product | distro | malware | all"),
+    tech: str | None = typer.Option(None, help="filtra por tecnología (substring)"),
     fmt: str = typer.Option("table", "--format", "-f", help="table | json | csv"),
 ) -> None:
-    """CVEs identificados asociados a software SIN publicación oficial (NVD/MITRE),
-    y ranking del software con más pendientes. Canonicaliza el ecosistema y separa
-    productos reales de advisories de distro/malware."""
-    from collections import Counter
+    """CVEs identificados en otras fuentes, con tecnología asociada, que NVD aún
+    no ha publicado, y ranking del software con más pendientes. Misma definición
+    y SQL que /api/pending (app/api/queries.py)."""
+    from app.api.queries import pending_top
 
     with get_session() as session:
-        rows = _load_pending(session)
-
-    cands: dict = {}
-    for cand, _fs, product, k in rows:
-        prods = cands.setdefault(cand, set())
-        if product:
-            prods.add((product, k))
-    total = len(cands)
-    with_sw = sum(1 for prods in cands.values() if prods)
-    by_kind: Counter = Counter()
-    prodcount: Counter = Counter()
-    for prods in cands.values():
-        for k in {kk for _, kk in prods}:
-            by_kind[k] += 1
-        for product, k in prods:
-            if kind == "all" or k == kind:
-                prodcount[product] += 1
-    data = list(prodcount.most_common(top))
+        result = pending_top(session, kind=kind, top=top, tech=tech)
+    by_kind = result["by_kind"]
+    data = [(r["software"], r["pending"]) for r in result["top"]]
     meta = {
-        "total": total, "con_software": with_sw, "product": by_kind["product"],
-        "distro": by_kind["distro"], "malware": by_kind["malware"], "kind": kind,
+        "total": result["total"], "product": by_kind.get("product", 0),
+        "distro": by_kind.get("distro", 0), "malware": by_kind.get("malware", 0),
+        "kind": kind,
     }
     _emit(fmt, ["software", "cves_pendientes"], data, meta=meta,
           title=f"Top software (kind={kind})")
@@ -459,46 +476,30 @@ def pending(
 def trend(
     kind: str = typer.Option("all", help="product | distro | malware | all"),
     granularity: str = typer.Option("month", help="month | year"),
-    months: int = typer.Option(12, help="ventana de meses hacia atrás (p.ej. 6, 12)"),
+    months: int = typer.Option(12, help="ventana de meses hacia atrás (0 = todo)"),
     fmt: str = typer.Option("table", "--format", "-f", help="table | json | csv"),
 ) -> None:
     """Serie temporal de vulnerabilidades pendientes por mes/año, por fecha de
     PRIMERA DETECCIÓN del radar (candidate.first_seen_at ≈ fecha de la señal más
     temprana: commit, publicación OSV, dateAdded KEV). Ventana configurable
-    (--months). Sirve para ver crecimiento reciente / efecto palo de hockey."""
-    from collections import Counter
+    (--months). Misma definición y SQL que /api/trend (app/api/queries.py)."""
+    from app.api.queries import trend_series
 
-    date_fmt = "%Y-%m" if granularity == "month" else "%Y"
-    cutoff = datetime.now(UTC) - timedelta(days=30 * months) if months > 0 else None
+    if months <= 0:
+        months = 1200  # 0 = histórico completo (100 años)
     with get_session() as session:
-        rows = _load_pending(session)
-    cand_fs: dict = {}
-    cand_kinds: dict = {}
-    for cand, first_seen, _product, k in rows:
-        cand_fs[cand] = first_seen
-        if k:
-            cand_kinds.setdefault(cand, set()).add(k)
-    buckets: Counter = Counter()
-    for cand, first_seen in cand_fs.items():
-        if first_seen is None:
-            continue
-        if kind != "all" and kind not in cand_kinds.get(cand, set()):
-            continue
-        if cutoff is not None and first_seen < cutoff:
-            continue
-        buckets[first_seen.strftime(date_fmt)] += 1
-    if not buckets:
+        series = trend_series(session, granularity=granularity, months=months, kind=kind)
+    rows = [(r["period"], r["pre_published"]) for r in series if r["pre_published"]]
+    if not rows:
         console.print("[yellow]sin datos temporales[/yellow]")
         return
-    periods = sorted(buckets)
     if fmt == "table":
-        peak = max(buckets.values())
-        data = [(p, buckets[p], "█" * max(1, round(40 * buckets[p] / peak))) for p in periods]
+        peak = max(n for _, n in rows)
+        data = [(p, n, "█" * max(1, round(40 * n / peak))) for p, n in rows]
         _emit("table", ["periodo", "pendientes", ""], data,
               meta={"kind": kind, "months": months}, title=f"Tendencia (kind={kind})")
     else:
-        _emit(fmt, ["periodo", "pendientes"], [(p, buckets[p]) for p in periods],
-              meta={"kind": kind, "months": months})
+        _emit(fmt, ["periodo", "pendientes"], rows, meta={"kind": kind, "months": months})
 
 
 @app.command("backfill-products")
@@ -542,18 +543,21 @@ def backfill_products(
 
     with get_session() as reader:
         targets = list(reader.execute(sql))
-    n = 0
     pending_rows = []
     for cid, software, is_mal in targets:
         ai = to_affected(software, is_mal)
         if ai is not None:
             pending_rows.append((cid, ai))
-    with session_scope() as session:
-        for i, (cid, ai) in enumerate(pending_rows, 1):
-            persist_affected(session, cid, [ai])
-            n += 1
-            if i % batch == 0:
-                session.flush()
+    # Commits REALES por lote (una transacción por lote): si el proceso se
+    # corta a mitad, lo ya procesado queda persistido. Antes era un único
+    # session_scope todo-o-nada (el flush() no libera la transacción).
+    n = 0
+    for start in range(0, len(pending_rows), max(1, batch)):
+        chunk = pending_rows[start:start + max(1, batch)]
+        with session_scope() as session:
+            for cid, ai in chunk:
+                persist_affected(session, cid, [ai])
+        n += len(chunk)
     console.print(f"[green]backfill: {n} candidates con affected_products[/green]")
 
 

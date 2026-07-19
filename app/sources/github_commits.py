@@ -27,14 +27,17 @@ import shutil
 import tempfile
 from datetime import UTC, datetime, timedelta
 
-import httpx
-
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
 from app.ingest.service import FetchedMention
 from app.sources.base import BaseSource, FetchContext, register
 
 log = get_logger(__name__)
+
+
+class GitScanError(RuntimeError):
+    """Fallo de git (clone/log/timeout) al escanear un repo. El llamador NO debe
+    avanzar watermark ni last_scanned_at: el repo se reintenta en otro lote."""
 
 _SECFIX = re.compile(
     r"\b(security fix|vulnerabilit|remote code execution|\brce\b|\bxss\b|"
@@ -60,25 +63,26 @@ def _clone_url(settings: Settings, full: str) -> str:
     return f"https://github.com/{full}.git"
 
 
-async def _run_git(*args: str, timeout: float = 180.0) -> tuple[int, str]:
-    """Ejecuta git de forma async. Devuelve (returncode, stdout)."""
+async def _run_git(*args: str, timeout: float = 180.0) -> tuple[int, str, str]:
+    """Ejecuta git de forma async. Devuelve (returncode, stdout, stderr).
+    rc=124 en timeout (convención de coreutils `timeout`)."""
     proc = await asyncio.create_subprocess_exec(
         "git", *args,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     try:
-        out, _err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
-        return 124, ""
-    return proc.returncode or 0, out.decode("utf-8", "replace")
+        return 124, "", f"timeout tras {timeout}s"
+    return proc.returncode or 0, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
 
 
 def _mentions_from_log(full: str, log_out: str,
                        synthesize: bool) -> tuple[list[FetchedMention], str | None]:
     out: list[FetchedMention] = []
-    newest: str | None = None
+    newest: datetime | None = None
     for rec in log_out.split(_REC):
         rec = rec.strip("\n")
         if not rec:
@@ -87,8 +91,20 @@ def _mentions_from_log(full: str, log_out: str,
         if len(parts) < 3:
             continue
         sha, cdate, msg = parts[0], parts[1], parts[2]
-        if cdate and (newest is None or cdate > newest):
-            newest = cdate
+        # Watermark: %cI trae offsets heterogéneos (+02:00, -07:00…), comparar
+        # strings ISO daría un orden falso. Se parsea a datetime aware y se
+        # compara/normaliza en UTC.
+        cdt: datetime | None = None
+        if cdate:
+            try:
+                cdt = datetime.fromisoformat(cdate)
+                if cdt.tzinfo is None:
+                    cdt = cdt.replace(tzinfo=UTC)
+                cdt = cdt.astimezone(UTC)
+            except ValueError:
+                cdt = None
+        if cdt is not None and (newest is None or cdt > newest):
+            newest = cdt
         # TODOS los CVEs distintos del mensaje (no solo el primero): un commit que
         # arregla varios CVEs referencia a TODOS. Se emite UNA mención por CVE ->
         # cada una declara un único CVE y ancla su propio candidate, SIN fusionar
@@ -120,7 +136,7 @@ def _mentions_from_log(full: str, log_out: str,
             native = f"GHCOMMIT:{full}@{sha[:12]}"
             out.append(FetchedMention(url=url, title=title, snippet=snippet,
                                       cve_id=None, native_id=native, seen_at=seen))
-    return out, newest
+    return out, (newest.isoformat() if newest is not None else None)
 
 
 # --- caché comprimido del git-log por repo -----------------------------------
@@ -137,6 +153,19 @@ def _gitlog_cache_path(settings: Settings, full: str) -> str:
     return os.path.join(_gitlog_cache_dir(settings), f"{safe}.log.gz")
 
 
+def _read_gitlog_cache(path: str) -> list[str]:
+    """Registros ya cacheados (sin la primera línea de repo). [] si no hay caché."""
+    if not os.path.exists(path):
+        return []
+    try:
+        with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
+            content = fh.read()
+    except OSError:
+        return []
+    _, _, body = content.partition("\n")
+    return [rec for rec in body.split(_REC) if rec.strip("\n")]
+
+
 def _write_gitlog_cache(settings: Settings, full: str, log_out: str) -> None:
     # Conserva solo los registros con CVE o secfix (suficiente para re-parsear).
     keep = [rec for rec in log_out.split(_REC)
@@ -145,16 +174,33 @@ def _write_gitlog_cache(settings: Settings, full: str, log_out: str) -> None:
     os.makedirs(directory, exist_ok=True)
     path = _gitlog_cache_path(settings, full)
     if not keep:
-        # Sin commits relevantes: no dejamos fichero (ahorro de inodos/espacio).
-        if os.path.exists(path):
-            os.remove(path)
+        # Escaneo incremental sin commits relevantes NUEVOS: el histórico
+        # cacheado sigue siendo válido -> no se toca (antes se borraba y la
+        # caché se autodestruía en cada ventana vacía).
         return
+    # FUSIÓN con la caché previa: cada escaneo cubre solo su ventana (desde el
+    # watermark); reemplazar el fichero perdería los commits de ventanas
+    # anteriores. Se une por sha (primer campo del registro).
+    merged: dict[str, str] = {}
+    for rec in _read_gitlog_cache(path) + keep:
+        sha = rec.strip("\n").split(_FLD, 1)[0]
+        merged.setdefault(sha, rec)
     # Primera línea = repo (autoritativa); resto = log con separadores _REC.
-    content = full + "\n" + (_REC.join(keep) + _REC)
-    tmp = path + ".tmp"
-    with gzip.open(tmp, "wt", encoding="utf-8") as fh:
-        fh.write(content)
-    os.replace(tmp, path)
+    content = full + "\n" + (_REC.join(merged.values()) + _REC)
+    # Temporal ÚNICO + os.replace atómico (dos procesos no se pisan el .tmp).
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=os.path.basename(path) + ".",
+                               suffix=".tmp")
+    os.close(fd)
+    try:
+        with gzip.open(tmp, "wt", encoding="utf-8") as fh:
+            fh.write(content)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def reextract_from_cache(settings: Settings) -> list[FetchedMention]:
@@ -183,39 +229,89 @@ def reextract_from_cache(settings: Settings) -> list[FetchedMention]:
 
 async def _git_scan(settings: Settings, full: str, since_iso: str,
                     synthesize: bool) -> tuple[list[FetchedMention], str | None]:
-    """Clona blobless+shallow-since, lee git log, CACHEA (gzip) y borra el clon."""
-    since_date = since_iso[:10] or "2026-05-01"  # git acepta YYYY-MM-DD
+    """Clona blobless+shallow-since, lee git log, CACHEA (gzip) y borra el clon.
+
+    Lanza GitScanError si git falla (clone/log/timeout): el llamador NO debe
+    marcar el repo como escaneado, para que se reintente en el siguiente lote.
+    """
+    # Fallback al cutoff fijo de settings (única fuente de verdad, no duplicar).
+    since_date = since_iso[:10] or settings.github_commits_since[:10]
     base = os.path.join(settings.data_dir, "clones")
     os.makedirs(base, exist_ok=True)
     tmp = tempfile.mkdtemp(dir=base)
     try:
-        code, _ = await _run_git(
+        code, _, err = await _run_git(
             "clone", "--filter=blob:none", "--no-checkout", "--quiet",
             f"--shallow-since={since_date}", _clone_url(settings, full), tmp,
         )
         if code != 0:
-            # shallow-since sin commits o repo inaccesible: nada que reportar.
-            return [], None
-        code, log_out = await _run_git(
+            # Repo inaccesible, rate limit, timeout (124)… NO es "sin commits":
+            # se señaliza para no avanzar watermark/last_scanned_at.
+            log.warning("github.git_clone_failed", repo=full, rc=code,
+                        stderr=err.strip()[:300])
+            raise GitScanError(f"git clone {full} rc={code}: {err.strip()[:200]}")
+        code, log_out, err = await _run_git(
             "-C", tmp, "log", f"--since={since_date}", f"--pretty=format:{_LOG_FMT}",
         )
         if code != 0:
-            return [], None
+            log.warning("github.git_log_failed", repo=full, rc=code,
+                        stderr=err.strip()[:300])
+            raise GitScanError(f"git log {full} rc={code}: {err.strip()[:200]}")
         _write_gitlog_cache(settings, full, log_out)  # caché comprimido para re-extraer
         return _mentions_from_log(full, log_out, synthesize)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-async def scan_single_repo(client: httpx.AsyncClient, full: str, *, months: int,
-                           synthesize: bool = False) -> list[FetchedMention]:
-    """Escanea UN repo concreto (nuclei-templates, metasploit…) vía clon blobless.
-    `client` se ignora (se usa git). `synthesize=False`: solo commits con CVE."""
+async def scan_single_repo(full: str, *, months: int,
+                           synthesize: bool = False,
+                           ) -> tuple[list[FetchedMention], tuple[str, str | None]]:
+    """Escanea UN repo concreto (nuclei-templates, metasploit…) vía clon blobless
+    con watermark persistente: el repo se registra en `github_repos` con
+    origin='manual' (dedup por full_name) y se escanea solo desde su watermark
+    (fallback: ventana de `months`). Devuelve (menciones, (full, nuevo_watermark))
+    para que el llamador aplique `update_scan` en `finalize()` SOLO tras
+    persistir las menciones. `synthesize=False`: solo commits con CVE."""
+    from app.core.db import session_scope
+    from app.sources.repo_registry import get_watermark, upsert_repos
+
     settings = get_settings()
-    cutoff = datetime.now(UTC) - timedelta(days=30 * months)
-    mentions, _ = await _git_scan(settings, full, cutoff.strftime("%Y-%m-%d"),
-                                  synthesize=synthesize)
-    return mentions
+    with session_scope() as session:
+        upsert_repos(session, {full: {"origin": "manual"}})
+        watermark = get_watermark(session, full)
+    cutoff = (datetime.now(UTC) - timedelta(days=30 * months)).strftime("%Y-%m-%d")
+    since = max(cutoff, (watermark or "")[:10]) or cutoff
+    mentions, newest = await _git_scan(settings, full, since, synthesize=synthesize)
+    return mentions, (full, newest)
+
+
+class SingleRepoCommitSource(BaseSource):
+    """Base para fuentes que vigilan UN repo fijo (metasploit, nuclei-templates)
+    con watermark persistente en `github_repos` (origin='manual'). El watermark
+    solo avanza en `finalize()`, tras persistir las menciones."""
+
+    repo_full_name = ""       # owner/repo (lo fija la subclase)
+    method = "git"
+
+    def __init__(self) -> None:
+        self._pending_scan: tuple[str, str | None] | None = None
+
+    async def fetch(self, ctx: FetchContext) -> list[FetchedMention]:
+        months = get_settings().github_commits_months
+        mentions, self._pending_scan = await scan_single_repo(
+            self.repo_full_name, months=months, synthesize=False)
+        return mentions
+
+    def finalize(self) -> None:
+        if self._pending_scan is None:
+            return
+        from app.core.db import session_scope
+        from app.sources.repo_registry import update_scan
+
+        full, newest = self._pending_scan
+        with session_scope() as session:
+            update_scan(session, full, newest)
+        self._pending_scan = None
 
 
 @register
@@ -226,6 +322,12 @@ class GitHubCommitsSource(BaseSource):
     tier = 4
     cadence_seconds = 3600
 
+    def __init__(self) -> None:
+        # (full_name, watermark) escaneados con éxito, pendientes de update_scan.
+        # Se aplican en finalize(): si el proceso muere antes de persistir las
+        # menciones, el lote se re-escanea (idempotente por content_hash).
+        self._pending_scans: list[tuple[str, str | None]] = []
+
     async def fetch(self, ctx: FetchContext) -> list[FetchedMention]:
         settings = get_settings()
         from app.core.db import session_scope
@@ -234,7 +336,6 @@ class GitHubCommitsSource(BaseSource):
             harvest_top_n,
             next_batch,
             registry_count,
-            update_scan,
         )
 
         # Si el registro está vacío, cosecha base: top-N (estrellas) + referencias
@@ -257,19 +358,36 @@ class GitHubCommitsSource(BaseSource):
 
         synthesize = settings.github_synthesize_candidates
         out: list[FetchedMention] = []
-        scanned: list[tuple[str, str | None]] = []
+        self._pending_scans = []
+        failed = 0
         for full, watermark in batch:
             since_date = max(cutoff_date, (watermark or "")[:10]) or cutoff_date
-            newest = None
             try:
                 mentions, newest = await _git_scan(settings, full, since_date, synthesize)
                 out.extend(mentions)
             except Exception as exc:  # noqa: BLE001 - un repo no tumba el lote
+                # Fallo de git (o parseo): NO se marca como escaneado -> el repo
+                # conserva watermark/last_scanned_at y se reintenta en otro lote.
                 log.warning("github.repo_error", repo=full, error=str(exc))
-            scanned.append((full, newest))
-        # Marca TODO el lote como escaneado (aunque un repo diera 0/None) -> rota.
-        with session_scope() as session:
-            for full, newest in scanned:
-                update_scan(session, full, newest)
-        log.info("github.batch_done", repos=len(batch), mentions=len(out))
+                failed += 1
+                continue
+            # Escaneo OK (aunque diera 0 menciones): pendiente de update_scan,
+            # que finalize() aplica tras persistirse las menciones -> rota.
+            self._pending_scans.append((full, newest))
+        log.info("github.batch_done", repos=len(batch), failed=failed, mentions=len(out))
         return out
+
+    def finalize(self) -> None:
+        """Avanza watermarks/last_scanned_at SOLO tras persistir el lote (lo
+        invoca el runner). Si el fetch no llegó a persistirse, no corre y el
+        siguiente fetch re-escanea los mismos repos (idempotente)."""
+        if not self._pending_scans:
+            return
+        from app.core.db import session_scope
+        from app.sources.repo_registry import update_scan
+
+        with session_scope() as session:
+            for full, newest in self._pending_scans:
+                update_scan(session, full, newest)
+        log.info("github.scan_marks_applied", repos=len(self._pending_scans))
+        self._pending_scans = []

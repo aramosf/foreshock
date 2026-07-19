@@ -23,12 +23,16 @@ from dateutil.parser import isoparse
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
+from app.baseline.state import read_cursor, write_cursor
 from app.core.config import get_settings
 from app.core.db import session_scope
 from app.core.logging import get_logger
 from app.core.models import PublishedCVE
 
 log = get_logger(__name__)
+
+_SYNC_ID = "cvelist"  # fila de sync_state con el SHA del último HEAD PROCESADO
+_COMMIT_EVERY = 2000  # ficheros por transacción en procesados masivos
 
 
 def _parse_dt(value: str | None) -> datetime | None:
@@ -118,14 +122,29 @@ def _clone(repo_dir: str, repo_url: str) -> None:
     _run_git(["clone", "--depth", "1", repo_url, repo_dir])
 
 
-def _changed_json_files(repo_dir: str) -> list[str]:
-    """Lista los JSON cambiados entre la revisión previa y la actual del pull."""
-    proc = _run_git(["diff", "--name-only", "HEAD@{1}", "HEAD"], cwd=repo_dir)
+def _head_sha(repo_dir: str) -> str:
+    """SHA del HEAD actual del clon."""
+    return _run_git(["rev-parse", "HEAD"], cwd=repo_dir).stdout.strip()
+
+
+def _filter_cve_json(lines: list[str]) -> list[str]:
+    """Filtra las rutas a los JSON de registros CVE (cves/**/*.json)."""
     return [
         line.strip()
-        for line in proc.stdout.splitlines()
+        for line in lines
         if line.strip().endswith(".json") and line.strip().startswith("cves/")
     ]
+
+
+def _changed_json_files(repo_dir: str, base: str = "HEAD@{1}") -> list[str]:
+    """Lista los JSON cambiados entre ``base`` y el HEAD actual.
+
+    ``base`` es el SHA del último HEAD PROCESADO con éxito (cursor de
+    sync_state); con el fallback histórico ``HEAD@{1}`` una pasada fallida
+    perdía para siempre sus ficheros, porque el pull ya había movido el reflog.
+    """
+    proc = _run_git(["diff", "--name-only", base, "HEAD"], cwd=repo_dir)
+    return _filter_cve_json(proc.stdout.splitlines())
 
 
 def _all_json_files(repo_dir: str) -> list[str]:
@@ -140,29 +159,58 @@ def _all_json_files(repo_dir: str) -> list[str]:
     ]
 
 
+def _strip_nul(obj: Any) -> Any:
+    """Elimina recursivamente ``\\u0000`` de los strings de un JSON.
+
+    Postgres rechaza NUL dentro de JSONB (``unsupported Unicode escape
+    sequence``); algunos registros de cvelist lo traen en descripciones. Se
+    sanea ANTES del upsert para que la fila no envenene la transacción.
+    """
+    if isinstance(obj, str):
+        return obj.replace("\u0000", "")
+    if isinstance(obj, dict):
+        return {_strip_nul(k): _strip_nul(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_strip_nul(v) for v in obj]
+    return obj
+
+
 def _process_files(repo_dir: str, rel_paths: list[str]) -> dict[str, int]:
-    """Parsea y hace upsert de la lista de ficheros JSON dada. Idempotente."""
+    """Parsea y hace upsert de la lista de ficheros JSON dada. Idempotente.
+
+    - Savepoint (``begin_nested``) por fichero: una fila mala (JSON inválido
+      para Postgres, etc.) se revierte sola y NO envenena la transacción del
+      resto del lote (mismo patrón que nvd.py).
+    - Lotes con commit periódico (``_COMMIT_EVERY``): el procesado masivo
+      inicial (~270k ficheros) no acumula una única transacción gigante.
+    """
     root = Path(repo_dir)
     stats = {"files": 0, "upserted": 0, "skipped": 0, "errors": 0}
-    with session_scope() as session:
-        for rel in rel_paths:
-            path = root / rel
-            if not path.is_file():
-                # Fichero borrado en el delta: no hay nada que insertar.
-                stats["skipped"] += 1
-                continue
-            stats["files"] += 1
-            try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
-                record = parse_cve_record(raw)
-                if not record.get("id"):
+    for i in range(0, len(rel_paths), _COMMIT_EVERY):
+        batch = rel_paths[i : i + _COMMIT_EVERY]
+        with session_scope() as session:
+            for rel in batch:
+                path = root / rel
+                if not path.is_file():
+                    # Fichero borrado en el delta: no hay nada que insertar.
                     stats["skipped"] += 1
                     continue
-                upsert_published(session, record)
-                stats["upserted"] += 1
-            except Exception as exc:  # noqa: BLE001 - un JSON malo no tumba el sync
-                stats["errors"] += 1
-                log.warning("cvelist.parse_error", path=rel, error=str(exc))
+                stats["files"] += 1
+                try:
+                    raw = _strip_nul(json.loads(path.read_text(encoding="utf-8")))
+                    record = parse_cve_record(raw)
+                    if not record.get("id"):
+                        stats["skipped"] += 1
+                        continue
+                    with session.begin_nested():
+                        upsert_published(session, record)
+                    stats["upserted"] += 1
+                except Exception as exc:  # noqa: BLE001 - un JSON malo no tumba el sync
+                    stats["errors"] += 1
+                    log.warning("cvelist.parse_error", path=rel, error=str(exc))
+        if len(rel_paths) > _COMMIT_EVERY:
+            log.info("cvelist.progress", done=min(i + _COMMIT_EVERY, len(rel_paths)),
+                     total=len(rel_paths))
     return stats
 
 
@@ -171,8 +219,14 @@ def sync_cvelist(force_full: bool = False) -> dict[str, int]:
 
     - Si el directorio no existe: ``git clone --depth 1`` y se procesan TODOS
       los JSON del árbol.
-    - Si existe: ``git pull`` y se procesan solo los JSON cambiados (delta),
-      salvo que ``force_full`` fuerce el reprocesado completo.
+    - Si existe: ``git pull`` y se procesan los JSON cambiados desde el ÚLTIMO
+      HEAD PROCESADO con éxito (cursor 'cvelist' en ``sync_state``), salvo que
+      ``force_full`` fuerce el reprocesado completo. El cursor se guarda SOLO
+      tras completar el procesado: una pasada fallida se recupera en la
+      siguiente ejecución en lugar de perder sus ficheros (el ``git pull``
+      mueve el reflog antes de procesar, así que ``HEAD@{1}`` no servía).
+    - Primera ejecución sin cursor sobre un clon existente: delta por reflog
+      (comportamiento histórico) con fallback a full.
 
     Devuelve un dict de métricas (ficheros procesados, upserts, saltados,
     errores). Idempotente: reejecutar no duplica filas.
@@ -191,13 +245,26 @@ def sync_cvelist(force_full: bool = False) -> dict[str, int]:
         if force_full:
             rel_paths = _all_json_files(repo_dir)
         else:
-            try:
-                rel_paths = _changed_json_files(repo_dir)
-            except subprocess.CalledProcessError:
-                # Sin revisión previa (p.ej. primer pull tras clone manual).
-                rel_paths = _all_json_files(repo_dir)
+            cursor = read_cursor(_SYNC_ID)
+            if cursor:
+                try:
+                    rel_paths = _changed_json_files(repo_dir, base=cursor)
+                except subprocess.CalledProcessError:
+                    # El SHA guardado ya no existe (re-clon, gc del shallow...):
+                    # reprocesado completo para no dejar huecos.
+                    log.warning("cvelist.cursor_lost", cursor=cursor)
+                    rel_paths = _all_json_files(repo_dir)
+            else:
+                try:
+                    # Sin cursor todavía: delta por reflog (comportamiento previo).
+                    rel_paths = _changed_json_files(repo_dir)
+                except subprocess.CalledProcessError:
+                    # Sin revisión previa (p.ej. primer pull tras clone manual).
+                    rel_paths = _all_json_files(repo_dir)
 
     stats = _process_files(repo_dir, rel_paths)
+    # Procesado completado: confirmar el HEAD como último punto procesado.
+    write_cursor(_SYNC_ID, _head_sha(repo_dir))
     log.info(
         "cvelist.sync",
         fresh_clone=fresh_clone,

@@ -13,8 +13,8 @@ from typing import Any
 
 from app.core.logging import get_logger
 from app.baseline.cvelist import sync_cvelist
-from app.baseline.epss import sync_epss
-from app.baseline.nvd import sync_nvd_delta
+from app.baseline.epss import sync_epss, tracked_cve_ids
+from app.baseline.nvd import reconcile_kpi, sync_nvd_delta
 
 log = get_logger(__name__)
 
@@ -42,9 +42,15 @@ async def run_baseline_async(
     except Exception as exc:  # noqa: BLE001
         log.error("baseline.nvd_error", error=str(exc))
         results["nvd"] = {"error": str(exc)}
+        # El delta falló a medias: reconcilia el KPI con lo que sí se ingirió
+        # (en éxito lo hace el propio sync_nvd_delta -> stats["reconciled"]).
+        results["reconciled"] = await asyncio.to_thread(reconcile_kpi)
 
     try:
-        results["epss"] = await sync_epss()
+        # EPSS de los CVEs QUE EL RADAR SIGUE (histórico del KPI) + top global.
+        cve_ids = await asyncio.to_thread(tracked_cve_ids)
+        results["epss"] = await sync_epss(cve_ids=cve_ids) if cve_ids else {}
+        results["epss_top"] = await sync_epss()
     except Exception as exc:  # noqa: BLE001
         log.error("baseline.epss_error", error=str(exc))
         results["epss"] = {"error": str(exc)}

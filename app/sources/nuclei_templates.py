@@ -1,27 +1,22 @@
 """Tier 3 — ProjectDiscovery nuclei-templates (changelog del repo).
 
 Un template nuevo para un CVE suele acompañar o preceder la explotación masiva.
-Escanea los commits del repo (últimos N meses) que citan un CVE.
+Escanea los commits del repo que citan un CVE con watermark persistente en
+`github_repos` (origin='manual'): cada ejecución solo mira los commits nuevos,
+no re-escanea la ventana completa.
 """
 
 from __future__ import annotations
 
-from app.core.config import get_settings
-from app.sources.base import BaseSource, FetchContext, register
-from app.sources.github_commits import scan_single_repo
-from app.ingest.service import FetchedMention
-
-REPO = "projectdiscovery/nuclei-templates"
+from app.sources.base import register
+from app.sources.github_commits import SingleRepoCommitSource
 
 
 @register
-class NucleiTemplatesSource(BaseSource):
+class NucleiTemplatesSource(SingleRepoCommitSource):
     name = "nuclei_templates"
     kind = "nuclei-templates repo commit scan"
-    method = "api"
+    method = "git"
     tier = 3
     cadence_seconds = 3600
-
-    async def fetch(self, ctx: FetchContext) -> list[FetchedMention]:
-        months = get_settings().github_commits_months
-        return await scan_single_repo(ctx.http, REPO, months=months, synthesize=False)
+    repo_full_name = "projectdiscovery/nuclei-templates"

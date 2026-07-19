@@ -4,6 +4,7 @@ y comprobación de robots.txt (cacheada). Usar desde fetchers scrape/api.
 
 from __future__ import annotations
 
+import time
 import urllib.robotparser
 from urllib.parse import urlsplit
 
@@ -32,7 +33,10 @@ def _is_transient(exc: BaseException) -> bool:
         return code == 429 or code >= 500
     return False
 
-_robots_cache: dict[str, urllib.robotparser.RobotFileParser] = {}
+# Caché de robots.txt por host con TTL: un robots.txt puede cambiar, así que se
+# refresca pasado _ROBOTS_TTL_SECONDS (el proceso es de larga vida).
+_ROBOTS_TTL_SECONDS = 86400  # 24 h
+_robots_cache: dict[str, tuple[float, urllib.robotparser.RobotFileParser]] = {}
 
 
 def make_client() -> httpx.AsyncClient:
@@ -50,15 +54,17 @@ async def allowed_by_robots(client: httpx.AsyncClient, url: str) -> bool:
         return True
     parts = urlsplit(url)
     root = f"{parts.scheme}://{parts.netloc}"
-    rp = _robots_cache.get(root)
-    if rp is None:
+    cached = _robots_cache.get(root)
+    if cached is None or (time.monotonic() - cached[0]) > _ROBOTS_TTL_SECONDS:
         rp = urllib.robotparser.RobotFileParser()
         try:
             resp = await client.get(f"{root}/robots.txt")
             rp.parse(resp.text.splitlines() if resp.status_code == 200 else [])
         except Exception:  # noqa: BLE001 - sin robots accesible => permitir
             rp.parse([])
-        _robots_cache[root] = rp
+        _robots_cache[root] = (time.monotonic(), rp)
+    else:
+        rp = cached[1]
     return rp.can_fetch(settings.user_agent, url)
 
 
@@ -68,9 +74,19 @@ async def allowed_by_robots(client: httpx.AsyncClient, url: str) -> bool:
     wait=wait_exponential(multiplier=1, min=1, max=20),
     retry=retry_if_exception(_is_transient),
 )
-async def get(client: httpx.AsyncClient, url: str, **kwargs: object) -> httpx.Response:
-    """GET con retries exponenciales; respeta robots.txt para scraping."""
-    if not await allowed_by_robots(client, url):
+async def get(client: httpx.AsyncClient, url: str, *,
+              respect_robots: bool = True, **kwargs: object) -> httpx.Response:
+    """GET con retries exponenciales y archivado del crudo.
+
+    `respect_robots`: robots.txt es un protocolo para CRAWLERS que descubren
+    URLs; no aplica a clientes que consumen una API JSON o un feed que el
+    propio servicio ofrece para ese fin (api.github.com, CISA KEV, VulnCheck,
+    Red Hat Hydra, OSV...). Esas fuentes deben pasar `respect_robots=False`:
+    muchos de esos hosts sirven un robots.txt restrictivo pensado para
+    buscadores que, de aplicarse, rompería el consumo legítimo de la API.
+    Para scraping de HTML (method="scrape") se deja el valor por defecto True.
+    """
+    if respect_robots and not await allowed_by_robots(client, url):
         raise PermissionError(f"robots.txt prohíbe {url}")
     resp = await client.get(url, **kwargs)  # type: ignore[arg-type]
     resp.raise_for_status()

@@ -36,15 +36,26 @@ _status() {
   echo "Progreso re-ingest (si lo hay): $COMPOSE run --rm sources-worker tail -f /data/reingest.log"
 }
 
-case "${1:-}" in
-  --status)
-    _status; exit 0 ;;
-  --stop-workers)
-    echo ">> Pausando schedulers (baseline-worker, sources-worker)…"
-    $COMPOSE stop sources-worker baseline-worker
-    echo ">> Hecho. api/postgres/redis siguen arriba."
-    exit 0 ;;
-esac
+# Procesa TODOS los argumentos (antes solo se miraba $1 y combinaciones como
+# `--build --full-load` ignoraban el segundo flag).
+BUILD=0
+FULL_LOAD=0
+for arg in "$@"; do
+  case "$arg" in
+    --status)
+      _status; exit 0 ;;
+    --stop-workers)
+      echo ">> Pausando schedulers (baseline-worker, sources-worker)…"
+      $COMPOSE stop sources-worker baseline-worker
+      echo ">> Hecho. api/postgres/redis siguen arriba."
+      exit 0 ;;
+    --build) BUILD=1 ;;
+    --full-load) FULL_LOAD=1 ;;
+    *)
+      echo "opción desconocida: $arg (ver cabecera de este script)" >&2
+      exit 1 ;;
+  esac
+done
 
 # .env (avisos no bloqueantes).
 if [ ! -f .env ]; then
@@ -52,7 +63,7 @@ if [ ! -f .env ]; then
 fi
 
 # Reconstruir imágenes si se pide.
-if [ "${1:-}" = "--build" ]; then
+if [ "$BUILD" = 1 ]; then
   echo ">> Reconstruyendo imágenes…"
   $COMPOSE build
 fi
@@ -61,7 +72,7 @@ echo ">> Levantando el sistema (migraciones -> workers -> api)…"
 $COMPOSE up -d          # migrate corre primero; workers/api esperan a que acabe
 
 # Carga inicial completa (primera vez): baseline full + re-ingest histórico.
-if [ "${1:-}" = "--full-load" ]; then
+if [ "$FULL_LOAD" = 1 ]; then
   echo ">> Carga inicial COMPLETA solicitada."
   echo ">> 1) Pausando schedulers para no mezclar ingestas…"
   $COMPOSE stop sources-worker baseline-worker
@@ -72,10 +83,18 @@ if [ "${1:-}" = "--full-load" ]; then
 
   echo ">> 3) Re-ingest histórico de la capa radar (en background)…"
   echo ">>    (trunca la capa radar y re-ingiere todo; baseline intacto)"
+  # Tablas de la capa radar (validadas contra migrations/versions/): NO incluye
+  # el baseline (published_cves, epss_scores, cve_*) ni el catálogo
+  # (product_catalog, product_aliases) ni el registro de repos (github_repos).
   $COMPOSE exec -T postgres psql -U foreshock -d foreshock -c \
     "TRUNCATE candidates, candidate_links, identifiers, mentions, cvss_scores, \
      affected_products, affected_version_ranges, cve_soft_references \
      RESTART IDENTITY CASCADE;"
+  # Resetea los watermarks del registro de repos: si sobreviven al TRUNCATE,
+  # github_commits salta los commits históricos ya "vistos" y NUNCA se
+  # re-ingieren (el registro se conserva; solo se olvida hasta dónde escaneó).
+  $COMPOSE exec -T postgres psql -U foreshock -d foreshock -c \
+    "UPDATE github_repos SET watermark = NULL, last_scanned_at = NULL;"
   CID=$($COMPOSE run --rm -d -v "$(pwd)/scripts:/app/scripts" \
         sources-worker bash /app/scripts/reingest_full.sh | tail -1)
   echo ">>    re-ingest lanzado: $CID"

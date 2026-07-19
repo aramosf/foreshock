@@ -78,6 +78,24 @@ class PublishedCVE(SQLModel, table=True):
     enriched_at: datetime | None = Field(default=None, sa_column=_ts())
 
 
+class SyncState(SQLModel, table=True):
+    """Watermark persistente de los deltas baseline (0011). Una fila por fuente
+    (`id` = 'nvd_delta', 'cvelist', ...). `cursor` guarda el último punto
+    CONFIRMADO (fecha ISO, SHA de git...) y solo se escribe tras completar una
+    pasada con éxito, para que un run fallido no pierda datos."""
+
+    __tablename__ = "sync_state"
+
+    id: str = Field(sa_column=SAColumn(Text, primary_key=True))
+    cursor: str | None = Field(default=None, sa_column=SAColumn(Text))
+    extra: dict | None = Field(default=None, sa_column=SAColumn(JSONB))
+    updated_at: datetime | None = Field(
+        default=None,
+        sa_column=SAColumn(TIMESTAMP(timezone=True), nullable=False,
+                           server_default=text("now()")),
+    )
+
+
 class Source(SQLModel, table=True):
     __tablename__ = "sources"
 

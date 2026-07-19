@@ -10,9 +10,10 @@ from __future__ import annotations
 import uuid
 
 from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from app.core.models import AffectedProduct, Candidate, CVSSScore, Identifier
+from app.core.models import AffectedProduct, Candidate, CveSoftReference, CVSSScore, Identifier
 from app.core.models import Mention as MentionRow
 from app.ingest.identifiers import ExtractedId, primary_cve
 
@@ -92,6 +93,14 @@ def merge_candidates(session: Session, winner: Candidate, loser: Candidate) -> N
                 loser_row.candidate_id = winner.id
     session.flush()
 
+    # Referencias blandas: el contexto de drill-down debe apuntar al ganador vivo,
+    # no al tombstone.
+    session.execute(
+        update(CveSoftReference)
+        .where(CveSoftReference.from_candidate_id == loser.id)
+        .values(from_candidate_id=winner.id)
+    )
+
     # candidate_links no se reasignan: su UNIQUE canónico (a<b) haría colisiones y son
     # sugerencias reversibles; quedan referidas al tombstone (limpieza futura).
     session.execute(
@@ -101,7 +110,37 @@ def merge_candidates(session: Session, winner: Candidate, loser: Candidate) -> N
     )
     if winner.cve_id is None and loser.cve_id is not None:
         winner.cve_id = loser.cve_id
+    _absorb_scalar_state(winner, loser)
     session.flush()
+
+
+# Campos del candidate que se absorben del loser en una fusión. Política:
+# el ganador conserva lo suyo; lo que tenga a None se rellena desde el loser
+# (el dato se ganó con una mención real y no debe quedar enterrado en el
+# tombstone). Booleanos "pegajosos" (in_kev, has_public_poc): True gana.
+# Listas: unión preservando orden.
+_ABSORB_FILL = (
+    "kev_date", "kev_source", "withdrawn", "severity_hint", "vuln_type",
+    "attack_vector", "requires_auth", "requires_interaction",
+    "affected_product", "affected_versions", "enrichment_confidence",
+    "enrichment_method", "enrichment_updated_at",
+)
+_ABSORB_STICKY_TRUE = ("in_kev", "has_public_poc")
+_ABSORB_UNION = ("cwe_ids", "reference_urls", "poc_urls")
+
+
+def _absorb_scalar_state(winner: Candidate, loser: Candidate) -> None:
+    for attr in _ABSORB_FILL:
+        if getattr(winner, attr) is None and getattr(loser, attr) is not None:
+            setattr(winner, attr, getattr(loser, attr))
+    for attr in _ABSORB_STICKY_TRUE:
+        if getattr(loser, attr) is True:
+            setattr(winner, attr, True)
+    for attr in _ABSORB_UNION:
+        mine, theirs = getattr(winner, attr) or [], getattr(loser, attr) or []
+        if theirs:
+            merged = list(dict.fromkeys([*mine, *theirs]))
+            setattr(winner, attr, merged)
 
 
 def resolve_candidate(session: Session, ids: list[ExtractedId]) -> Candidate:
@@ -130,18 +169,27 @@ def resolve_candidate(session: Session, ids: list[ExtractedId]) -> Candidate:
             if other.id != candidate.id:
                 merge_candidates(session, candidate, other)
 
-    # Adjunta identificadores nuevos y fija cve_id si aparece.
+    # Adjunta identificadores nuevos y fija cve_id si aparece. ON CONFLICT DO
+    # NOTHING sobre el UNIQUE global (scheme, value): si otro proceso insertó el
+    # mismo identifier entre nuestro SELECT y este INSERT, no reventamos el
+    # savepoint de la mención entera (perderíamos la primera observación).
     existing = {
         (i.scheme, i.value)
         for i in session.execute(
             select(Identifier).where(Identifier.candidate_id == candidate.id)
         ).scalars()
     }
-    for eid in ids:
-        if (eid.scheme, eid.value) not in existing:
-            session.add(
-                Identifier(candidate_id=candidate.id, scheme=eid.scheme, value=eid.value)
-            )
+    new_rows = [
+        {"candidate_id": candidate.id, "scheme": eid.scheme, "value": eid.value}
+        for eid in ids
+        if (eid.scheme, eid.value) not in existing
+    ]
+    if new_rows:
+        session.execute(
+            pg_insert(Identifier.__table__)
+            .values(new_rows)
+            .on_conflict_do_nothing(constraint="uq_identifiers_scheme_value")
+        )
     cve = primary_cve(ids)
     if cve and candidate.cve_id is None:
         candidate.cve_id = cve

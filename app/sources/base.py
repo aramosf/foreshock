@@ -10,6 +10,7 @@ Métodos declarados en `method`:
   rss      -> feed RSS/Atom (feedparser)
   scrape   -> HTML estático (httpx + selectolax)
   browser  -> requiere JS -> BrowserPool (Playwright, dependencia opcional)
+  git      -> clon parcial + git log local (github_commits, metasploit, nuclei)
 """
 
 from __future__ import annotations
@@ -60,7 +61,7 @@ class BaseSource(abc.ABC):
 
     name: str = ""            # identificador único (== sources.name)
     kind: str = ""            # descripción legible del origen
-    method: str = "api"       # api | rss | scrape | browser
+    method: str = "api"       # api | rss | scrape | browser | git
     tier: int = 5             # 1..5 (prioridad de señal temprana)
     cadence_seconds: int = 3600
 
@@ -68,6 +69,13 @@ class BaseSource(abc.ABC):
     async def fetch(self, ctx: FetchContext) -> list[FetchedMention]:
         """Obtiene menciones nuevas. Idempotencia la garantiza la ingesta."""
         raise NotImplementedError
+
+    def finalize(self) -> None:
+        """Hook opcional que el runner invoca SOLO tras persistir con éxito el
+        lote de menciones. Para efectos que no deben adelantarse a la ingesta
+        (p.ej. avanzar watermarks): si el proceso muere antes de persistir, el
+        hook no corre y el siguiente fetch re-escanea (idempotente por
+        content_hash). Por defecto no hace nada."""
 
     def seed_row(self) -> dict[str, object]:
         """Fila para la tabla `sources` (usada por el seeding/registro)."""
@@ -88,7 +96,9 @@ def load_all() -> dict[str, type[BaseSource]]:
     import app.sources as pkg
 
     for mod in pkgutil.iter_modules(pkg.__path__):
-        if mod.name in {"base", "browser", "runner", "robots"}:
+        # Módulos de infraestructura sin fetchers. __main__ es el entrypoint
+        # del worker: importarlo aquí lo re-ejecutaría como módulo normal.
+        if mod.name in {"base", "browser", "runner", "__main__"}:
             continue
         importlib.import_module(f"app.sources.{mod.name}")
     return REGISTRY

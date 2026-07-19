@@ -22,6 +22,7 @@ from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
+from app.baseline.state import read_cursor, write_cursor
 from app.core.config import get_settings
 from app.core.db import session_scope
 from app.core.logging import get_logger
@@ -32,6 +33,9 @@ log = get_logger(__name__)
 
 _PAGE_SIZE = 2000
 _RATE_LIMIT_SLEEP = 6.0  # seg entre páginas sin api key (límite público NVD)
+_SYNC_ID = "nvd_delta"  # fila de sync_state con la última lastModEndDate confirmada
+_OVERLAP = timedelta(minutes=15)  # solape defensivo al reanudar desde el cursor
+_MAX_WINDOW = timedelta(days=120)  # la API NVD limita el rango lastMod a 120 días
 
 
 def _parse_dt(value: str | None) -> datetime | None:
@@ -113,8 +117,101 @@ def _iso_z(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
+def _window_chunks(start: datetime, end: datetime,
+                   max_span: timedelta = _MAX_WINDOW) -> list[tuple[datetime, datetime]]:
+    """Trocea [start, end] en subventanas de como mucho ``max_span``.
+
+    La API NVD 2.0 rechaza rangos lastMod mayores de 120 días, así que un
+    worker parado mucho tiempo debe recuperar su hueco en varios tramos.
+    Función pura y testeable. Devuelve [] si start >= end.
+    """
+    chunks: list[tuple[datetime, datetime]] = []
+    cur = start
+    while cur < end:
+        nxt = min(cur + max_span, end)
+        chunks.append((cur, nxt))
+        cur = nxt
+    return chunks
+
+
+def reconcile_kpi() -> int:
+    """Recalcula days_ahead/promoción de candidates tras un sync de NVD.
+
+    Delegado en ``app.ingest.service.reconcile_pending_days_ahead``; se ejecuta
+    en su propia transacción para no mezclarse con la ingesta. Devuelve cuántos
+    candidates se actualizaron (y lo loguea). Nunca propaga la excepción: el
+    sync que acaba de completarse no debe marcarse como fallido por esto.
+    """
+    from app.ingest.service import reconcile_pending_days_ahead
+
+    try:
+        with session_scope() as session:
+            updated = reconcile_pending_days_ahead(session)
+        log.info("nvd.kpi_reconciled", candidates_updated=updated)
+        return updated
+    except Exception as exc:  # noqa: BLE001 - no tumbar el sync ya completado
+        log.error("nvd.kpi_reconcile_error", error=str(exc))
+        return 0
+
+
+async def _fetch_window(client, headers: dict[str, str], start: datetime,
+                        end: datetime, observed_at: datetime,
+                        stats: dict[str, int]) -> None:
+    """Pagina e ingiere una ventana [start, end] de lastModStart/EndDate."""
+    settings = get_settings()
+    start_index = 0
+    total_results: int | None = None
+
+    while True:
+        params = {
+            "lastModStartDate": _iso_z(start),
+            "lastModEndDate": _iso_z(end),
+            "resultsPerPage": _PAGE_SIZE,
+            "startIndex": start_index,
+        }
+        resp = await get(client, settings.nvd_api_base, params=params, headers=headers)
+        data = resp.json()
+        vulns = data.get("vulnerabilities") or []
+        total_results = data.get("totalResults", total_results)
+        stats["pages"] += 1
+
+        with session_scope() as session:
+            for vuln in vulns:
+                stats["fetched"] += 1
+                # Aislamiento por fila: un registro corrupto (fecha mal formada,
+                # etc.) NO debe abortar la página ni el resto del delta.
+                try:
+                    record = parse_nvd_vuln(vuln)
+                    if not record.get("id"):
+                        stats["skipped"] += 1
+                        continue
+                    with session.begin_nested():
+                        upsert_nvd(session, record, observed_at)
+                    stats["upserted"] += 1
+                except Exception as exc:  # noqa: BLE001
+                    stats["skipped"] += 1
+                    log.warning("nvd.row_error", error=str(exc))
+
+        page_size = data.get("resultsPerPage") or len(vulns)
+        start_index += page_size
+        if not vulns or (total_results is not None and start_index >= total_results):
+            break
+
+        # Respeta el rate limit público (sin api key) entre páginas.
+        if not settings.nvd_api_key:
+            await asyncio.sleep(_RATE_LIMIT_SLEEP)
+
+
 async def sync_nvd_delta(hours: int = 3) -> dict[str, int]:
-    """Ingesta el delta de NVD 2.0 de las últimas ``hours`` horas.
+    """Ingesta el delta de NVD 2.0 desde el último punto CONFIRMADO.
+
+    El watermark vive en ``sync_state`` (id 'nvd_delta'): la última
+    ``lastModEndDate`` completada con éxito. La ventana es
+    [cursor - 15 min de solape, now]; sin cursor (primera ejecución) se
+    inicializa a now - ``hours`` (comportamiento histórico). Así un run fallido
+    o un worker parado NO pierde CVEs: el siguiente run recupera el hueco.
+    Como la API limita el rango a 120 días, la ventana se trocea y el cursor
+    avanza SOLO tras completar cada tramo con éxito.
 
     Pagina con ``resultsPerPage``/``startIndex`` (máx 2000). Envía la cabecera
     ``apiKey`` si está configurada; en su ausencia respeta el rate limit público
@@ -122,58 +219,32 @@ async def sync_nvd_delta(hours: int = 3) -> dict[str, int]:
     """
     settings = get_settings()
     end = datetime.now(UTC)
-    start = end - timedelta(hours=hours)
     observed_at = end
+
+    cursor = read_cursor(_SYNC_ID)
+    if cursor:
+        start = isoparse(cursor) - _OVERLAP
+    else:
+        start = end - timedelta(hours=hours)
 
     headers: dict[str, str] = {}
     if settings.nvd_api_key:
         headers["apiKey"] = settings.nvd_api_key
 
     stats = {"pages": 0, "fetched": 0, "upserted": 0, "skipped": 0}
-    start_index = 0
-    total_results: int | None = None
+    chunks = _window_chunks(start, end)
 
     async with make_client() as client:
-        while True:
-            params = {
-                "lastModStartDate": _iso_z(start),
-                "lastModEndDate": _iso_z(end),
-                "resultsPerPage": _PAGE_SIZE,
-                "startIndex": start_index,
-            }
-            resp = await get(client, settings.nvd_api_base, params=params, headers=headers)
-            data = resp.json()
-            vulns = data.get("vulnerabilities") or []
-            total_results = data.get("totalResults", total_results)
-            stats["pages"] += 1
+        for chunk_start, chunk_end in chunks:
+            await _fetch_window(client, headers, chunk_start, chunk_end,
+                                observed_at, stats)
+            # Tramo completado con éxito: confirmar el watermark. Si un tramo
+            # posterior falla, se reanuda desde aquí (con solape) sin perder nada.
+            write_cursor(_SYNC_ID, chunk_end.isoformat())
 
-            with session_scope() as session:
-                for vuln in vulns:
-                    stats["fetched"] += 1
-                    # Aislamiento por fila: un registro corrupto (fecha mal formada,
-                    # etc.) NO debe abortar la página ni el resto del delta.
-                    try:
-                        record = parse_nvd_vuln(vuln)
-                        if not record.get("id"):
-                            stats["skipped"] += 1
-                            continue
-                        with session.begin_nested():
-                            upsert_nvd(session, record, observed_at)
-                        stats["upserted"] += 1
-                    except Exception as exc:  # noqa: BLE001
-                        stats["skipped"] += 1
-                        log.warning("nvd.row_error", error=str(exc))
-
-            page_size = data.get("resultsPerPage") or len(vulns)
-            start_index += page_size
-            if not vulns or (total_results is not None and start_index >= total_results):
-                break
-
-            # Respeta el rate limit público (sin api key) entre páginas.
-            if not settings.nvd_api_key:
-                await asyncio.sleep(_RATE_LIMIT_SLEEP)
-
-    log.info("nvd.delta_sync", hours=hours, total_results=total_results, **stats)
+    stats["reconciled"] = reconcile_kpi()
+    log.info("nvd.delta_sync", window_start=start.isoformat(),
+             window_end=end.isoformat(), chunks=len(chunks), **stats)
     return stats
 
 
@@ -225,5 +296,9 @@ async def sync_nvd_full() -> dict[str, int]:
             if not settings.nvd_api_key:
                 await asyncio.sleep(_RATE_LIMIT_SLEEP)
 
+    # El full cubre todo hasta observed_at: confirmar también el watermark del
+    # delta para que el siguiente run incremental no re-procese el histórico.
+    write_cursor(_SYNC_ID, observed_at.isoformat())
+    stats["reconciled"] = reconcile_kpi()
     log.info("nvd.full_sync", total_results=total_results, **stats)
     return stats
