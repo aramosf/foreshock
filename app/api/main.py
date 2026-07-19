@@ -76,9 +76,10 @@ def api_pending(
     tech: str | None = None,
     period: str | None = None,
     granularity: str = Query("month", pattern="^(month|year)$"),
+    maturity: str = Query("all", pattern="^(all|sin_cve|cve_reservado)$"),
     s: Session = Depends(db),
 ) -> dict:
-    return q.pending_top(s, kind, top, tech, period, granularity)
+    return q.pending_top(s, kind, top, tech, period, granularity, maturity)
 
 
 @app.get("/api/emerging")

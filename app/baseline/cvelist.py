@@ -214,6 +214,29 @@ def _process_files(repo_dir: str, rel_paths: list[str]) -> dict[str, int]:
     return stats
 
 
+
+def mirror_has_mitre_data() -> bool:
+    """¿El espejo local (published_cves) contiene datos de MITRE/cvelist?
+
+    El cursor de sync vive en sync_state y el clon git en disco: ambos pueden
+    sobrevivir a un vaciado de la tabla (TRUNCATE de tests, reset manual). Si el
+    cursor dijera "ya estoy al día" con la tabla vacía, el delta procesaría solo
+    los ficheros nuevos y el espejo quedaría INCOMPLETO en silencio (sin estados
+    RESERVED, etc.). El cursor nunca debe prevalecer sobre la presencia real de
+    datos: esta comprobación fuerza un full cuando la tabla no tiene ninguna
+    fila con sello de cvelist.
+    """
+    from sqlalchemy import select
+
+    with session_scope() as session:
+        row = session.execute(
+            select(PublishedCVE.id)
+            .where(PublishedCVE.cvelist_updated_at.is_not(None))
+            .limit(1)
+        ).first()
+        return row is not None
+
+
 def sync_cvelist(force_full: bool = False) -> dict[str, int]:
     """Sincroniza el repo cvelistV5 y persiste los registros CVE cambiados.
 
@@ -242,6 +265,12 @@ def sync_cvelist(force_full: bool = False) -> dict[str, int]:
         rel_paths = _all_json_files(repo_dir)
     else:
         _run_git(["pull", "--ff-only"], cwd=repo_dir)
+        if not force_full and not mirror_has_mitre_data():
+            # Cursor/clon presentes pero tabla sin datos MITRE: espejo vaciado
+            # por fuera (p.ej. TRUNCATE) -> full automatico para no dejar un
+            # baseline incompleto en silencio.
+            log.warning("cvelist.mirror_empty_forcing_full")
+            force_full = True
         if force_full:
             rel_paths = _all_json_files(repo_dir)
         else:

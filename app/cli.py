@@ -452,22 +452,30 @@ def pending(
     top: int = typer.Option(20, help="nº de software en el ranking"),
     kind: str = typer.Option("product", help="product | distro | malware | all"),
     tech: str | None = typer.Option(None, help="filtra por tecnología (substring)"),
+    maturity: str = typer.Option(
+        "all", help="all | sin_cve (aún sin CVE: ZDI/GHSA/RUSTSEC…) | "
+        "cve_reservado (CVE asignado pero MITRE/NVD sin contenido)"),
     fmt: str = typer.Option("table", "--format", "-f", help="table | json | csv"),
 ) -> None:
-    """CVEs identificados en otras fuentes, con tecnología asociada, que NVD aún
-    no ha publicado, y ranking del software con más pendientes. Misma definición
-    y SQL que /api/pending (app/api/queries.py)."""
+    """Vulnerabilidades identificadas en otras fuentes, con tecnología asociada,
+    de las que NVD no ha publicado nada. Dos métricas (--maturity): sin CVE
+    todavía, o con CVE reservado/sin ficha. Misma definición y SQL que
+    /api/pending (app/api/queries.py)."""
     from app.api.queries import pending_top
 
     with get_session() as session:
-        result = pending_top(session, kind=kind, top=top, tech=tech)
+        result = pending_top(session, kind=kind, top=top, tech=tech,
+                             maturity=maturity)
     by_kind = result["by_kind"]
     data = [(r["software"], r["pending"]) for r in result["top"]]
     meta = {
         "total": result["total"], "product": by_kind.get("product", 0),
         "distro": by_kind.get("distro", 0), "malware": by_kind.get("malware", 0),
-        "kind": kind,
+        "kind": kind, "maturity": maturity,
     }
+    if "by_maturity" in result:
+        meta["sin_cve"] = result["by_maturity"]["sin_cve"]
+        meta["cve_reservado"] = result["by_maturity"]["cve_reservado"]
     _emit(fmt, ["software", "cves_pendientes"], data, meta=meta,
           title=f"Top software (kind={kind})")
 

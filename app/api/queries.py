@@ -21,25 +21,45 @@ import datetime as _dt
 _GRAN = {"month": ("month", "YYYY-MM"), "year": ("year", "YYYY")}
 
 # ----------------------------------------------------------------- pending
-# Definición CANÓNICA de "pending" — la métrica central del proyecto: CVEs
-# identificados en otras fuentes (candidates con cve_id) que NVD aún no ha
-# publicado (sin fila en published_cves o con nvd_published_at NULL), con
-# tecnología asociada (affected_products). Excluye tombstones fusionados.
+# Definición CANÓNICA de "pending" — la métrica central del proyecto (decisión
+# de producto 2026-07-19, ver docs/AGENT_CHANGELOG.md): vulnerabilidades
+# identificadas en otras fuentes de las que NVD aún no ha publicado nada. Entran:
+#   a) candidates CON cve_id sin datos en NVD (sin fila en published_cves o
+#      nvd_published_at NULL), excluyendo CVEs REJECTED por MITRE, y
+#   b) candidates PRE-CVE (cve_id NULL): GHSA/RUSTSEC/GO/PYSEC/VU#… aún sin CVE.
+# Siempre con tecnología asociada NO-malware: los advisories de paquetes
+# maliciosos (OSV MAL-*, kind='malware') son señal de otra naturaleza y se
+# cuentan aparte, no aquí. Excluye tombstones fusionados y rejected.
 # La CLI (app/cli.py) reutiliza estas funciones: NO dupliques este fragmento.
-_PENDING_CORE_SQL = (
-    "c.cve_id IS NOT NULL"
-    " AND NOT EXISTS (SELECT 1 FROM published_cves p"
-    " WHERE p.id = c.cve_id AND p.nvd_published_at IS NOT NULL)"
-    " AND EXISTS (SELECT 1 FROM affected_products ap0 WHERE ap0.candidate_id = c.id)"
+_NVD_SILENT_SQL = (
+    "( c.cve_id IS NULL OR NOT EXISTS (SELECT 1 FROM published_cves p"
+    " WHERE p.id = c.cve_id"
+    " AND (p.nvd_published_at IS NOT NULL OR p.state = 'REJECTED')) )"
 )
-PENDING_WHERE_SQL = "c.merged_into IS NULL AND " + _PENDING_CORE_SQL
+_PENDING_CORE_SQL = (
+    _NVD_SILENT_SQL
+    + " AND EXISTS (SELECT 1 FROM affected_products ap0"
+    " WHERE ap0.candidate_id = c.id"
+    " AND (ap0.kind IS NULL OR ap0.kind <> 'malware'))"
+    " AND NOT EXISTS (SELECT 1 FROM affected_products apm"
+    " WHERE apm.candidate_id = c.id AND apm.kind = 'malware')"
+)
+PENDING_WHERE_SQL = (
+    "c.merged_into IS NULL AND c.status <> 'rejected' AND " + _PENDING_CORE_SQL
+)
+
+# Desglose de `pending` por madurez del identificador (las DOS métricas que
+# pide producto): "sin_cve" = identificada solo por códigos nativos (ZDI-CAN,
+# GHSA, RUSTSEC, VU#...) sin CVE todavía; "cve_reservado" = ya tiene CVE pero
+# MITRE/NVD no publican contenido (reservado o sin ficha) — no se sabe qué es.
+MATURITY_SQL = {
+    "sin_cve": "c.cve_id IS NULL",
+    "cve_reservado": "c.cve_id IS NOT NULL",
+}
 
 # Variante booleana (sin exigir producto) para etiquetar filas que ya vienen
 # unidas a affected_products, p.ej. en software_detail.
-PENDING_EXPR_SQL = (
-    "( c.cve_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM published_cves p"
-    " WHERE p.id = c.cve_id AND p.nvd_published_at IS NOT NULL) )"
-)
+PENDING_EXPR_SQL = "( " + _NVD_SILENT_SQL + " )"
 
 
 def _like_pattern(term: str, *, contains: bool = True) -> str:
@@ -126,13 +146,19 @@ def trend_series(session: Session, granularity: str = "month", months: int = 12,
 
 def pending_top(session: Session, kind: str = "product", top: int = 20,
                 tech: str | None = None, period: str | None = None,
-                granularity: str = "month") -> dict[str, Any]:
-    """Ranking de software con más vulns pendientes + desglose por kind.
+                granularity: str = "month",
+                maturity: str = "all") -> dict[str, Any]:
+    """Ranking de software con más vulns pendientes + desglose por kind y por
+    madurez (sin_cve | cve_reservado).
 
     Agrega en SQL (count DISTINCT / GROUP BY) en vez de traer las filas y
     contarlas en Python."""
     extra = ""
     params: dict[str, Any] = {}
+    if maturity != "all":
+        if maturity not in MATURITY_SQL:
+            raise ValueError(f"maturity inválida: {maturity!r}")
+        extra += " AND " + MATURITY_SQL[maturity]
     if period:
         bounds = _period_bounds(period, granularity)
         if bounds:
@@ -150,6 +176,13 @@ def pending_top(session: Session, kind: str = "product", top: int = 20,
         GROUP BY a.kind
     """), params).all()
 
+    by_maturity = {
+        label: int(session.execute(text(
+            f"SELECT count(*) FROM candidates c WHERE {PENDING_WHERE_SQL}{extra}"
+            f" AND {cond}"), params).scalar_one())
+        for label, cond in MATURITY_SQL.items()
+    } if maturity == "all" else None
+
     filt = ""
     if kind != "all":
         filt = " AND a.kind = :kind"
@@ -166,12 +199,16 @@ def pending_top(session: Session, kind: str = "product", top: int = 20,
         ORDER BY pending DESC, a.product
         LIMIT :top
     """), params).all()
-    return {
+    out = {
         "total": int(total),
         "by_kind": {k: int(n) for k, n in by_kind if k is not None},
         "kind": kind,
+        "maturity": maturity,
         "top": [{"software": s, "pending": int(n)} for s, n in rows],
     }
+    if by_maturity is not None:
+        out["by_maturity"] = by_maturity
+    return out
 
 
 def emerging_list(session: Session, *, since_days: int | None = None, source: str | None = None,

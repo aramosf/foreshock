@@ -77,7 +77,12 @@ if [ "$FULL_LOAD" = 1 ]; then
   echo ">> 1) Pausando schedulers para no mezclar ingestas…"
   $COMPOSE stop sources-worker baseline-worker
 
-  echo ">> 2) Baseline full: NVD (~270k) + EPSS (~350k)…"
+  echo ">> 2) Baseline full: cvelist/MITRE (~600k JSON) + NVD (~270k) + EPSS (~350k)…"
+  # cvelist full EXPLÍCITO: sin él, el baseline queda solo con la vista NVD
+  # (sin estados RESERVED de MITRE). El worker solo hace full con clon nuevo;
+  # aquí el clon puede existir ya. (sync_cvelist además auto-fuerza full si
+  # detecta la tabla sin datos MITRE — cinturón y tirantes.)
+  $COMPOSE run --rm sources-worker foreshock baseline sync --full-cvelist
   $COMPOSE run --rm sources-worker foreshock baseline nvd-full
   $COMPOSE run --rm sources-worker foreshock baseline epss-full
 

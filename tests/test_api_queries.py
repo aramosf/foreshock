@@ -1,8 +1,10 @@
 """Tests de integración de app/api/queries.py y de la definición de `pending`.
 
-La métrica central: pending = candidates sin fusionar, CON cve_id, cuyo CVE no
-está publicado en NVD (fila ausente o nvd_published_at NULL) y con tecnología
-asociada (affected_products). CLI y API comparten esta definición.
+La métrica central (decisión de producto 2026-07-19): pending = candidates sin
+fusionar de los que NVD no ha publicado nada — con cve_id sin datos NVD (y no
+REJECTED por MITRE) O pre-CVE (sin cve_id aún) — siempre con tecnología asociada
+NO-malware (los MAL-* de paquetes maliciosos se cuentan aparte). CLI y API
+comparten esta definición.
 """
 
 from __future__ import annotations
@@ -19,11 +21,12 @@ from app.api import queries as q
 NOW = dt.datetime.now(dt.UTC)
 
 
-def _mk_published(session: Session, cve: str, *, nvd_published: bool) -> None:
+def _mk_published(session: Session, cve: str, *, nvd_published: bool,
+                  state: str = "PUBLISHED") -> None:
     session.execute(text(
         "INSERT INTO published_cves (id, state, nvd_published_at) "
-        "VALUES (:id, 'PUBLISHED', :nvd)"),
-        {"id": cve, "nvd": NOW if nvd_published else None})
+        "VALUES (:id, :state, :nvd)"),
+        {"id": cve, "state": state, "nvd": NOW if nvd_published else None})
 
 
 def _mk_candidate(session: Session, *, cve: str | None = None,
@@ -53,8 +56,14 @@ def pending_dataset(db: None, session: Session) -> dict[str, uuid.UUID]:
     ids["pend_cvelist"] = _mk_candidate(session, cve="CVE-2026-0002", product="acme")
     # pending: CVE sin fila alguna en published_cves.
     ids["pend_nofila"] = _mk_candidate(session, cve="CVE-2026-0003", product="widget_lib")
-    # NO pending: sin cve_id (pre-CVE).
+    # pending: pre-CVE (sin cve_id aún) con producto no-malware.
     ids["precve"] = _mk_candidate(session, cve=None, product="acme")
+    # NO pending: pre-CVE de paquete malicioso (kind=malware, se cuenta aparte).
+    ids["malware"] = _mk_candidate(session, cve=None, product="evil-pkg",
+                                   kind="malware")
+    # NO pending: su CVE fue RECHAZADO por MITRE (resuelto, no pendiente).
+    _mk_published(session, "CVE-2026-0005", nvd_published=False, state="REJECTED")
+    ids["rechazado"] = _mk_candidate(session, cve="CVE-2026-0005", product="acme")
     # NO pending: con cve_id no publicado pero SIN tecnología asociada.
     ids["sin_producto"] = _mk_candidate(session, cve="CVE-2026-0004", product=None)
     # tombstone fusionado con el mismo cve_id que pend_nofila: excluido.
@@ -67,10 +76,10 @@ def pending_dataset(db: None, session: Session) -> dict[str, uuid.UUID]:
 
 def test_pending_top_definition(pending_dataset, session: Session) -> None:
     out = q.pending_top(session, kind="product", top=10)
-    assert out["total"] == 2
-    assert out["by_kind"] == {"product": 2}
+    assert out["total"] == 3
+    assert out["by_kind"] == {"product": 3}
     tops = {r["software"]: r["pending"] for r in out["top"]}
-    assert tops == {"acme": 1, "widget_lib": 1}
+    assert tops == {"acme": 2, "widget_lib": 1}
 
 
 def test_pending_top_agrega_en_sql_por_candidate(pending_dataset, session: Session) -> None:
@@ -80,8 +89,8 @@ def test_pending_top_agrega_en_sql_por_candidate(pending_dataset, session: Sessi
         "VALUES (:cid, 'otra_lib', 'product')"), {"cid": pending_dataset["pend_cvelist"]})
     session.commit()
     out = q.pending_top(session, kind="product", top=10)
-    assert out["total"] == 2
-    assert out["by_kind"] == {"product": 2}
+    assert out["total"] == 3
+    assert out["by_kind"] == {"product": 3}
 
 
 def test_like_wildcards_escapados(db, session: Session) -> None:
@@ -98,14 +107,14 @@ def test_trend_series_pending(pending_dataset, session: Session) -> None:
     series = q.trend_series(session, "month", 12)
     period = NOW.strftime("%Y-%m")
     row = next(r for r in series if r["period"] == period)
-    assert row["pre_published"] == 2
+    assert row["pre_published"] == 3
 
 
 def test_emerging_pending_only(pending_dataset, session: Session) -> None:
     out = q.emerging_list(session, pending_only=True, page_size=50)
     got = {r["cve_id"] for r in out["rows"]}
-    assert got == {"CVE-2026-0002", "CVE-2026-0003"}
-    assert out["total"] == 2
+    assert got == {"CVE-2026-0002", "CVE-2026-0003", None}  # None = pre-CVE
+    assert out["total"] == 3
 
 
 def test_candidate_detail_ignora_tombstones(pending_dataset, session: Session) -> None:
@@ -143,3 +152,18 @@ def test_healthz_y_cabeceras_seguridad(db) -> None:
         assert r.headers["X-Content-Type-Options"] == "nosniff"
         assert "script-src 'self'" in r.headers["Content-Security-Policy"]
         assert r.headers["Referrer-Policy"] == "no-referrer"
+
+
+def test_pending_desglose_por_madurez(pending_dataset, session: Session) -> None:
+    """Las DOS métricas de producto: sin_cve (pre-CVE) y cve_reservado
+    (CVE asignado pero MITRE/NVD sin contenido)."""
+    out = q.pending_top(session, kind="all", top=10)
+    assert out["by_maturity"] == {"sin_cve": 1, "cve_reservado": 2}
+
+    solo_precve = q.pending_top(session, kind="all", top=10, maturity="sin_cve")
+    assert solo_precve["total"] == 1
+    solo_resv = q.pending_top(session, kind="all", top=10, maturity="cve_reservado")
+    assert solo_resv["total"] == 2
+
+    with pytest.raises(ValueError):
+        q.pending_top(session, maturity="invalida")

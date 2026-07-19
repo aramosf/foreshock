@@ -115,3 +115,24 @@ def test_enrich_all_incremental_only_touches_pending(db):
     # full=True reprocesa también el ya enriquecido.
     stats_full = enrich_all(full=True)
     assert stats_full["processed"] == 3
+
+
+def test_mirror_has_mitre_data_detecta_vaciado(db) -> None:
+    """El cursor de cvelist nunca debe prevalecer sobre los datos: con la tabla
+    vacía (o sin sello cvelist) el sync debe forzar full automáticamente."""
+    from datetime import UTC, datetime
+
+    from app.baseline.cvelist import mirror_has_mitre_data
+    from app.core.db import session_scope
+    from app.core.models import PublishedCVE
+
+    assert mirror_has_mitre_data() is False  # tabla truncada por la fixture
+
+    with session_scope() as session:
+        session.add(PublishedCVE(id="CVE-2026-0001", state="PUBLISHED"))
+    assert mirror_has_mitre_data() is False  # fila SIN sello cvelist (solo NVD)
+
+    with session_scope() as session:
+        row = session.get(PublishedCVE, "CVE-2026-0001")
+        row.cvelist_updated_at = datetime.now(UTC)
+    assert mirror_has_mitre_data() is True
