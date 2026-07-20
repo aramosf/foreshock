@@ -51,13 +51,22 @@ PENDING_WHERE_SQL = (
     " AND c.withdrawn IS NOT TRUE AND " + _PENDING_CORE_SQL
 )
 
-# Desglose de `pending` por madurez del identificador (las DOS métricas que
-# pide producto): "pre_cve" = identificada solo por códigos nativos (ZDI-CAN,
-# GHSA, RUSTSEC, VU#...) sin CVE todavía; "cve_reserved" = ya tiene CVE pero
-# MITRE/NVD no publican contenido (reservado o sin ficha) — no se sabe qué es.
+# Desglose de `pending` por MADUREZ del identificador. cvelistV5 (MITRE) solo
+# publica CVEs PUBLISHED/REJECTED — los RESERVED no son públicos — así que un CVE
+# citado en un commit/advisory sin ficha oficial es la señal MÁS temprana con
+# número CVE. Tres estados (partición exacta del conjunto pending):
+#   pre_cve          identificada solo por códigos nativos (ZDI-CAN, GHSA,
+#                    RUSTSEC, VU#...) — aún sin CVE asignado.
+#   cve_prereserved  YA tiene CVE (p.ej. citado en un commit) pero NO hay ninguna
+#                    ficha oficial de él en nuestro espejo MITRE/NVD: un CNA lo
+#                    asignó y todavía no hay registro público. La señal estrella.
+#   cve_reserved     tiene CVE con ficha en el espejo (MITRE/NVD lo conocen) pero
+#                    NVD aún no publica datos (reservado / pendiente de análisis).
+_HAS_MIRROR = "EXISTS (SELECT 1 FROM published_cves p WHERE p.id = c.cve_id)"
 MATURITY_SQL = {
     "pre_cve": "c.cve_id IS NULL",
-    "cve_reserved": "c.cve_id IS NOT NULL",
+    "cve_prereserved": "c.cve_id IS NOT NULL AND NOT " + _HAS_MIRROR,
+    "cve_reserved": "c.cve_id IS NOT NULL AND " + _HAS_MIRROR,
 }
 
 # Variante booleana (sin exigir producto) para etiquetar filas que ya vienen

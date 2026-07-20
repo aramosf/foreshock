@@ -155,15 +155,18 @@ def test_healthz_y_cabeceras_seguridad(db) -> None:
 
 
 def test_pending_desglose_por_madurez(pending_dataset, session: Session) -> None:
-    """Las DOS métricas de producto: pre_cve (aún sin CVE) y cve_reserved
-    (CVE asignado pero MITRE/NVD sin contenido)."""
+    """Las TRES métricas de madurez: pre_cve (sin CVE), cve_prereserved (CVE sin
+    ficha oficial en el espejo) y cve_reserved (CVE con ficha pero NVD sin datos)."""
     out = q.pending_top(session, kind="all", top=10)
-    assert out["by_maturity"] == {"pre_cve": 1, "cve_reserved": 2}
+    # precve -> pre_cve; pend_nofila (CVE sin fila) -> cve_prereserved;
+    # pend_cvelist (CVE con fila, nvd_published_at NULL) -> cve_reserved.
+    assert out["by_maturity"] == {"pre_cve": 1, "cve_prereserved": 1, "cve_reserved": 1}
 
-    solo_precve = q.pending_top(session, kind="all", top=10, maturity="pre_cve")
-    assert solo_precve["total"] == 1
-    solo_resv = q.pending_top(session, kind="all", top=10, maturity="cve_reserved")
-    assert solo_resv["total"] == 2
+    assert q.pending_top(session, kind="all", top=10, maturity="pre_cve")["total"] == 1
+    assert q.pending_top(
+        session, kind="all", top=10, maturity="cve_prereserved")["total"] == 1
+    assert q.pending_top(
+        session, kind="all", top=10, maturity="cve_reserved")["total"] == 1
 
     with pytest.raises(ValueError):
         q.pending_top(session, maturity="invalida")

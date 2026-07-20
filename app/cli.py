@@ -453,8 +453,9 @@ def pending(
     kind: str = typer.Option("product", help="product | distro | malware | all"),
     tech: str | None = typer.Option(None, help="filtra por tecnología (substring)"),
     maturity: str = typer.Option(
-        "all", help="all | pre_cve (aún sin CVE: ZDI/GHSA/RUSTSEC…) | "
-        "cve_reserved (CVE asignado pero MITRE/NVD sin contenido)"),
+        "all", help="all | pre_cve (sin CVE aún: ZDI/GHSA/RUSTSEC…) | "
+        "cve_prereserved (CVE asignado, sin ficha oficial: la señal más "
+        "temprana) | cve_reserved (CVE con ficha pero NVD sin publicar)"),
     fmt: str = typer.Option("table", "--format", "-f", help="table | json | csv"),
 ) -> None:
     """Vulnerabilidades identificadas en otras fuentes, con tecnología asociada,
