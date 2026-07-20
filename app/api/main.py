@@ -88,9 +88,12 @@ def api_pending(
 def api_lag_histogram(
     months: int = Query(12, ge=1, le=600),
     exclude_backfill: bool = Query(True),
+    metric: str = Query("present", pattern="^(present|published)$"),
+    source: str | None = None,
     s: Session = Depends(db),
 ) -> dict:
-    return q.lag_histogram(s, months=months, exclude_backfill=exclude_backfill)
+    return q.lag_histogram(s, months=months, exclude_backfill=exclude_backfill,
+                           metric=metric, source=source)
 
 
 @app.get("/api/emerging")

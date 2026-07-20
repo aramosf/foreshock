@@ -186,9 +186,14 @@ def _add_mention(session: Session, cid: uuid.UUID, source_name: str) -> None:
         {"c": cid, "s": _source_id(session, source_name), "t": NOW, "h": str(uuid.uuid4())})
 
 
-def _set_days_ahead(session: Session, cid: uuid.UUID, days: int) -> None:
+_DAYS_COL = {"present": "days_ahead_vs_nvd_present",
+             "published": "days_ahead_vs_nvd_published"}
+
+
+def _set_days_ahead(session: Session, cid: uuid.UUID, days: int,
+                    *, metric: str = "present") -> None:
     session.execute(text(
-        "UPDATE candidates SET days_ahead_vs_nvd_present=:d WHERE id=:c"),
+        f"UPDATE candidates SET {_DAYS_COL[metric]}=:d WHERE id=:c"),
         {"d": days, "c": cid})
 
 
@@ -262,3 +267,54 @@ def test_emerging_maturity_campo_y_filtro(pending_dataset, session: Session) -> 
 
     with pytest.raises(ValueError):
         q.emerging_list(session, maturity="invalida")
+
+
+def test_lag_histogram_published_bins_censored_by_year(sources_seeded, session: Session) -> None:
+    """metric=published: bucket '<=0' (NVD publicó antes/a la vez), censored_count
+    (cve_id sin nvd_published_at) y by_year; ignora fechas corruptas (< 1990)."""
+    # publicados: days_ahead_vs_nvd_published conocido ⟺ el CVE tiene
+    # nvd_published_at (como en el pipeline real: compute_days_ahead lo exige).
+    for cve in ("CVE-2026-2001", "CVE-2026-2002", "CVE-2026-2003", "CVE-2026-2004"):
+        _mk_published(session, cve, nvd_published=True)
+    p1 = _mk_candidate(session, cve="CVE-2026-2001", product="a")
+    _set_days_ahead(session, p1, -2, metric="published")   # NVD antes -> "<=0"
+    p2 = _mk_candidate(session, cve="CVE-2026-2002", product="a")
+    _set_days_ahead(session, p2, 0, metric="published")    # a la vez -> "<=0"
+    p3 = _mk_candidate(session, cve="CVE-2026-2003", product="a")
+    _set_days_ahead(session, p3, 5, metric="published")    # "1-7"
+    _add_mention(session, p3, "redhat_csaf")               # para el filtro source=
+    p4 = _mk_candidate(session, cve="CVE-2026-2004", product="a")
+    _set_days_ahead(session, p4, 100, metric="published")  # ">90"
+    # censurado: tiene cve_id pero su CVE NO tiene nvd_published_at (sin fila).
+    _mk_candidate(session, cve="CVE-2026-2999", product="a")
+    # CORRUPTO: first_seen en el año 1 (fecha cero) -> debe IGNORARSE del todo.
+    corrupt = _mk_candidate(session, cve="CVE-2026-2500", product="a",
+                            first_seen=dt.datetime(1, 1, 1, tzinfo=dt.UTC))
+    _set_days_ahead(session, corrupt, 50, metric="published")
+    session.commit()
+
+    out = q.lag_histogram(session, months=12, metric="published")
+    assert out["metric"] == "published"
+    assert out["exclude_backfill"] is False   # forzado: el archivo es el objeto de estudio
+    assert out["count"] == 4                   # corrupto excluido
+    bins = {b["label"]: b["count"] for b in out["bins"]}
+    assert bins == {"<=0": 2, "1-7": 1, "8-14": 0, "15-30": 0,
+                    "31-60": 0, "61-90": 0, ">90": 1}
+    assert sum(b["count"] for b in out["bins"]) == out["count"]
+    assert out["median"] == pytest.approx(2.5)
+    assert out["p90"] == pytest.approx(71.5)
+    assert out["censored_count"] == 1
+    # by_year: una sola cohorte (año actual), sin el corrupto.
+    assert len(out["by_year"]) == 1
+    yr = out["by_year"][0]
+    assert yr["year"] == NOW.year and yr["n"] == 4
+    assert yr["mean"] == pytest.approx(25.8)
+    assert yr["median"] == pytest.approx(2.5)
+
+    # source= restringe a candidates con esa fuente.
+    only = q.lag_histogram(session, months=12, metric="published", source="redhat_csaf")
+    assert only["count"] == 1 and only["source"] == "redhat_csaf"
+    assert only["censored_count"] == 0
+
+    with pytest.raises(ValueError):
+        q.lag_histogram(session, metric="nope")

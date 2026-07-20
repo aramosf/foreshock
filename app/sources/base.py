@@ -17,7 +17,10 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+
+from dateutil.parser import isoparse
 
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
@@ -29,6 +32,28 @@ if TYPE_CHECKING:
     from app.sources.browser import BrowserPool
 
 log = get_logger(__name__)
+
+# Suelo de validez para fechas de advisory. Algunas fuentes serializan una fecha
+# "cero" (p.ej. OSV/Debian trae published="0001-01-01T00:00:00Z", el zero-value
+# de Go) que isoparse acepta SIN error (el año 1 es válido) y acabaría como
+# seen_at -> first_seen_at en el año 0001, contaminando days_ahead. Se descarta
+# todo lo anterior a 1990 (antes de que existieran los CVE).
+_MIN_ADVISORY_DATE = datetime(1990, 1, 1, tzinfo=UTC)
+
+
+def parse_advisory_date(val: str | None) -> datetime | None:
+    """ISO 8601 -> datetime UTC-aware, o None si falta, no parsea o es una fecha
+    "cero"/imposible (< 1990). Usar para el seen_at de advisories (OSV, GHSA...)."""
+    if not val:
+        return None
+    try:
+        dt = isoparse(val)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt if dt >= _MIN_ADVISORY_DATE else None
+
 
 # Registro global: nombre -> clase de fuente.
 REGISTRY: dict[str, type["BaseSource"]] = {}

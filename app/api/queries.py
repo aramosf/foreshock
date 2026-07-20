@@ -81,19 +81,41 @@ PENDING_EXPR_SQL = "( " + _NVD_SILENT_SQL + " )"
 # histograma de lag los excluye por defecto (exclude_backfill=True).
 BACKFILL_SOURCES = ("github_advisories", "osv")
 
-# Bins fijos (días) del histograma de days_ahead_vs_nvd_present. El primer bin
-# usa `<= 1` (captura 0/1 y cualquier delta negativo residual) para que la suma
-# de los bins iguale `count`; los grandes negativos espurios ya están fuera por
-# la guarda de observación tardía (days_ahead NULL, ver AGENT_CHANGELOG).
+# Suelo de fechas válidas: candidates con first_seen_at anterior (p.ej. el año
+# 0001 por una fecha 'published' cero en OSV/Debian, ya corregido en el fetcher)
+# darían un days_ahead disparatado. Se excluyen en el histograma. Los CVE no
+# existían antes de 1999, pero 1990 es un margen conservador.
+_LAG_MIN_DATE = "1990-01-01"
+
+# Bins (plantilla {col}). `present`: el primer bin `<= 1` capta 0/1 y cualquier
+# delta negativo residual (los grandes negativos ya salen por la guarda de
+# observación tardía). `published`: bucket propio `<= 0` = NVD publicó antes o a
+# la vez (no hubo atraso), separado del adelanto positivo.
 _LAG_BINS = (
-    ("0-1", "c.days_ahead_vs_nvd_present <= 1"),
-    ("2-7", "c.days_ahead_vs_nvd_present BETWEEN 2 AND 7"),
-    ("8-14", "c.days_ahead_vs_nvd_present BETWEEN 8 AND 14"),
-    ("15-30", "c.days_ahead_vs_nvd_present BETWEEN 15 AND 30"),
-    ("31-60", "c.days_ahead_vs_nvd_present BETWEEN 31 AND 60"),
-    ("61-90", "c.days_ahead_vs_nvd_present BETWEEN 61 AND 90"),
-    (">90", "c.days_ahead_vs_nvd_present > 90"),
+    ("0-1", "{col} <= 1"),
+    ("2-7", "{col} BETWEEN 2 AND 7"),
+    ("8-14", "{col} BETWEEN 8 AND 14"),
+    ("15-30", "{col} BETWEEN 15 AND 30"),
+    ("31-60", "{col} BETWEEN 31 AND 60"),
+    ("61-90", "{col} BETWEEN 61 AND 90"),
+    (">90", "{col} > 90"),
 )
+_LAG_BINS_PUBLISHED = (
+    ("<=0", "{col} <= 0"),
+    ("1-7", "{col} BETWEEN 1 AND 7"),
+    ("8-14", "{col} BETWEEN 8 AND 14"),
+    ("15-30", "{col} BETWEEN 15 AND 30"),
+    ("31-60", "{col} BETWEEN 31 AND 60"),
+    ("61-90", "{col} BETWEEN 61 AND 90"),
+    (">90", "{col} > 90"),
+)
+# metric -> (columna del candidate, bins). `present` = ventaja robusta (nuestra
+# observación en NVD); `published` = atraso de NVD frente a fechas oficiales del
+# advisory (first_seen) vs published_cves.nvd_published_at.
+_LAG_METRICS = {
+    "present": ("days_ahead_vs_nvd_present", _LAG_BINS),
+    "published": ("days_ahead_vs_nvd_published", _LAG_BINS_PUBLISHED),
+}
 
 
 def _like_pattern(term: str, *, contains: bool = True) -> str:
@@ -261,27 +283,52 @@ def pending_top(session: Session, kind: str = "product", top: int = 20,
     return out
 
 
-def lag_histogram(session: Session, months: int = 12,
-                  exclude_backfill: bool = True) -> dict[str, Any]:
-    """Distribución de `days_ahead_vs_nvd_present` (días entre nuestra primera
-    detección y la observación en NVD) para candidates ya reconciliados con su
-    CVE. Bins fijos + mediana + p90 (percentile_cont en SQL, no en Python).
+def _lag_source_filter(source: str | None, params: dict[str, Any]) -> str:
+    """Fragmento (con AND inicial) para restringir a candidates con mención de
+    `source`; cadena vacía si no se filtra."""
+    if not source:
+        return ""
+    params["source"] = source
+    return (" AND EXISTS (SELECT 1 FROM mentions m JOIN sources s ON s.id = m.source_id"
+            " WHERE m.candidate_id = c.id AND s.name = :source)")
 
-    - Ignora `days_ahead NULL` (la guarda de observación tardía los pone a NULL
-      a propósito: no son ventaja real — ver AGENT_CHANGELOG).
-    - `exclude_backfill`: excluye candidates cuya ÚNICA fuente es de backfill
-      histórico (ver BACKFILL_SOURCES), cuyas medias no reflejan ventaja
-      operativa. Un candidate con al menos una fuente NO-backfill se conserva.
+
+def lag_histogram(session: Session, months: int = 12, exclude_backfill: bool = True,
+                  metric: str = "present", source: str | None = None) -> dict[str, Any]:
+    """Distribución de la ventaja/atraso de Foreshock frente a NVD.
+
+    `metric`:
+      - "present" (default, comportamiento actual): días entre nuestra primera
+        detección y NUESTRA observación del CVE en NVD
+        (days_ahead_vs_nvd_present). Aplica `exclude_backfill`.
+      - "published": ATRASO de NVD frente a fechas oficiales — first_seen del
+        advisory vs published_cves.nvd_published_at (days_ahead_vs_nvd_published).
+        Aquí el archivo histórico ES el objeto de estudio, así que NO se aplica
+        exclude_backfill. Añade `censored_count` (candidates con cve_id cuyo CVE
+        aún no tiene nvd_published_at: atraso ABIERTO/censurado a la derecha) y
+        `by_year` (cohorte por año de first_seen_at: n, media, mediana).
+
+    Común: mediana + p90 (percentile_cont en SQL); `months` filtra por
+    first_seen_at; ignora `days_ahead NULL` y fechas < 1990 (fechas cero
+    corruptas, ver AGENT_CHANGELOG); `source` opcional restringe a una fuente.
     """
+    if metric not in _LAG_METRICS:
+        raise ValueError(f"metric inválida: {metric!r}")
+    col, bins = _LAG_METRICS[metric]
+    ccol = f"c.{col}"
+    # El archivo histórico es el objeto de estudio del atraso: no se excluye.
+    if metric == "published":
+        exclude_backfill = False
     months = max(1, months)
     params: dict[str, Any] = {"months": months}
+
     where = [
         "c.merged_into IS NULL",
-        "c.days_ahead_vs_nvd_present IS NOT NULL",
+        f"c.first_seen_at >= '{_LAG_MIN_DATE}'::timestamptz",
         "c.first_seen_at >= date_trunc('month', now()) - make_interval(months => :months)",
     ]
     if exclude_backfill:
-        # Conserva el candidate si tiene ALGUNA mención de una fuente no-backfill.
+        # Conserva el candidate si tiene ALGUNA mención de fuente no-backfill.
         placeholders = ", ".join(f":bf{i}" for i in range(len(BACKFILL_SOURCES)))
         where.append(
             "EXISTS (SELECT 1 FROM mentions m JOIN sources s ON s.id = m.source_id"
@@ -289,32 +336,59 @@ def lag_histogram(session: Session, months: int = 12,
         )
         for i, name in enumerate(BACKFILL_SOURCES):
             params[f"bf{i}"] = name
-    where_sql = " AND ".join(where)
+    where_sql = " AND ".join(where) + _lag_source_filter(source, params)
 
     bin_exprs = ",\n           ".join(
-        f"count(*) FILTER (WHERE {cond}) AS bin_{i}"
-        for i, (_, cond) in enumerate(_LAG_BINS)
+        f"count(*) FILTER (WHERE {cond.format(col=ccol)}) AS bin_{i}"
+        for i, (_, cond) in enumerate(bins)
     )
     row = session.execute(text(f"""
-        SELECT count(*) AS n,
-               percentile_cont(0.5) WITHIN GROUP (
-                   ORDER BY c.days_ahead_vs_nvd_present) AS median,
-               percentile_cont(0.9) WITHIN GROUP (
-                   ORDER BY c.days_ahead_vs_nvd_present) AS p90,
+        SELECT count(*) FILTER (WHERE {ccol} IS NOT NULL) AS n,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY {ccol}) AS median,
+               percentile_cont(0.9) WITHIN GROUP (ORDER BY {ccol}) AS p90,
                {bin_exprs}
         FROM candidates c
         WHERE {where_sql}
     """), params).mappings().one()
 
-    return {
+    out: dict[str, Any] = {
+        "metric": metric,
         "months": months,
         "exclude_backfill": exclude_backfill,
+        "source": source,
         "count": int(row["n"]),
         "median": float(row["median"]) if row["median"] is not None else None,
         "p90": float(row["p90"]) if row["p90"] is not None else None,
         "bins": [{"label": label, "count": int(row[f"bin_{i}"])}
-                 for i, (label, _) in enumerate(_LAG_BINS)],
+                 for i, (label, _) in enumerate(bins)],
     }
+
+    if metric == "published":
+        # Atraso censurado a la derecha: vimos el advisory (tiene cve_id) pero
+        # NVD todavía NO ha publicado ese CVE -> el atraso sigue creciendo.
+        out["censored_count"] = int(session.execute(text(f"""
+            SELECT count(*) FROM candidates c
+            WHERE {where_sql} AND c.cve_id IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM published_cves p
+                              WHERE p.id = c.cve_id AND p.nvd_published_at IS NOT NULL)
+        """), params).scalar_one())
+        # Cohorte por año de first_seen_at (fechas < 1990 ya excluidas).
+        year_rows = session.execute(text(f"""
+            SELECT date_part('year', c.first_seen_at)::int AS year,
+                   count(*) AS n,
+                   round(avg({ccol})::numeric, 1) AS mean,
+                   percentile_cont(0.5) WITHIN GROUP (ORDER BY {ccol}) AS median
+            FROM candidates c
+            WHERE {where_sql} AND {ccol} IS NOT NULL
+            GROUP BY 1 ORDER BY 1
+        """), params).mappings().all()
+        out["by_year"] = [
+            {"year": int(r["year"]), "n": int(r["n"]),
+             "mean": float(r["mean"]) if r["mean"] is not None else None,
+             "median": float(r["median"]) if r["median"] is not None else None}
+            for r in year_rows
+        ]
+    return out
 
 
 # CASE (SQL) que etiqueta la MADUREZ de un candidate para filas que pueden NO

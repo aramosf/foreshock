@@ -18,10 +18,11 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime, timedelta
 
-from dateutil.parser import isoparse
 
 from app.core.config import get_settings
-from app.sources.base import BaseSource, FetchContext, register
+from app.sources.base import (
+    BaseSource, FetchContext, parse_advisory_date, register,
+)
 from app.sources.http import get
 from app.ingest.service import FetchedMention
 
@@ -122,11 +123,6 @@ class GitHubAdvisoriesSource(BaseSource):
 
 
 def _parse_dt(val: str | None) -> datetime | None:
-    """ISO 8601 -> datetime UTC-aware (None si falta o no parsea)."""
-    if not val:
-        return None
-    try:
-        dt = isoparse(val)
-    except (ValueError, TypeError):
-        return None
-    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+    """ISO 8601 -> datetime UTC-aware (None si falta, no parsea o es fecha
+    cero/imposible < 1990). Delega en el helper compartido."""
+    return parse_advisory_date(val)

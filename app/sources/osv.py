@@ -19,13 +19,12 @@ import json
 import zipfile
 from datetime import UTC, datetime, timedelta
 
-from dateutil.parser import isoparse
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.ingest.affected import AffectedInput, VersionRangeInput, classify_kind
 from app.ingest.service import FetchedMention
-from app.sources.base import BaseSource, FetchContext, register
+from app.sources.base import BaseSource, FetchContext, parse_advisory_date, register
 from app.sources.cache import cached_download
 
 log = get_logger(__name__)
@@ -170,30 +169,23 @@ class OsvSource(BaseSource):
 
     @staticmethod
     def _modified_at(rec: dict) -> datetime | None:
-        """Fecha `modified` (fallback `published`) UTC-aware, para ordenar el cap."""
+        """Fecha `modified` (fallback `published`) UTC-aware, para ordenar el cap.
+        Descarta fechas cero/imposibles (< 1990, ver parse_advisory_date)."""
         for field in ("modified", "published"):
-            val = rec.get(field)
-            if not val:
-                continue
-            try:
-                dt = isoparse(val)
-            except (ValueError, TypeError):
-                continue
-            return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+            dt = parse_advisory_date(rec.get(field))
+            if dt is not None:
+                return dt
         return None
 
     @staticmethod
     def _to_mention(rec: dict, cutoff: datetime | None) -> FetchedMention | None:
-        # 'published' (fecha real), fallback a 'modified'.
-        date_str = rec.get("published") or rec.get("modified")
-        seen = None
-        if date_str:
-            try:
-                seen = isoparse(date_str)
-                if cutoff is not None and seen < cutoff:
-                    return None  # publicado fuera de la ventana (osv_months>0)
-            except (ValueError, TypeError):
-                seen = None
+        # seen_at = fecha REAL de publicación; fallback a 'modified'. Se validan
+        # ambas (parse_advisory_date descarta la fecha cero '0001-...' de Debian,
+        # que si no aterrizaría como first_seen_at en el año 1).
+        seen = parse_advisory_date(rec.get("published")) or parse_advisory_date(
+            rec.get("modified"))
+        if seen is not None and cutoff is not None and seen < cutoff:
+            return None  # publicado fuera de la ventana (osv_months>0)
         osv_id = rec.get("id")
         aliases = rec.get("aliases") or []
         cve = _cve_alias(aliases)
