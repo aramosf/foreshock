@@ -1,8 +1,8 @@
 """API de solo lectura + frontend estático de Foreshock.
 
 Sirve:
-- /api/*  -> JSON (trend, pending, emerging, lag/histogram, candidate,
-             software, stats)
+- /api/*  -> JSON (trend, pending, emerging, lag/histogram, queue/age,
+             candidate, software, stats)
 - /       -> la página del dashboard (app/api/static/index.html)
 
 Arranque: uvicorn app.api.main:app --host 0.0.0.0 --port 8000
@@ -94,6 +94,11 @@ def api_lag_histogram(
 ) -> dict:
     return q.lag_histogram(s, months=months, exclude_backfill=exclude_backfill,
                            metric=metric, source=source)
+
+
+@app.get("/api/queue/age")
+def api_queue_age(s: Session = Depends(db)) -> dict:
+    return q.queue_age(s)
 
 
 @app.get("/api/emerging")

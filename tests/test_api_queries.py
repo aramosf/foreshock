@@ -318,3 +318,38 @@ def test_lag_histogram_published_bins_censored_by_year(sources_seeded, session: 
 
     with pytest.raises(ValueError):
         q.lag_histogram(session, metric="nope")
+
+
+def test_queue_age_bins_grupos_y_mediana(db, session: Session) -> None:
+    """Cola de espera: bins y mediana por grupo (unassigned/assigned); un CVE ya
+    publicado en NVD NO cuenta; una fecha corrupta (< 1990) se excluye."""
+    def age(days: int) -> dt.datetime:
+        return NOW - dt.timedelta(days=days)
+
+    # unassigned (cve_id NULL, con producto no-malware) -> pending.
+    _mk_candidate(session, cve=None, product="a", first_seen=age(3))    # 0-7
+    _mk_candidate(session, cve=None, product="a", first_seen=age(20))   # 8-30
+    _mk_candidate(session, cve=None, product="a", first_seen=age(200))  # 181-365
+    # assigned (cve_id sin datos NVD) -> pending.
+    _mk_candidate(session, cve="CVE-2026-3001", product="a", first_seen=age(10))   # 8-30
+    _mk_candidate(session, cve="CVE-2026-3002", product="a", first_seen=age(400))  # >365
+    # NO cuenta: CVE ya PUBLICADO en NVD (no es pending).
+    _mk_published(session, "CVE-2026-3999", nvd_published=True)
+    _mk_candidate(session, cve="CVE-2026-3999", product="a", first_seen=age(5))
+    # NO cuenta: fecha corrupta (año 1) excluida por el suelo 1990.
+    _mk_candidate(session, cve=None, product="a",
+                  first_seen=dt.datetime(1, 1, 1, tzinfo=dt.UTC))
+    session.commit()
+
+    out = q.queue_age(session)
+    un = {b["label"]: b["count"] for b in out["unassigned"]["bins"]}
+    assert out["unassigned"]["total"] == 3          # el corrupto NO cuenta
+    assert un == {"0-7": 1, "8-30": 1, "31-90": 0, "91-180": 0,
+                  "181-365": 1, ">365": 0}
+    assert out["unassigned"]["median_days"] == pytest.approx(20.0)  # de [3,20,200]
+
+    asg = {b["label"]: b["count"] for b in out["assigned"]["bins"]}
+    assert out["assigned"]["total"] == 2            # el publicado NO cuenta
+    assert asg == {"0-7": 0, "8-30": 1, "31-90": 0, "91-180": 0,
+                   "181-365": 0, ">365": 1}
+    assert out["assigned"]["median_days"] == pytest.approx(205.0)   # de [10,400]

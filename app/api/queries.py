@@ -117,6 +117,23 @@ _LAG_METRICS = {
     "published": ("days_ahead_vs_nvd_published", _LAG_BINS_PUBLISHED),
 }
 
+# "Cola de espera": antigüedad (días desde first_seen_at hasta now()) de las
+# pendientes. Bins plantilla {age}. El grupo se decide fuera (cve_id NULL/NOT).
+_QUEUE_AGE_EXPR = "floor(extract(epoch FROM (now() - c.first_seen_at)) / 86400)"
+_QUEUE_AGE_BINS = (
+    ("0-7", "{age} BETWEEN 0 AND 7"),
+    ("8-30", "{age} BETWEEN 8 AND 30"),
+    ("31-90", "{age} BETWEEN 31 AND 90"),
+    ("91-180", "{age} BETWEEN 91 AND 180"),
+    ("181-365", "{age} BETWEEN 181 AND 365"),
+    (">365", "{age} > 365"),
+)
+# Partición del conjunto pending por asignación de CVE.
+_QUEUE_GROUPS = {
+    "unassigned": "c.cve_id IS NULL",       # esperando asignación de CVE
+    "assigned": "c.cve_id IS NOT NULL",     # esperando publicación en NVD
+}
+
 
 def _like_pattern(term: str, *, contains: bool = True) -> str:
     """Escapa los comodines LIKE (%, _) y la barra invertida del input del
@@ -388,6 +405,39 @@ def lag_histogram(session: Session, months: int = 12, exclude_backfill: bool = T
              "median": float(r["median"]) if r["median"] is not None else None}
             for r in year_rows
         ]
+    return out
+
+
+def queue_age(session: Session) -> dict[str, Any]:
+    """"Cola de espera": distribución de la ANTIGÜEDAD (días desde first_seen_at
+    hasta ahora) de las vulnerabilidades pendientes (conjunto canónico
+    PENDING_WHERE_SQL), partida en dos grupos:
+      - unassigned: sin cve_id (esperando asignación de CVE)
+      - assigned:   con cve_id (esperando publicación en NVD)
+    Por grupo: bins fijos de días, total y median_days (percentile_cont en SQL).
+    Excluye first_seen_at < 1990 (fechas cero corruptas, ver AGENT_CHANGELOG)."""
+    age = _QUEUE_AGE_EXPR
+    bin_exprs = ",\n               ".join(
+        f"count(*) FILTER (WHERE {cond.format(age=age)}) AS bin_{i}"
+        for i, (_, cond) in enumerate(_QUEUE_AGE_BINS)
+    )
+    out: dict[str, Any] = {}
+    for name, group_cond in _QUEUE_GROUPS.items():
+        where = (f"{PENDING_WHERE_SQL} AND c.first_seen_at >= '{_LAG_MIN_DATE}'::timestamptz"
+                 f" AND {group_cond}")
+        row = session.execute(text(f"""
+            SELECT count(*) AS n,
+                   percentile_cont(0.5) WITHIN GROUP (ORDER BY {age}) AS median,
+                   {bin_exprs}
+            FROM candidates c
+            WHERE {where}
+        """)).mappings().one()
+        out[name] = {
+            "total": int(row["n"]),
+            "median_days": float(row["median"]) if row["median"] is not None else None,
+            "bins": [{"label": label, "count": int(row[f"bin_{i}"])}
+                     for i, (label, _) in enumerate(_QUEUE_AGE_BINS)],
+        }
     return out
 
 
