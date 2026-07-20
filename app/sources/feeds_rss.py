@@ -50,6 +50,8 @@ _FEEDS: list[tuple] = [
      "https://spring.io/security.atom"),
     ("fortiguard_psirt", "FortiGuard PSIRT IR Advisories", 2,
      "https://www.fortiguard.com/rss/ir.xml"),
+    ("msrc", "Microsoft Security Response Center (MSRC) Update Guide", 2,
+     "https://api.msrc.microsoft.com/update-guide/rss"),
     ("fulldisclosure", "Full Disclosure Mailing List", 3,
      "https://seclists.org/rss/fulldisclosure.rss"),
     ("oss_security", "oss-security Mailing List", 3,
