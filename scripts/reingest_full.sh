@@ -26,7 +26,7 @@ export FORESHOCK_OSV_MONTHS=0                 # 0 = histórico completo
 export FORESHOCK_OSV_MAX_PER_ECOSYSTEM=0      # 0 = sin cap
 export FORESHOCK_REDHAT_LOOKBACK_DAYS=4000    # ~11 años (histórico)
 export FORESHOCK_GITHUB_COMMITS_SINCE=2026-05-01   # cutoff FIJO (no rueda)
-export FORESHOCK_GITHUB_TOP_N=10000
+export FORESHOCK_GITHUB_TOP_N=1000
 
 echo "================ REINGEST START $(date -u) ================"
 
@@ -49,7 +49,7 @@ done
 #    top-N. Cada pasada procesa PER_RUN repos del registro: se calculan las
 #    pasadas necesarias (ceil(TOP_N/PER_RUN)); antes había 15 hardcodeadas,
 #    insuficientes para 10000/500 = 20.
-TOP_N="${FORESHOCK_GITHUB_TOP_N:-10000}"
+TOP_N="${FORESHOCK_GITHUB_TOP_N:-1000}"
 PER_RUN="${FORESHOCK_GITHUB_REPOS_PER_RUN:-500}"
 PASSES=$(( (TOP_N + PER_RUN - 1) / PER_RUN ))
 for i in $(seq 1 "$PASSES"); do

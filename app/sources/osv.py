@@ -13,6 +13,8 @@ advisory extrae TODO lo aprovechable:
 
 from __future__ import annotations
 
+import re
+
 import json
 import zipfile
 from datetime import UTC, datetime, timedelta
@@ -51,6 +53,9 @@ def _cvss_vectors(rec: dict) -> list[str]:
             if isinstance(score, str) and score.startswith("CVSS:"):
                 out.append(score)
     return list(dict.fromkeys(out))  # únicos, en orden
+
+
+_MALWARE_TITLE = re.compile(r"^\s*malicious (package|code)", re.IGNORECASE)
 
 
 def _affected(rec: dict, is_malware: bool) -> tuple[list[AffectedInput], list[str]]:
@@ -194,8 +199,22 @@ class OsvSource(BaseSource):
         cve = _cve_alias(aliases)
         if not cve and not osv_id:
             return None
-        is_malware = bool(osv_id and osv_id.upper().startswith("MAL-"))
+        # Advisories INFORMATIVOS (RUSTSEC "unmaintained"/"notice"...): no son
+        # vulnerabilidades; se descartan para no ensuciar `pending`. El flag vive
+        # en database_specific a nivel raíz O dentro de cada affected[].
+        if (rec.get("database_specific") or {}).get("informational") or any(
+            (a.get("database_specific") or {}).get("informational")
+            for a in (rec.get("affected") or [])
+        ):
+            return None
         summary = rec.get("summary") or rec.get("details") or ""
+        # Malware: por id MAL-*, por alias MAL-* (GHSA espejo de un MAL) o por
+        # título "Malicious Package"/"malicious code" (GHSA sin alias MAL).
+        is_malware = bool(
+            (osv_id and osv_id.upper().startswith("MAL-"))
+            or any(a.upper().startswith("MAL-") for a in aliases)
+            or _MALWARE_TITLE.match(summary or "")
+        )
         affected, labels = _affected(rec, is_malware)
         alias_txt = " ".join(a for a in aliases if a != cve)
         snippet = summary

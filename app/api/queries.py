@@ -44,8 +44,11 @@ _PENDING_CORE_SQL = (
     " AND NOT EXISTS (SELECT 1 FROM affected_products apm"
     " WHERE apm.candidate_id = c.id AND apm.kind = 'malware')"
 )
+# withdrawn IS NOT TRUE: advisories retirados o "Duplicate Advisory" de GHSA
+# no son pendientes reales.
 PENDING_WHERE_SQL = (
-    "c.merged_into IS NULL AND c.status <> 'rejected' AND " + _PENDING_CORE_SQL
+    "c.merged_into IS NULL AND c.status <> 'rejected'"
+    " AND c.withdrawn IS NOT TRUE AND " + _PENDING_CORE_SQL
 )
 
 # Desglose de `pending` por madurez del identificador (las DOS métricas que

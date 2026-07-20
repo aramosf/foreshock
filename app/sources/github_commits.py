@@ -245,6 +245,14 @@ async def _git_scan(settings: Settings, full: str, since_iso: str,
             f"--shallow-since={since_date}", _clone_url(settings, full), tmp,
         )
         if code != 0:
+            # "error processing shallow info": el repo NO tiene commits desde
+            # since_date (repos inactivos, comunísimos en la cohorte past_cve).
+            # No es un fallo: es un escaneo vacío legítimo y el repo debe
+            # quedar como escaneado — tratarlo como error lo reintentaría
+            # eternamente al frente de la cola y atascaría el barrido entero.
+            if "error processing shallow info" in err:
+                log.debug("github.no_commits_in_window", repo=full, since=since_date)
+                return [], None
             # Repo inaccesible, rate limit, timeout (124)… NO es "sin commits":
             # se señaliza para no avanzar watermark/last_scanned_at.
             log.warning("github.git_clone_failed", repo=full, rc=code,

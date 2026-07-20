@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     # --- Fuente GitHub commits (top-N repos, changelog últimos N meses) ---
     github_api_base: str = Field(default="https://api.github.com")
     github_token: str | None = Field(default=None)  # PAT: sube el rate limit a 5000/h
-    github_top_n: int = Field(default=10000)          # nº de repos más populares a vigilar
+    github_top_n: int = Field(default=1000)           # nº de repos más populares a vigilar
     github_commits_months: int = Field(default=5)     # ventana relativa (fallback)
     # Cutoff FIJO de commits (YYYY-MM-DD). Si se fija, se usa en vez de la ventana
     # relativa y NO rueda con el tiempo -> el borde inferior queda anclado.
