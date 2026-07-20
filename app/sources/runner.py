@@ -4,6 +4,7 @@ un fetcher de forma aislada y persiste sus menciones vía el pipeline de ingesta
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -17,6 +18,11 @@ from app.sources.base import BaseSource, FetchContext, load_all
 from app.sources.http import make_client
 
 log = get_logger(__name__)
+
+# Acota la ingesta concurrente: cada _persist_mentions abre una sesión (=1
+# conexión). El pool es 5+10=15; con ~22 fuentes disparando a la vez al
+# arrancar agotaríamos el pool. 8 deja holgura para la CLI/otras sesiones.
+_INGEST_SEMAPHORE = asyncio.Semaphore(8)
 
 
 def sync_registry_to_db() -> None:
@@ -76,6 +82,21 @@ async def run_source(name: str) -> dict[str, int]:
                     row.last_error_at = datetime.now(UTC)
             return stats
 
+    # La ingesta usa una sesión SÍNCRONA (psycopg) y puede procesar decenas de
+    # miles de menciones (OSV). Ejecutarla en el event loop del AsyncIOScheduler
+    # lo CONGELA y bloquea al resto de fuentes (p.ej. github_commits esperaría a
+    # que OSV termine). Se despacha a un hilo para que las fuentes corran en
+    # paralelo real.
+    async with _INGEST_SEMAPHORE:
+        await asyncio.to_thread(_persist_mentions, name, inst, mentions, stats)
+
+    log.info("source.run", source=name, **stats)
+    return stats
+
+
+def _persist_mentions(name: str, inst: BaseSource, mentions: list,
+                      stats: dict[str, int]) -> None:
+    """Parte SÍNCRONA de run_source (BD): aislada en un hilo por to_thread."""
     with session_scope() as session:
         row = _get_source_row(session, name)
         if row is None or row.id is None:
@@ -110,9 +131,6 @@ async def run_source(name: str) -> dict[str, int]:
             inst.finalize()
         except Exception as exc:  # noqa: BLE001
             log.error("source.finalize_error", source=name, error=str(exc))
-
-    log.info("source.run", source=name, **stats)
-    return stats
 
 
 def ingest_prefetched(name: str, mentions: list) -> dict[str, int]:
