@@ -48,6 +48,21 @@ _SKIP_OWNERS = {
 _PRIORITY = {"reference": 10, "past_cve": 20, "criticality": 15, "downloads": 15,
              "top_n": 0, "manual": 30}
 
+# Repos-PoC / disclosure de un investigador (nombre con CVE-YYYY-NNNNN o
+# segmentos poc/exploit/disclosure/advisory/writeup): señal válida ("hay un PoC
+# circulando") pero de OTRA naturaleza que un fix upstream del proyecto afectado.
+# No se excluyen; se etiquetan con repo_kind='poc' para poder distinguirlos.
+_POC_NAME = re.compile(
+    r"CVE-\d{4}-\d+"
+    r"|(?:^|[-_/])(?:pocs?|exploits?|disclosures?|advisor(?:y|ies)|writeups?)(?:[-_/]|$)",
+    re.IGNORECASE,
+)
+
+
+def classify_repo_kind(full_name: str) -> str:
+    """'poc' si el nombre delata un repo-PoC/disclosure; 'project' en otro caso."""
+    return "poc" if _POC_NAME.search(full_name or "") else "project"
+
 
 def _headers(settings: Settings) -> dict[str, str]:
     h = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
@@ -82,6 +97,7 @@ def upsert_repos(session, repos: dict[str, dict]) -> int:
         rows.append({
             "full_name": full,
             "origin": origin,
+            "repo_kind": classify_repo_kind(full),
             "stars": meta.get("stars"),
             "priority": meta.get("priority", _PRIORITY.get(origin, 0)),
         })
@@ -91,6 +107,7 @@ def upsert_repos(session, repos: dict[str, dict]) -> int:
         set_={
             "priority": func.greatest(GithubRepo.__table__.c.priority, stmt.excluded.priority),
             "stars": func.coalesce(stmt.excluded.stars, GithubRepo.__table__.c.stars),
+            "repo_kind": func.coalesce(GithubRepo.__table__.c.repo_kind, stmt.excluded.repo_kind),
         },
     )
     session.execute(stmt, rows)

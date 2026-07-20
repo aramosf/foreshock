@@ -56,3 +56,17 @@ def test_next_batch_orders_priority_and_excludes_recent(session, db):
     session.flush()
     nxt = next_batch(session, 10)
     assert [b[0] for b in nxt] == ["pop/repo"]
+
+
+def test_classify_repo_kind() -> None:
+    """Etiqueta repos-PoC/disclosure sin marcar proyectos por falsos positivos
+    ('poc' dentro de 'pocketmine' NO debe casar)."""
+    from app.sources.repo_registry import classify_repo_kind
+
+    poc = ["Stalin-143/CVE-2026-29905", "absholi7ly/POC-CVE-2025-24813",
+           "lukehebe/Vulnerability-Disclosures", "ejpir/CVE-2025-55182-poc",
+           "atredispartners/advisories", "tenable/poc"]
+    project = ["kubernetes-sigs/azurefile-csi-driver", "auth0/symfony",
+               "torvalds/linux", "pocketmine/pocketmine-mp", "wso2/docs-security"]
+    assert all(classify_repo_kind(r) == "poc" for r in poc)
+    assert all(classify_repo_kind(r) == "project" for r in project)

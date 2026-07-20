@@ -328,6 +328,8 @@ class GithubRepo(SQLModel, table=True):
 
     full_name: str = Field(sa_column=SAColumn(Text, primary_key=True))     # owner/repo
     origin: str = Field(sa_column=SAColumn(Text, nullable=False))
+    # 'poc' (repo-PoC/disclosure de un CVE) | 'project' (software real). 0012.
+    repo_kind: str | None = Field(default=None, sa_column=SAColumn(Text))
     stars: int | None = Field(default=None, sa_column=SAColumn(Integer))
     priority: int = Field(
         default=0, sa_column=SAColumn(Integer, nullable=False, server_default=text("0"))
