@@ -1,7 +1,8 @@
 """API de solo lectura + frontend estático de Foreshock.
 
 Sirve:
-- /api/*  -> JSON (trend, pending, emerging, candidate, software, stats)
+- /api/*  -> JSON (trend, pending, emerging, lag/histogram, candidate,
+             software, stats)
 - /       -> la página del dashboard (app/api/static/index.html)
 
 Arranque: uvicorn app.api.main:app --host 0.0.0.0 --port 8000
@@ -83,6 +84,15 @@ def api_pending(
     return q.pending_top(s, kind, top, tech, period, granularity, maturity)
 
 
+@app.get("/api/lag/histogram")
+def api_lag_histogram(
+    months: int = Query(12, ge=1, le=600),
+    exclude_backfill: bool = Query(True),
+    s: Session = Depends(db),
+) -> dict:
+    return q.lag_histogram(s, months=months, exclude_backfill=exclude_backfill)
+
+
 @app.get("/api/emerging")
 def api_emerging(
     since_days: int | None = None,
@@ -92,6 +102,8 @@ def api_emerging(
     in_kev: bool | None = None,
     tech: str | None = None,
     pending_only: bool = False,
+    maturity: str | None = Query(None,
+        pattern="^(pre_cve|cve_prereserved|cve_reserved)$"),
     period: str | None = None,
     granularity: str = Query("month", pattern="^(month|year)$"),
     page: int = Query(1, ge=1),
@@ -100,7 +112,7 @@ def api_emerging(
 ) -> dict:
     return q.emerging_list(s, since_days=since_days, source=source, tier=tier, kind=kind,
                            in_kev=in_kev, tech=tech, pending_only=pending_only,
-                           period=period, granularity=granularity,
+                           maturity=maturity, period=period, granularity=granularity,
                            page=page, page_size=page_size)
 
 

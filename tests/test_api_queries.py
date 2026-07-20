@@ -170,3 +170,95 @@ def test_pending_desglose_por_madurez(pending_dataset, session: Session) -> None
 
     with pytest.raises(ValueError):
         q.pending_top(session, maturity="invalida")
+
+
+# --------------------------------------------------------------- extensiones dashboard
+
+def _source_id(session: Session, name: str) -> int:
+    return session.execute(
+        text("SELECT id FROM sources WHERE name=:n"), {"n": name}).scalar_one()
+
+
+def _add_mention(session: Session, cid: uuid.UUID, source_name: str) -> None:
+    session.execute(text(
+        "INSERT INTO mentions (candidate_id, source_id, seen_at, content_hash) "
+        "VALUES (:c, :s, :t, :h)"),
+        {"c": cid, "s": _source_id(session, source_name), "t": NOW, "h": str(uuid.uuid4())})
+
+
+def _set_days_ahead(session: Session, cid: uuid.UUID, days: int) -> None:
+    session.execute(text(
+        "UPDATE candidates SET days_ahead_vs_nvd_present=:d WHERE id=:c"),
+        {"d": days, "c": cid})
+
+
+def test_trend_maturity_particiona_pre_published(pending_dataset, session: Session) -> None:
+    """Los tres desgloses de madurez suman EXACTAMENTE pre_published por periodo,
+    y el periodo actual tiene el reparto esperado (1/1/1)."""
+    series = q.trend_series(session, "month", 12)
+    for row in series:
+        assert (row["pre_cve"] + row["cve_prereserved"] + row["cve_reserved"]
+                == row["pre_published"])
+    period = NOW.strftime("%Y-%m")
+    cur = next(r for r in series if r["period"] == period)
+    assert cur["pre_published"] == 3
+    assert (cur["pre_cve"], cur["cve_prereserved"], cur["cve_reserved"]) == (1, 1, 1)
+
+
+def test_lag_histogram_bins_y_exclude_backfill(sources_seeded, session: Session) -> None:
+    """Bins, mediana y p90 con datos sembrados; exclude_backfill excluye
+    candidates cuya ÚNICA fuente es de backfill, pero conserva los que tienen
+    al menos una fuente no-backfill."""
+    c1 = _mk_candidate(session, cve="CVE-2026-1001", product="a"); _set_days_ahead(session, c1, 1)
+    _add_mention(session, c1, "github_commits")
+    c2 = _mk_candidate(session, cve="CVE-2026-1002", product="a"); _set_days_ahead(session, c2, 5)
+    _add_mention(session, c2, "github_commits")
+    c3 = _mk_candidate(session, cve="CVE-2026-1003", product="a"); _set_days_ahead(session, c3, 50)
+    _add_mention(session, c3, "redhat_csaf")
+    # osv + github_commits -> tiene fuente no-backfill: se CONSERVA aun excluyendo.
+    c6 = _mk_candidate(session, cve="CVE-2026-1006", product="a"); _set_days_ahead(session, c6, 10)
+    _add_mention(session, c6, "osv"); _add_mention(session, c6, "github_commits")
+    # SOLO osv (backfill) -> se EXCLUYE con exclude_backfill=True.
+    c4 = _mk_candidate(session, cve="CVE-2026-1004", product="a"); _set_days_ahead(session, c4, 100)
+    _add_mention(session, c4, "osv")
+    # days_ahead NULL -> ignorado siempre.
+    _mk_candidate(session, cve="CVE-2026-1005", product="a")
+    session.commit()
+
+    inc = q.lag_histogram(session, months=12, exclude_backfill=True)
+    assert inc["count"] == 4
+    bins = {b["label"]: b["count"] for b in inc["bins"]}
+    assert bins == {"0-1": 1, "2-7": 1, "8-14": 1, "15-30": 0,
+                    "31-60": 1, "61-90": 0, ">90": 0}
+    assert inc["median"] == pytest.approx(7.5)
+    assert inc["p90"] == pytest.approx(38.0)
+    # etiquetas y suma de bins == count.
+    assert sum(b["count"] for b in inc["bins"]) == inc["count"]
+
+    full = q.lag_histogram(session, months=12, exclude_backfill=False)
+    assert full["count"] == 5   # entra c4 (solo osv)
+    fbins = {b["label"]: b["count"] for b in full["bins"]}
+    assert fbins[">90"] == 1
+    assert full["median"] == pytest.approx(10.0)
+
+
+def test_emerging_maturity_campo_y_filtro(pending_dataset, session: Session) -> None:
+    """Cada fila lleva `maturity` (null si no es pendiente) y `first_seen_at`;
+    el filtro maturity= restringe correctamente."""
+    out = q.emerging_list(session, page_size=100)
+    by_id = {r["id"]: r for r in out["rows"]}
+    assert all("first_seen_at" in r for r in out["rows"])
+    assert by_id[pending_dataset["precve"]]["maturity"] == "pre_cve"
+    assert by_id[pending_dataset["pend_nofila"]]["maturity"] == "cve_prereserved"
+    assert by_id[pending_dataset["pend_cvelist"]]["maturity"] == "cve_reserved"
+    # No pendientes -> maturity null.
+    assert by_id[pending_dataset["published"]]["maturity"] is None
+    assert by_id[pending_dataset["malware"]]["maturity"] is None
+    assert by_id[pending_dataset["rechazado"]]["maturity"] is None
+
+    only = q.emerging_list(session, maturity="cve_prereserved", page_size=100)
+    assert only["total"] == 1
+    assert only["rows"][0]["id"] == pending_dataset["pend_nofila"]
+
+    with pytest.raises(ValueError):
+        q.emerging_list(session, maturity="invalida")

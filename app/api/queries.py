@@ -73,6 +73,28 @@ MATURITY_SQL = {
 # unidas a affected_products, p.ej. en software_detail.
 PENDING_EXPR_SQL = "( " + _NVD_SILENT_SQL + " )"
 
+# Fuentes de BACKFILL histórico: en el arranque inicial ingirieron catálogos
+# enteros (GHSA, todos los ecosistemas OSV) con `seen_at` = fecha REAL de
+# publicación del advisory, a veces años atrás. Para un candidate cuya ÚNICA
+# fuente es una de estas, `days_ahead_vs_nvd_present` mide ese backfill, no una
+# ventaja operativa real (medias ~2108 d github_advisories, ~493 d osv). El
+# histograma de lag los excluye por defecto (exclude_backfill=True).
+BACKFILL_SOURCES = ("github_advisories", "osv")
+
+# Bins fijos (días) del histograma de days_ahead_vs_nvd_present. El primer bin
+# usa `<= 1` (captura 0/1 y cualquier delta negativo residual) para que la suma
+# de los bins iguale `count`; los grandes negativos espurios ya están fuera por
+# la guarda de observación tardía (days_ahead NULL, ver AGENT_CHANGELOG).
+_LAG_BINS = (
+    ("0-1", "c.days_ahead_vs_nvd_present <= 1"),
+    ("2-7", "c.days_ahead_vs_nvd_present BETWEEN 2 AND 7"),
+    ("8-14", "c.days_ahead_vs_nvd_present BETWEEN 8 AND 14"),
+    ("15-30", "c.days_ahead_vs_nvd_present BETWEEN 15 AND 30"),
+    ("31-60", "c.days_ahead_vs_nvd_present BETWEEN 31 AND 60"),
+    ("61-90", "c.days_ahead_vs_nvd_present BETWEEN 61 AND 90"),
+    (">90", "c.days_ahead_vs_nvd_present > 90"),
+)
+
 
 def _like_pattern(term: str, *, contains: bool = True) -> str:
     """Escapa los comodines LIKE (%, _) y la barra invertida del input del
@@ -136,9 +158,19 @@ def trend_series(session: Session, granularity: str = "month", months: int = 12,
     frag, params = _pending_filter(kind, tech)
     params["months"] = months
     and_frag = f"AND {frag}" if frag else ""
+    # Desglose de pre_published por MADUREZ en la MISMA query (FILTER reutiliza
+    # MATURITY_SQL): pre_cve + cve_prereserved + cve_reserved == pre_published
+    # por periodo (partición exacta). Alimenta el gráfico de detecciones por
+    # madurez y las sparklines de KPIs del dashboard.
     pre = session.execute(text(f"""
         SELECT to_char(date_trunc('{unit}', c.first_seen_at), '{fmt}') AS period,
-               count(DISTINCT c.id) AS n
+               count(DISTINCT c.id) AS n,
+               count(DISTINCT c.id) FILTER (WHERE {MATURITY_SQL['pre_cve']})
+                   AS pre_cve,
+               count(DISTINCT c.id) FILTER (WHERE {MATURITY_SQL['cve_prereserved']})
+                   AS cve_prereserved,
+               count(DISTINCT c.id) FILTER (WHERE {MATURITY_SQL['cve_reserved']})
+                   AS cve_reserved
         FROM candidates c
         WHERE {PENDING_WHERE_SQL}
           {and_frag}
@@ -146,13 +178,19 @@ def trend_series(session: Session, granularity: str = "month", months: int = 12,
         GROUP BY 1
     """), params).all()
 
+    def _blank(period: str) -> dict[str, Any]:
+        return {"period": period, "published": 0, "pre_published": 0,
+                "pre_cve": 0, "cve_prereserved": 0, "cve_reserved": 0}
+
     merged: dict[str, dict[str, Any]] = {}
     for period, n in pub:
-        merged.setdefault(period, {"period": period, "published": 0, "pre_published": 0})
-        merged[period]["published"] = int(n)
-    for period, n in pre:
-        merged.setdefault(period, {"period": period, "published": 0, "pre_published": 0})
-        merged[period]["pre_published"] = int(n)
+        merged.setdefault(period, _blank(period))["published"] = int(n)
+    for period, n, pc, pr, rs in pre:
+        row = merged.setdefault(period, _blank(period))
+        row["pre_published"] = int(n)
+        row["pre_cve"] = int(pc)
+        row["cve_prereserved"] = int(pr)
+        row["cve_reserved"] = int(rs)
     return [merged[p] for p in sorted(merged)]
 
 
@@ -223,14 +261,92 @@ def pending_top(session: Session, kind: str = "product", top: int = 20,
     return out
 
 
+def lag_histogram(session: Session, months: int = 12,
+                  exclude_backfill: bool = True) -> dict[str, Any]:
+    """Distribución de `days_ahead_vs_nvd_present` (días entre nuestra primera
+    detección y la observación en NVD) para candidates ya reconciliados con su
+    CVE. Bins fijos + mediana + p90 (percentile_cont en SQL, no en Python).
+
+    - Ignora `days_ahead NULL` (la guarda de observación tardía los pone a NULL
+      a propósito: no son ventaja real — ver AGENT_CHANGELOG).
+    - `exclude_backfill`: excluye candidates cuya ÚNICA fuente es de backfill
+      histórico (ver BACKFILL_SOURCES), cuyas medias no reflejan ventaja
+      operativa. Un candidate con al menos una fuente NO-backfill se conserva.
+    """
+    months = max(1, months)
+    params: dict[str, Any] = {"months": months}
+    where = [
+        "c.merged_into IS NULL",
+        "c.days_ahead_vs_nvd_present IS NOT NULL",
+        "c.first_seen_at >= date_trunc('month', now()) - make_interval(months => :months)",
+    ]
+    if exclude_backfill:
+        # Conserva el candidate si tiene ALGUNA mención de una fuente no-backfill.
+        placeholders = ", ".join(f":bf{i}" for i in range(len(BACKFILL_SOURCES)))
+        where.append(
+            "EXISTS (SELECT 1 FROM mentions m JOIN sources s ON s.id = m.source_id"
+            f" WHERE m.candidate_id = c.id AND s.name NOT IN ({placeholders}))"
+        )
+        for i, name in enumerate(BACKFILL_SOURCES):
+            params[f"bf{i}"] = name
+    where_sql = " AND ".join(where)
+
+    bin_exprs = ",\n           ".join(
+        f"count(*) FILTER (WHERE {cond}) AS bin_{i}"
+        for i, (_, cond) in enumerate(_LAG_BINS)
+    )
+    row = session.execute(text(f"""
+        SELECT count(*) AS n,
+               percentile_cont(0.5) WITHIN GROUP (
+                   ORDER BY c.days_ahead_vs_nvd_present) AS median,
+               percentile_cont(0.9) WITHIN GROUP (
+                   ORDER BY c.days_ahead_vs_nvd_present) AS p90,
+               {bin_exprs}
+        FROM candidates c
+        WHERE {where_sql}
+    """), params).mappings().one()
+
+    return {
+        "months": months,
+        "exclude_backfill": exclude_backfill,
+        "count": int(row["n"]),
+        "median": float(row["median"]) if row["median"] is not None else None,
+        "p90": float(row["p90"]) if row["p90"] is not None else None,
+        "bins": [{"label": label, "count": int(row[f"bin_{i}"])}
+                 for i, (label, _) in enumerate(_LAG_BINS)],
+    }
+
+
+# CASE (SQL) que etiqueta la MADUREZ de un candidate para filas que pueden NO
+# ser pendientes (p.ej. en emerging): null si no es pending; si lo es, la
+# partición pre_cve/cve_prereserved/cve_reserved. Reutiliza PENDING_WHERE_SQL y
+# MATURITY_SQL — no dupliques esos fragmentos.
+_MATURITY_CASE_SQL = (
+    "CASE WHEN " + PENDING_WHERE_SQL + " THEN (CASE"
+    " WHEN " + MATURITY_SQL["pre_cve"] + " THEN 'pre_cve'"
+    " WHEN " + MATURITY_SQL["cve_prereserved"] + " THEN 'cve_prereserved'"
+    " ELSE 'cve_reserved' END) ELSE NULL END"
+)
+
+
 def emerging_list(session: Session, *, since_days: int | None = None, source: str | None = None,
                   tier: int | None = None, kind: str | None = None, in_kev: bool | None = None,
                   tech: str | None = None, pending_only: bool = False,
+                  maturity: str | None = None,
                   period: str | None = None, granularity: str = "month",
                   page: int = 1, page_size: int = 50) -> dict[str, Any]:
-    """Tabla de candidates con filtros y paginación."""
+    """Tabla de candidates con filtros y paginación. Cada fila incluye `maturity`
+    (null si no es pendiente) y `first_seen_at`."""
     where = ["c.merged_into IS NULL"]
     params: dict[str, Any] = {}
+    if maturity is not None:
+        if maturity not in MATURITY_SQL:
+            raise ValueError(f"maturity inválida: {maturity!r}")
+        # La madurez solo es significativa DENTRO del conjunto pending (un CVE ya
+        # publicado también cumpliría "cve_id NOT NULL AND mirror", pero NO es
+        # 'cve_reserved'). Por eso el filtro implica pending, igual que el CASE
+        # de `maturity` y que /api/pending.
+        where.append(PENDING_WHERE_SQL + " AND " + MATURITY_SQL[maturity])
     if since_days:
         where.append("c.last_seen_at >= :since_cutoff")
         params["since_cutoff"] = _dt.datetime.now(_dt.UTC) - _dt.timedelta(days=since_days)
@@ -268,7 +384,8 @@ def emerging_list(session: Session, *, since_days: int | None = None, source: st
     rows = session.execute(text(f"""
         SELECT c.id, c.cve_id, c.status, c.vuln_type, c.in_kev,
                c.days_ahead_vs_nvd_present, c.mention_count, c.source_count,
-               c.severity_hint, c.last_seen_at,
+               c.severity_hint, c.last_seen_at, c.first_seen_at,
+               {_MATURITY_CASE_SQL} AS maturity,
                (SELECT base_score FROM cvss_scores v WHERE v.candidate_id=c.id
                   ORDER BY base_score DESC NULLS LAST LIMIT 1) AS cvss,
                (SELECT string_agg(DISTINCT s.name, ',') FROM mentions m
