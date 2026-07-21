@@ -53,3 +53,44 @@ def test_trickest_product_y_pocs(tmp_path):
     assert "PHP" in (m.title or "")
     assert m.flags["has_public_poc"] is True
     assert "https://github.com/foo/CVE-2024-4577" in m.reference_urls
+
+
+def test_wordfence_cves_extrae_de_cve_y_titulo():
+    from app.sources.wordfence import _cves
+    assert _cves({"cve": "CVE-2026-1111"}) == ["CVE-2026-1111"]
+    assert _cves({"cve": ["CVE-2026-1001", "CVE-2026-1002"]}) == ["CVE-2026-1001", "CVE-2026-1002"]
+    assert _cves({"cve": None, "title": "SQLi (CVE-2026-3333)"}) == ["CVE-2026-3333"]
+    assert _cves({"cve": None, "title": "sin cve"}) == []
+
+
+def test_cisco_parse_json_multi_cve():
+    import asyncio
+
+    from app.sources.base import FetchContext
+    from app.sources.cisco_psirt import CiscoPsirtSource
+
+    class _Resp:
+        def json(self):
+            return [{"identifier": "cisco-sa-x", "title": "Cisco Foo",
+                     "cve": "CVE-2026-1001", "summary": "y CVE-2026-1002 tambien",
+                     "severity": "High", "firstPublished": "2026-06-01T00:00:00.000+0000",
+                     "url": "https://cisco.test/x"}]
+
+    class _Ctx:
+        async def _get(self, *a, **k):
+            return _Resp()
+
+    async def run():
+        src = CiscoPsirtSource()
+        import app.sources.cisco_psirt as mod
+        orig = mod.get
+        mod.get = lambda *a, **k: _Ctx()._get()
+        try:
+            return await src.fetch(FetchContext(http=None))  # type: ignore[arg-type]
+        finally:
+            mod.get = orig
+
+    ms = asyncio.run(run())
+    cves = sorted(m.cve_id for m in ms)
+    assert cves == ["CVE-2026-1001", "CVE-2026-1002"]
+    assert ms[0].seen_at.year == 2026

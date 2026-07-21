@@ -48,9 +48,11 @@ def archive_response(url: str, content: bytes, content_type: str | None = None) 
 
 
 async def cached_download(client: httpx.AsyncClient, url: str, key: str,
-                          ttl: int | None = None) -> str:
+                          ttl: int | None = None,
+                          headers: dict[str, str] | None = None) -> str:
     """Descarga `url` a cache/download/<key> por streaming. Reusa el fichero si es
-    más reciente que `ttl` segundos. Devuelve la ruta local (conservada)."""
+    más reciente que `ttl` segundos. Devuelve la ruta local (conservada).
+    `headers`: cabeceras extra (p.ej. Authorization para feeds con API key)."""
     settings = get_settings()
     ttl = settings.cache_reuse_ttl_seconds if ttl is None else ttl
     directory = os.path.join(_cache_dir(), "download")
@@ -66,7 +68,8 @@ async def cached_download(client: httpx.AsyncClient, url: str, key: str,
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=key + ".", suffix=".tmp")
     os.close(fd)
     try:
-        async with client.stream("GET", url, timeout=300.0) as resp:
+        async with client.stream("GET", url, timeout=300.0,
+                                 headers=headers, follow_redirects=True) as resp:
             resp.raise_for_status()
             with open(tmp, "wb") as fh:
                 async for chunk in resp.aiter_bytes():

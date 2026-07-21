@@ -68,10 +68,13 @@ class Settings(BaseSettings):
     criticality_csv_url: str | None = Field(default=None)   # CSV OpenSSF Criticality Score
     pypi_downloads_top_n: int = Field(default=0)            # >0 => top-N PyPI por descargas
 
-    # --- VulnCheck KEV (token gratis en vulncheck.com) ---
+    # --- VulnCheck (token gratis en vulncheck.com) ---
     vulncheck_token: str | None = Field(default=None)
     vulncheck_api_base: str = Field(default="https://api.vulncheck.com/v3")
     vulncheck_max_pages: int = Field(default=50)
+
+    # --- Wordfence Intelligence (WP; API key gratuita en wordfence.com) ---
+    wordfence_api_key: str | None = Field(default=None)
 
     # --- OSV.dev (ecosistemas de paquetes) ---
     osv_ecosystems: str = Field(default="PyPI,Go,crates.io,RubyGems,Packagist")

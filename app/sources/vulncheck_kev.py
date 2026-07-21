@@ -7,15 +7,61 @@ queda inactiva (devuelve []).
 
 from __future__ import annotations
 
+import re
+
 from dateutil.parser import isoparse
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.ingest.affected import AffectedInput
 from app.sources.base import BaseSource, FetchContext, register
 from app.sources.http import get
 from app.ingest.service import FetchedMention
 
 log = get_logger(__name__)
+
+# owner/repo de un clone_ssh_url git@github.com:owner/repo.git -> URL https.
+_SSH = re.compile(r"git@github\.com:([\w.-]+/[\w.-]+?)(?:\.git)?$")
+
+
+def _kev_date(it: dict):
+    """Fecha KEV = la MÁS TEMPRANA entre date_added propio y las de explotación
+    reportada (VulnCheck reporta a veces ANTES que CISA -> señal pre-KEV)."""
+    dates = []
+    for src in ([it.get("date_added")]
+                + [r.get("date_added") for r in (it.get("vulncheck_reported_exploitation") or [])]):
+        if src:
+            try:
+                dates.append(isoparse(src).date())
+            except (ValueError, TypeError):
+                pass
+    return min(dates) if dates else None
+
+
+def _enrichment(it: dict) -> dict:
+    """Extrae de un registro vulncheck-kev los datos extra que el fetcher
+    ignoraba: producto afectado, CWEs, referencias de exploit/explotación y si
+    hay PoC público (vulncheck_xdb)."""
+    xdb = it.get("vulncheck_xdb") or []
+    refs: list[str] = []
+    for x in xdb:
+        if x.get("xdb_url"):
+            refs.append(x["xdb_url"])
+        m = _SSH.match(x.get("clone_ssh_url") or "")
+        if m:
+            refs.append(f"https://github.com/{m.group(1)}")
+    refs += [r.get("url") for r in (it.get("vulncheck_reported_exploitation") or [])
+             if isinstance(r, dict) and r.get("url")]
+    affected = []
+    product = it.get("product")
+    if product:
+        affected.append(AffectedInput(product=product, vendor=it.get("vendorProject")))
+    return {
+        "affected": affected or None,
+        "cwe_ids": [c for c in (it.get("cwes") or []) if isinstance(c, str)] or None,
+        "reference_urls": list(dict.fromkeys(refs))[:50] or None,
+        "has_public_poc": bool(xdb),
+    }
 
 
 @register
@@ -50,25 +96,26 @@ class VulnCheckKevSource(BaseSource):
                 break
             for it in items:
                 cves = it.get("cve") or []
-                added = it.get("date_added")
-                kev_date = None
-                if added:
-                    try:
-                        kev_date = isoparse(added).date()
-                    except (ValueError, TypeError):
-                        kev_date = None
-                name = it.get("name") or (cves[0] if cves else None)
+                kev_date = _kev_date(it)
+                name = (it.get("vulnerabilityName") or it.get("name")
+                        or it.get("product") or (cves[0] if cves else None))
+                ransom = it.get("knownRansomwareCampaignUse")
+                snippet = " | ".join(p for p in [
+                    it.get("vendorProject"), it.get("product"),
+                    it.get("shortDescription") or it.get("description"),
+                    f"ransomware={ransom}" if ransom and ransom != "Unknown" else None,
+                ] if p)[:2000] or None
+                enr = _enrichment(it)
+                # PoC público -> flag; el resto (afectado, cwe, refs) se aplica
+                # al candidate vía _apply_candidate_updates.
+                flags = {"in_kev": True, "kev_date": kev_date, "kev_source": "vulncheck"}
+                if enr.pop("has_public_poc"):
+                    flags["has_public_poc"] = True
                 for cve in cves:
-                    out.append(
-                        FetchedMention(
-                            url=f"https://nvd.nist.gov/vuln/detail/{cve}",
-                            title=f"VulnCheck KEV: {name}"[:200],
-                            snippet=(it.get("description") or "")[:2000] or None,
-                            cve_id=cve,
-                            flags={"in_kev": True, "kev_date": kev_date,
-                                   "kev_source": "vulncheck"},
-                        )
-                    )
+                    out.append(FetchedMention(
+                        url=f"https://nvd.nist.gov/vuln/detail/{cve}",
+                        title=f"VulnCheck KEV: {name}"[:200],
+                        snippet=snippet, cve_id=cve, flags=flags, **enr))
             meta = body.get("_meta") or {}
             total_pages = meta.get("total_pages")
             if total_pages is not None:
