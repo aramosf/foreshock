@@ -18,7 +18,11 @@ from sqlalchemy.orm import Session
 import datetime as _dt
 
 # Allowlist de granularidad -> (unidad date_trunc, formato to_char).
-_GRAN = {"month": ("month", "YYYY-MM"), "year": ("year", "YYYY")}
+# granularidad -> (unidad date_trunc, formato to_char). 'week' usa semana ISO
+# (IYYY = año-ISO, IW = semana-ISO) -> etiquetas tipo "2026-W29".
+_GRAN = {"week": ("week", 'IYYY-"W"IW'),
+         "month": ("month", "YYYY-MM"),
+         "year": ("year", "YYYY")}
 
 # ----------------------------------------------------------------- pending
 # Definición CANÓNICA de "pending" — la métrica central del proyecto (decisión
@@ -78,8 +82,10 @@ PENDING_EXPR_SQL = "( " + _NVD_SILENT_SQL + " )"
 # publicación del advisory, a veces años atrás. Para un candidate cuya ÚNICA
 # fuente es una de estas, `days_ahead_vs_nvd_present` mide ese backfill, no una
 # ventaja operativa real (medias ~2108 d github_advisories, ~493 d osv). El
-# histograma de lag los excluye por defecto (exclude_backfill=True).
-BACKFILL_SOURCES = ("github_advisories", "osv")
+# histograma de lag y la cola de espera los excluyen por defecto. Se incluye
+# gemnasium: la cola de pendientes sin CVE >365 d es casi 100% de estas fuentes
+# de archivo y desvirtúa la lectura de "antigüedad real".
+BACKFILL_SOURCES = ("github_advisories", "osv", "gemnasium")
 
 # Suelo de fechas válidas: candidates con first_seen_at anterior (p.ej. el año
 # 0001 por una fecha 'published' cero en OSV/Debian, ya corregido en el fetcher)
@@ -143,8 +149,13 @@ def _like_pattern(term: str, *, contains: bool = True) -> str:
 
 
 def _period_bounds(period: str, granularity: str) -> tuple[_dt.datetime, _dt.datetime] | None:
-    """Convierte 'YYYY-MM'/'YYYY' en [inicio, fin) para filtrar por periodo."""
+    """Convierte 'YYYY-Www'/'YYYY-MM'/'YYYY' en [inicio, fin) para filtrar."""
     try:
+        if granularity == "week":
+            # 'YYYY-Www' (semana ISO) -> [lunes ISO, lunes+7d).
+            ys, ws = period.upper().split("-W")
+            start = _dt.datetime.fromisocalendar(int(ys), int(ws), 1).replace(tzinfo=_dt.UTC)
+            return start, start + _dt.timedelta(days=7)
         if granularity == "year":
             y = int(period)
             return (_dt.datetime(y, 1, 1, tzinfo=_dt.UTC),
@@ -176,26 +187,37 @@ def _pending_filter(kind: str | None, tech: str | None) -> tuple[str, dict[str, 
 
 
 def trend_series(session: Session, granularity: str = "month", months: int = 12,
-                 kind: str | None = None, tech: str | None = None) -> list[dict[str, Any]]:
+                 kind: str | None = None, tech: str | None = None,
+                 days: int | None = None) -> list[dict[str, Any]]:
     """Serie temporal: publicados vs pendientes (pre-publicados) por periodo.
 
     El cutoff se alinea al inicio del periodo (date_trunc) para que el bucket
-    más antiguo sea COMPLETO; con `now() - N*30 días` quedaba cortado a mitad.
+    más antiguo sea COMPLETO. Si se pasa `days`, la ventana es de N días (ignora
+    `months`) — útil con granularidad semanal para ventanas cortas.
     """
     unit, fmt = _GRAN.get(granularity, _GRAN["month"])
     months = max(1, months)
+    # La ventana: por días (si days) o por meses. make_interval con el param que
+    # toque; el otro queda inactivo.
+    if days is not None:
+        window_sql = "make_interval(days => :days)"
+        window_params: dict[str, Any] = {"days": days}
+    else:
+        window_sql = "make_interval(months => :months)"
+        window_params = {"months": months}
+    cutoff_sql = f"date_trunc('{unit}', now()) - {window_sql}"
 
     pub = session.execute(text(f"""
         SELECT to_char(date_trunc('{unit}', cvelist_published_at), '{fmt}') AS period,
                count(*) AS n
         FROM published_cves
         WHERE state='PUBLISHED'
-          AND cvelist_published_at >= date_trunc('{unit}', now()) - make_interval(months => :months)
+          AND cvelist_published_at >= {cutoff_sql}
         GROUP BY 1
-    """), {"months": months}).all()
+    """), window_params).all()
 
     frag, params = _pending_filter(kind, tech)
-    params["months"] = months
+    params.update(window_params)
     and_frag = f"AND {frag}" if frag else ""
     # Desglose de pre_published por MADUREZ en la MISMA query (FILTER reutiliza
     # MATURITY_SQL): pre_cve + cve_prereserved + cve_reserved == pre_published
@@ -213,7 +235,7 @@ def trend_series(session: Session, granularity: str = "month", months: int = 12,
         FROM candidates c
         WHERE {PENDING_WHERE_SQL}
           {and_frag}
-          AND c.first_seen_at >= date_trunc('{unit}', now()) - make_interval(months => :months)
+          AND c.first_seen_at >= {cutoff_sql}
         GROUP BY 1
     """), params).all()
 
@@ -311,6 +333,16 @@ def _lag_source_filter(source: str | None, params: dict[str, Any]) -> str:
             " WHERE m.candidate_id = c.id AND s.name = :source)")
 
 
+def _exclude_backfill_sql(params: dict[str, Any]) -> str:
+    """Fragmento (sin AND inicial): conserva el candidate solo si tiene ALGUNA
+    mención de una fuente NO-backfill (ver BACKFILL_SOURCES). Rellena params."""
+    placeholders = ", ".join(f":bf{i}" for i in range(len(BACKFILL_SOURCES)))
+    for i, name in enumerate(BACKFILL_SOURCES):
+        params[f"bf{i}"] = name
+    return ("EXISTS (SELECT 1 FROM mentions m JOIN sources s ON s.id = m.source_id"
+            f" WHERE m.candidate_id = c.id AND s.name NOT IN ({placeholders}))")
+
+
 def lag_histogram(session: Session, months: int = 12, exclude_backfill: bool = True,
                   metric: str = "present", source: str | None = None) -> dict[str, Any]:
     """Distribución de la ventaja/atraso de Foreshock frente a NVD.
@@ -346,14 +378,7 @@ def lag_histogram(session: Session, months: int = 12, exclude_backfill: bool = T
         "c.first_seen_at >= date_trunc('month', now()) - make_interval(months => :months)",
     ]
     if exclude_backfill:
-        # Conserva el candidate si tiene ALGUNA mención de fuente no-backfill.
-        placeholders = ", ".join(f":bf{i}" for i in range(len(BACKFILL_SOURCES)))
-        where.append(
-            "EXISTS (SELECT 1 FROM mentions m JOIN sources s ON s.id = m.source_id"
-            f" WHERE m.candidate_id = c.id AND s.name NOT IN ({placeholders}))"
-        )
-        for i, name in enumerate(BACKFILL_SOURCES):
-            params[f"bf{i}"] = name
+        where.append(_exclude_backfill_sql(params))
     where_sql = " AND ".join(where) + _lag_source_filter(source, params)
 
     bin_exprs = ",\n           ".join(
@@ -409,14 +434,17 @@ def lag_histogram(session: Session, months: int = 12, exclude_backfill: bool = T
     return out
 
 
-def queue_age(session: Session) -> dict[str, Any]:
+def queue_age(session: Session, exclude_backfill: bool = True) -> dict[str, Any]:
     """"Cola de espera": distribución de la ANTIGÜEDAD (días desde first_seen_at
     hasta ahora) de las vulnerabilidades pendientes (conjunto canónico
     PENDING_WHERE_SQL), partida en dos grupos:
       - unassigned: sin cve_id (esperando asignación de CVE)
       - assigned:   con cve_id (esperando publicación en NVD)
     Por grupo: bins fijos de días, total y median_days (percentile_cont en SQL).
-    Excluye first_seen_at < 1990 (fechas cero corruptas, ver AGENT_CHANGELOG)."""
+    Excluye first_seen_at < 1990 (fechas cero corruptas, ver AGENT_CHANGELOG).
+    `exclude_backfill` (misma semántica que /api/lag/histogram): descarta
+    candidates cuya ÚNICA fuente es de archivo histórico — la cola sin CVE
+    >365 d es casi 100% de esas fuentes y desvirtúa la lectura."""
     age = _QUEUE_AGE_EXPR
     bin_exprs = ",\n               ".join(
         f"count(*) FILTER (WHERE {cond.format(age=age)}) AS bin_{i}"
@@ -424,15 +452,18 @@ def queue_age(session: Session) -> dict[str, Any]:
     )
     out: dict[str, Any] = {}
     for name, group_cond in _QUEUE_GROUPS.items():
+        params: dict[str, Any] = {}
         where = (f"{PENDING_WHERE_SQL} AND c.first_seen_at >= '{_LAG_MIN_DATE}'::timestamptz"
                  f" AND {group_cond}")
+        if exclude_backfill:
+            where += " AND " + _exclude_backfill_sql(params)
         row = session.execute(text(f"""
             SELECT count(*) AS n,
                    percentile_cont(0.5) WITHIN GROUP (ORDER BY {age}) AS median,
                    {bin_exprs}
             FROM candidates c
             WHERE {where}
-        """)).mappings().one()
+        """), params).mappings().one()
         out[name] = {
             "total": int(row["n"]),
             "median_days": float(row["median"]) if row["median"] is not None else None,
@@ -613,14 +644,20 @@ def software_detail(session: Session, ecosystem: str, name: str,
 
 
 def source_stats(session: Session) -> list[dict[str, Any]]:
-    """Media de días de ventaja por fuente (deduplicada, sin fusionados)."""
-    rows = session.execute(text("""
+    """Media de días de ventaja por fuente (deduplicada, sin fusionados).
+
+    Guarda defensiva: ignora days_ahead > 3650 o first_seen_at < 1990 — fechas
+    corruptas residuales (ver AGENT_CHANGELOG) no deben volver a inflar medias.
+    """
+    rows = session.execute(text(f"""
         SELECT source, round(avg(days_ahead)::numeric, 1) AS avg_days, count(*) AS candidates
         FROM (
           SELECT DISTINCT s.name AS source, c.id, c.days_ahead_vs_nvd_present AS days_ahead
           FROM sources s JOIN mentions m ON m.source_id=s.id
           JOIN candidates c ON c.id=m.candidate_id
           WHERE c.days_ahead_vs_nvd_present IS NOT NULL AND c.merged_into IS NULL
+            AND c.days_ahead_vs_nvd_present <= 3650
+            AND c.first_seen_at >= '{_LAG_MIN_DATE}'::timestamptz
         ) t GROUP BY source ORDER BY avg_days DESC
     """)).mappings().all()
     return [dict(r) for r in rows]

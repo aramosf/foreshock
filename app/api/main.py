@@ -60,14 +60,20 @@ def db() -> Iterator[Session]:
 
 @app.get("/api/trend")
 def api_trend(
-    granularity: str = Query("month", pattern="^(month|year)$"),
+    granularity: str = Query("month", pattern="^(week|month|year)$"),
     months: int = Query(12, ge=1, le=600),
+    days: int | None = Query(None, ge=1, le=3660),
     kind: str | None = Query("all"),
     tech: str | None = None,
     s: Session = Depends(db),
 ) -> dict:
-    return {"granularity": granularity, "months": months,
-            "series": q.trend_series(s, granularity, months, kind, tech)}
+    out = {"granularity": granularity, "months": months,
+           "series": q.trend_series(s, granularity, months, kind, tech, days)}
+    # `days` presente en la respuesta = capacidad de ventana por días (el
+    # frontend sonda esta clave para mostrar los botones "Semana"/"1 sem").
+    if days is not None:
+        out["days"] = days
+    return out
 
 
 @app.get("/api/pending")
@@ -76,7 +82,7 @@ def api_pending(
     top: int = Query(20, ge=1, le=200),
     tech: str | None = None,
     period: str | None = None,
-    granularity: str = Query("month", pattern="^(month|year)$"),
+    granularity: str = Query("month", pattern="^(week|month|year)$"),
     maturity: str = Query("all",
         pattern="^(all|pre_cve|cve_prereserved|cve_reserved)$"),
     s: Session = Depends(db),
@@ -97,8 +103,11 @@ def api_lag_histogram(
 
 
 @app.get("/api/queue/age")
-def api_queue_age(s: Session = Depends(db)) -> dict:
-    return q.queue_age(s)
+def api_queue_age(
+    exclude_backfill: bool = Query(True),
+    s: Session = Depends(db),
+) -> dict:
+    return q.queue_age(s, exclude_backfill=exclude_backfill)
 
 
 @app.get("/api/emerging")
@@ -113,7 +122,7 @@ def api_emerging(
     maturity: str | None = Query(None,
         pattern="^(pre_cve|cve_prereserved|cve_reserved)$"),
     period: str | None = None,
-    granularity: str = Query("month", pattern="^(month|year)$"),
+    granularity: str = Query("month", pattern="^(week|month|year)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=500),
     s: Session = Depends(db),

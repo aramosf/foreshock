@@ -341,7 +341,10 @@ def test_queue_age_bins_grupos_y_mediana(db, session: Session) -> None:
                   first_seen=dt.datetime(1, 1, 1, tzinfo=dt.UTC))
     session.commit()
 
-    out = q.queue_age(session)
+    # exclude_backfill=False: estos candidates no tienen menciones, y el filtro
+    # de backfill (default) exigiría una fuente no-backfill; aquí se prueba solo
+    # la lógica de bins/grupos.
+    out = q.queue_age(session, exclude_backfill=False)
     un = {b["label"]: b["count"] for b in out["unassigned"]["bins"]}
     assert out["unassigned"]["total"] == 3          # el corrupto NO cuenta
     assert un == {"0-7": 1, "8-30": 1, "31-90": 0, "91-180": 0,
@@ -353,3 +356,61 @@ def test_queue_age_bins_grupos_y_mediana(db, session: Session) -> None:
     assert asg == {"0-7": 0, "8-30": 1, "31-90": 0, "91-180": 0,
                    "181-365": 0, ">365": 1}
     assert out["assigned"]["median_days"] == pytest.approx(205.0)   # de [10,400]
+
+
+# ---------------------------------------------------------------- granularidad semanal / days
+
+def test_period_bounds_semana_iso():
+    b = q._period_bounds("2026-W29", "week")
+    assert b is not None
+    start, end = b
+    # W29 de 2026 empieza el lunes 2026-07-13.
+    assert start == dt.datetime(2026, 7, 13, tzinfo=dt.UTC)
+    assert end == start + dt.timedelta(days=7)
+    assert q._period_bounds("basura", "week") is None
+
+
+def test_trend_days_ventana(db, session: Session) -> None:
+    # dentro de 5 días y fuera (40 días): con days=7 solo entra el reciente.
+    _mk_published(session, "CVE-2026-7001", nvd_published=False)
+    _mk_candidate(session, cve="CVE-2026-7001", product="a",
+                  first_seen=NOW - dt.timedelta(days=3))
+    _mk_published(session, "CVE-2026-7002", nvd_published=False)
+    _mk_candidate(session, cve="CVE-2026-7002", product="a",
+                  first_seen=NOW - dt.timedelta(days=40))
+    session.commit()
+    reciente = sum(r["pre_published"] for r in
+                   q.trend_series(session, "week", months=12, days=7))
+    amplio = sum(r["pre_published"] for r in
+                 q.trend_series(session, "week", months=12, days=90))
+    assert reciente == 1 and amplio == 2
+
+
+def test_queue_age_exclude_backfill(sources_seeded, session: Session) -> None:
+    # unassigned solo-backfill (osv) NO cuenta con exclude_backfill=True; el que
+    # tiene además una fuente no-backfill (github_commits) sí.
+    solo_bf = _mk_candidate(session, cve=None, product="a",
+                            first_seen=NOW - dt.timedelta(days=400))
+    _add_mention(session, solo_bf, "osv")
+    mixto = _mk_candidate(session, cve=None, product="a",
+                          first_seen=NOW - dt.timedelta(days=400))
+    _add_mention(session, mixto, "osv"); _add_mention(session, mixto, "github_commits")
+    session.commit()
+    con = q.queue_age(session, exclude_backfill=True)
+    sin = q.queue_age(session, exclude_backfill=False)
+    assert con["unassigned"]["total"] == 1     # solo el mixto
+    assert sin["unassigned"]["total"] == 2
+
+
+def test_source_stats_guarda_fechas_corruptas(sources_seeded, session: Session) -> None:
+    # candidate con days_ahead absurdo (>3650) y first_seen año 0001: ignorado.
+    good = _mk_candidate(session, cve="CVE-2026-8001", product="a")
+    _set_days_ahead(session, good, 10); _add_mention(session, good, "redhat_csaf")
+    bad = _mk_candidate(session, cve="CVE-2026-8002", product="a",
+                        first_seen=dt.datetime(1, 1, 1, tzinfo=dt.UTC))
+    _set_days_ahead(session, bad, 900000); _add_mention(session, bad, "redhat_csaf")
+    session.commit()
+    stats = {r["source"]: r for r in q.source_stats(session)}
+    assert "redhat_csaf" in stats
+    assert stats["redhat_csaf"]["avg_days"] == 10.0   # el corrupto no infla
+    assert stats["redhat_csaf"]["candidates"] == 1
