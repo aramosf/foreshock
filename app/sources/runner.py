@@ -5,9 +5,11 @@ un fetcher de forma aislada y persiste sus menciones vía el pipeline de ingesta
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC, datetime
 
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.core.db import session_scope
@@ -58,6 +60,28 @@ def _get_source_row(session: Session, name: str) -> SourceRow | None:
     ).scalar_one_or_none()
 
 
+# Códigos SQLSTATE transitorios: deadlock y fallo de serialización. Con la
+# ingesta CONCURRENTE (varias fuentes tocan el mismo candidate "caliente" a la
+# vez, p.ej. un CVE del KEV que también trae poc_in_github), Postgres puede
+# matar una de las transacciones en conflicto; reintentar casi siempre resuelve.
+_RETRIABLE_PG = {"40P01", "40001"}
+
+
+def _ingest_isolated(session: Session, source_id: int, m, *, retries: int = 3):
+    """Ingesta UNA mención en su savepoint, reintentando ante deadlock/
+    serialización. Devuelve IngestResult (o propaga si no es transitorio)."""
+    for attempt in range(retries + 1):
+        try:
+            with session.begin_nested():
+                return ingest_mention(session, source_id, m)
+        except OperationalError as exc:
+            code = getattr(getattr(exc, "orig", None), "sqlstate", None)
+            if attempt < retries and code in _RETRIABLE_PG:
+                time.sleep(0.05 * (attempt + 1))
+                continue
+            raise
+
+
 async def run_source(name: str) -> dict[str, int]:
     """Ejecuta un fetcher una vez. Devuelve métricas. Nunca propaga excepción del fetch."""
     registry = load_all()
@@ -104,11 +128,10 @@ def _persist_mentions(name: str, inst: BaseSource, mentions: list,
         source_id = row.id
         for m in mentions:
             stats["fetched"] += 1
-            # Aislamiento por mención vía savepoint: una mención mala no revierte
-            # el lote entero ni pierde las válidas.
+            # Aislamiento por mención vía savepoint (con reintento ante deadlock):
+            # una mención mala no revierte el lote ni pierde las válidas.
             try:
-                with session.begin_nested():
-                    res = ingest_mention(session, source_id, m)
+                res = _ingest_isolated(session, source_id, m)
                 if res.created:
                     stats["created"] += 1
                 elif res.duplicate:
@@ -145,8 +168,7 @@ def ingest_prefetched(name: str, mentions: list) -> dict[str, int]:
         source_id = row.id
         for m in mentions:
             try:
-                with session.begin_nested():
-                    res = ingest_mention(session, source_id, m)
+                res = _ingest_isolated(session, source_id, m)
                 if res.created:
                     stats["created"] += 1
                 elif res.duplicate:

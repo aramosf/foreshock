@@ -7,6 +7,21 @@ const $ = s => document.querySelector(s);
 const SVGNS = "http://www.w3.org/2000/svg";
 const fmt = n => n == null ? "—" : Number(n).toLocaleString("es-ES");
 const fmtD = iso => (iso || "").slice(0, 10);
+/* Periodos legibles: "2026-07" -> "07/26", "2026-W29" -> "s29/26", "2026" -> "2026". */
+function fmtP(p) {
+  p = String(p || "");
+  if (/^\d{4}-\d{2}$/.test(p)) return p.slice(5, 7) + "/" + p.slice(2, 4);
+  if (/^\d{4}-W\d{2}$/.test(p)) return "s" + p.slice(6) + "/" + p.slice(2, 4);
+  return p;
+}
+/* Semana ISO de una fecha ISO ("2026-07-15…") -> "2026-W29". */
+function isoWeekKey(iso) {
+  const d = new Date(iso.slice(0, 10) + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7) + 3);   // jueves ISO
+  const y = d.getUTCFullYear(), jan4 = new Date(Date.UTC(y, 0, 4));
+  const week = 1 + Math.round(((d - jan4) / 86400000 - 3 + ((jan4.getUTCDay() + 6) % 7)) / 7);
+  return y + "-W" + String(week).padStart(2, "0");
+}
 
 async function j(url) { const r = await fetch(url); if (!r.ok) throw new Error(url + " → " + r.status); return r.json(); }
 function qs(obj) { return Object.entries(obj).filter(([, v]) => v != null && v !== "" && v !== false)
@@ -40,11 +55,21 @@ const SURGE_PERIOD = "2026-03";           // inflexión observada en publicacion
 
 /* ================= estado ================= */
 const state = { win: "ytd", gran: "month", mat: "all", period: null,
-                tech: "", kind: "all", source: "", kevOnly: false, cvssMin: 0 };
-function monthsForWin() {
-  if (state.win !== "ytd") return +state.win;
-  const now = new Date();                 // meses transcurridos de 2026 (mín. 1)
-  return Math.max(1, (now.getFullYear() - 2026) * 12 + now.getMonth() + 1);
+                tech: "", kind: "all", source: "", kevOnly: false, cvssMin: 0,
+                sgran: "week" };            // eje temporal de la inspección
+const CAPS = { week: false, days: false };  // se sondea contra la API al arrancar
+function winParams() {
+  switch (state.win) {
+    case "w1": return { days: 7 };
+    case "m1": return { months: 1 };
+    case "m6": return { months: 6 };
+    case "12": return { months: 12 };
+    case "24": return { months: 24 };
+    default: {                              // "2026": meses transcurridos del año
+      const now = new Date();
+      return { months: Math.max(1, (now.getFullYear() - 2026) * 12 + now.getMonth() + 1) };
+    }
+  }
 }
 
 /* datos vivos */
@@ -136,13 +161,12 @@ function drawMat() {
     });
     if (isSel) el("rect", { x: x - 3, y: y(acc) - 3, width: bw + 6, height: y(0) - y(acc) + 3, rx: 5, class: "col-sel" }, svg);
     if (data.length <= 26 && (data.length <= 13 || i % 2 === (data.length - 1) % 2))
-      txt(el("text", { x: x + bw / 2, y: H - 9, "text-anchor": "middle", class: "axis" }, svg),
-          d.period.length > 4 ? d.period.slice(2) : d.period);
+      txt(el("text", { x: x + bw / 2, y: H - 9, "text-anchor": "middle", class: "axis" }, svg), fmtP(d.period));
     if (i === data.length - 1)
       txt(el("text", { x: x + bw / 2, y: y(acc) - 7, "text-anchor": "middle", class: "dlabel" }, svg), fmt(acc));
     const hit = el("rect", { x: mL + band * i, y: mT, width: band, height: ih, class: "colhit",
       tabindex: 0, role: "button", "aria-label": d.period + ": " + fmt(acc) + " pendientes" }, svg);
-    hit.addEventListener("pointermove", ev => showTT(ev.clientX, ev.clientY, d.period,
+    hit.addEventListener("pointermove", ev => showTT(ev.clientX, ev.clientY, fmtP(d.period),
       MK.map((k, ki) => [MAT[k].varn, MAT[k].label, fmt(vals[ki])]).concat([[null, "Total", fmt(acc)]])));
     hit.addEventListener("pointerleave", hideTT);
     const sel = () => { state.period = state.period === d.period ? null : d.period; applyAll(); };
@@ -168,8 +192,7 @@ function drawLinePanel(id, data, get, lineCls, washCls, dotCls) {
         v >= 1000 ? (v / 1000) + "k" : fmt(v));
   });
   data.forEach((d, i) => { if (n <= 13 || i % 2 === (n - 1) % 2)
-    txt(el("text", { x: xa(i), y: H - 6, "text-anchor": "middle", class: "axis" }, svg),
-        d.period.length > 4 ? d.period.slice(2) : d.period); });
+    txt(el("text", { x: xa(i), y: H - 6, "text-anchor": "middle", class: "axis" }, svg), fmtP(d.period)); });
   let area = `M${xa(0)} ${y(0)}`, line = "";
   data.forEach((d, i) => { const px = xa(i), py = y(get(d)); area += ` L${px} ${py}`; line += (i ? " L" : "M") + px + " " + py; });
   area += ` L${xa(n - 1)} ${y(0)} Z`;
@@ -187,7 +210,7 @@ function renderCtx() {
   if (!data.length) return;
   drawLinePanel("#c-pub", data, d => d.published, "l-ctx", "wash-ctx", "f-ctx");
   drawLinePanel("#c-pre", data, d => d.pre_published, "l-acc", "wash-acc", "f-acc");
-  $("#ctx-note").textContent = `Mostrando ${data[0].period} → ${data[data.length - 1].period}`;
+  $("#ctx-note").textContent = `Mostrando ${fmtP(data[0].period)} → ${fmtP(data[data.length - 1].period)}`;
   const n = ctx.b - ctx.a, isPreset = ctx.b === CTXS.length && [6, 12, 24].includes(n);
   [...$("#ctx-win").children].forEach(b => b.classList.toggle("on", isPreset && +b.dataset.v === n));
 }
@@ -248,7 +271,7 @@ function bindCrosshair() {
     const x = svgs[0]._x(bi);
     svgs.forEach(s => { if (!s._ch) return; s._ch.setAttribute("x1", x); s._ch.setAttribute("x2", x); s._ch.style.opacity = 1; });
     const d = data[bi];
-    showTT(ev.clientX, ev.clientY, d.period, [
+    showTT(ev.clientX, ev.clientY, fmtP(d.period), [
       ["--ctx", "Publicados NVD", fmt(d.published)],
       ["--accent", "Pendientes", fmt(d.pre_published)],
     ]);
@@ -355,9 +378,9 @@ function drawSrc(stats) {
     hit.addEventListener("pointerleave", hideTT);
   });
   el("line", { x1: mL, y1: mT - 4, x2: mL, y2: H - 8, class: "baseline" }, svg);
-  $("#src-note").textContent = "Una barra larga con pocas vulnerabilidades (pasa el cursor para ver el número) " +
-    "es una fuente nicho pero muy temprana; una media con miles, el grueso fiable de la señal." +
-    (rest > 0 ? ` Se muestran las ${rows.length} fuentes con más ventaja; quedan ${rest} por debajo.` : "");
+  $("#src-note").textContent = "Barra larga con pocas vulnerabilidades = fuente nicho pero temprana; " +
+    "media con miles = el grueso fiable de la señal." +
+    (rest > 0 ? ` Se muestran ${rows.length} de ${rows.length + rest} fuentes.` : "");
   // el desplegable de fuente del drill se rellena con las fuentes reales
   const sel = $("#f-src");
   if (sel.options.length <= 1)
@@ -415,19 +438,22 @@ function drawKpis(lag) {
   const box = $("#kpis"); box.replaceChildren();
   if (!TREND.length) return;
   const last = TREND[TREND.length - 1], prev = TREND[TREND.length - 2] || last;
+  const pl = fmtP(last.period), pp = fmtP(prev.period);
   const items = [
-    { lbl: "CVE pre-reservado (nuevas este periodo)", star: true, v: last.cve_prereserved,
-      d: last.cve_prereserved - prev.cve_prereserved,
-      cap: "La señal estrella: alguien ya asignó un número CVE pero no existe ficha pública. Es lo más temprano que se puede saber de un CVE.",
+    { lbl: `CVE pre-reservado — nuevas en ${pl}`, star: true, v: last.cve_prereserved,
+      d: last.cve_prereserved - prev.cve_prereserved, dlbl: "vs " + pp,
+      cap: "La señal estrella: CVE ya asignado pero sin ficha pública.",
       vals: TREND.map(d => d.cve_prereserved) },
-    { lbl: "pre-CVE (nuevas este periodo)", v: last.pre_cve, d: last.pre_cve - prev.pre_cve,
-      cap: "Detecciones que solo tienen el código de su fuente (GHSA, RUSTSEC, ZDI…): aún sin número CVE asignado.",
+    { lbl: `pre-CVE — nuevas en ${pl}`, v: last.pre_cve, d: last.pre_cve - prev.pre_cve, dlbl: "vs " + pp,
+      cap: "Solo tienen el código de su fuente (GHSA, RUSTSEC, ZDI…), sin CVE aún.",
       vals: TREND.map(d => d.pre_cve) },
-    { lbl: "CVE reservado (nuevas este periodo)", v: last.cve_reserved, d: last.cve_reserved - prev.cve_reserved,
-      cap: "CVE con ficha ya creada en MITRE cuyo análisis NVD todavía no publica. A un paso de ser oficial.",
+    { lbl: `CVE reservado — nuevas en ${pl}`, v: last.cve_reserved, d: last.cve_reserved - prev.cve_reserved,
+      dlbl: "vs " + pp,
+      cap: "Con ficha MITRE; NVD aún sin publicar. A un paso de ser oficial.",
       vals: TREND.map(d => d.cve_reserved) },
-    lag ? { lbl: "Mediana días hasta CVE público", v: lag.median, unit: " d", fixed: "p90 " + fmt(lag.p90) + " d",
-      cap: "La mitad de los CVEs publicados (últimos 12 meses) se conocieron aquí con al menos esa antelación.",
+    lag ? { lbl: "Mediana días hasta CVE público", v: lag.median, unit: " d",
+      fixed: `p90: ${fmt(lag.p90)} d — 1 de cada 10 se anticipó más`,
+      cap: "La mitad de los CVEs publicados (últimos 12 m) se conocieron aquí con esa antelación o más.",
       vals: null } : null,
   ].filter(Boolean);
   items.forEach(it => {
@@ -440,7 +466,7 @@ function drawKpis(lag) {
       const sp = document.createElement("span");
       if (it.d > 0 && it.star) sp.className = "up";
       sp.textContent = (it.d >= 0 ? "+" : "") + fmt(it.d);
-      de.append(sp, document.createTextNode(" vs periodo anterior"));
+      de.append(sp, document.createTextNode(" " + it.dlbl));
     }
     const cap = document.createElement("div"); cap.className = "tcap"; cap.textContent = it.cap;
     c.append(l, v, de);
@@ -505,7 +531,7 @@ function drawChips(total) {
       b.setAttribute("aria-label", "Quitar filtro"); b.addEventListener("click", clear); c.appendChild(b); }
     box.appendChild(c);
   };
-  mk(state.period ? "periodo: " + state.period : "todos los periodos (clic en una columna de la evolución)",
+  mk(state.period ? "periodo: " + fmtP(state.period) : "todos los periodos (clic en una columna de la evolución)",
      !!state.period, () => { state.period = null; applyAll(); });
   mk(state.mat === "all" ? "todas las madureces" : MAT[state.mat].label, state.mat !== "all", () => setMat("all"));
   if (state.tech) mk("tecnología: " + state.tech, true, () => { $("#f-tech").value = ""; state.tech = ""; applyAll(); });
@@ -527,19 +553,23 @@ function drawScatter(rows) {
   const ybandNull = mT + ih + nullBand - 6;
   txt(el("text", { x: mL - 7, y: ybandNull + 3, "text-anchor": "end", class: "axis" }, svg), "s/CVSS");
   el("line", { x1: mL, y1: ybandNull, x2: W - mR, y2: ybandNull, class: "gridline" }, svg);
-  const periods = [...new Set(rows.map(r => r.p))].sort();
+  const bucket = r => state.sgran === "week" ? isoWeekKey(r.first_seen_at) : r.first_seen_at.slice(0, 7);
+  const frac = r => state.sgran === "week"
+    ? ((new Date(r.first_seen_at.slice(0, 10) + "T00:00:00Z").getUTCDay() + 6) % 7) / 7
+    : (+(r.first_seen_at.slice(8, 10) || 15) - 1) / 31;
+  const periods = [...new Set(rows.map(bucket))].sort();
   const span = Math.max(periods.length, 1);
   if (periods.length) {
     const step = Math.ceil(periods.length / 6);
     periods.forEach((p, i) => { if (i % step === 0)
       txt(el("text", { x: mL + i / span * iw + iw / span / 2, y: H - 24, "text-anchor": "middle", class: "axis" }, svg),
-          p.length > 4 ? p.slice(2) : p); });
+          fmtP(p)); });
   }
   txt(el("text", { x: mL, y: H - 7, class: "axis" }, svg), "primera detección →");
   txt(el("text", { x: W - mR, y: H - 7, "text-anchor": "end", class: "axis" }, svg), "eje y: CVSS");
   rows.forEach(r => {
     const cy = r.cvss == null ? ybandNull : mT + ih - r.cvss / 10 * ih;
-    const cx = mL + ((periods.indexOf(r.p) + (r.day - 1) / 31) / span) * iw;
+    const cx = mL + ((periods.indexOf(bucket(r)) + frac(r)) / span) * iw;
     if (r.in_kev) el("circle", { cx, cy, r: 8, class: "ring-kev" }, svg);
     el("circle", { cx, cy, r: 5, class: (MAT[r.maturity] || MAT.pre_cve).cls + " ring" }, svg);
     const hit = el("circle", { cx, cy, r: 13, class: "colhit", tabindex: 0, role: "button", "aria-label": r.key }, svg);
@@ -692,6 +722,13 @@ addEventListener("keydown", ev => { if (ev.key === "Escape") closeDrawer(); });
 
 /* ================= carga de datos ================= */
 async function loadStatic() {
+  // sonda: ¿soporta la API granularidad semanal y ventana en días?
+  try {
+    const probe = await j("/api/trend?granularity=week&months=1&days=7");
+    CAPS.week = true; CAPS.days = "days" in probe;
+  } catch { /* API sin semana: los botones quedan ocultos */ }
+  document.querySelectorAll('#f-gran [data-v="week"]').forEach(b => { b.hidden = !CAPS.week; });
+  document.querySelectorAll('#f-win [data-v="w1"]').forEach(b => { b.hidden = !(CAPS.week && CAPS.days); });
   const months = 24;
   const [lagR, queueR, statsR, ctxR] = await Promise.allSettled([
     j("/api/lag/histogram?months=12"),
@@ -710,10 +747,9 @@ async function loadStatic() {
   if (window._lag) drawHist(window._lag);
 }
 async function loadMain() {
-  const months = monthsForWin();
   const base = { top: 100, kind: "all", period: state.period, granularity: state.gran };
   const [trend, pall, ...mats] = await Promise.all([
-    j(`/api/trend?${qs({ months, granularity: state.gran })}`),
+    j(`/api/trend?${qs({ ...winParams(), granularity: state.gran })}`),
     j(`/api/pending?${qs(base)}`),
     ...MK.map(k => j(`/api/pending?${qs({ ...base, maturity: k })}`)),
   ]);
@@ -732,12 +768,11 @@ async function loadDrill() {
     kind: state.kind === "all" ? null : state.kind,
     tech: state.tech, source: state.source, in_kev: state.kevOnly || null,
   })}`);
-  ROWS = d.rows.map(r => {
-    const fs = r.first_seen_at || r.last_seen_at || "";
-    return { key: r.cve_id || r.id, p: state.gran === "year" ? fs.slice(0, 4) : fs.slice(0, 7),
-             day: +(fs.slice(8, 10) || 15), cvss: r.cvss, maturity: r.maturity,
-             in_kev: r.in_kev, vuln_type: r.vuln_type, sources: r.sources, first_seen_at: fs };
-  });
+  ROWS = d.rows.map(r => ({
+    key: r.cve_id || r.id, cvss: r.cvss, maturity: r.maturity, in_kev: r.in_kev,
+    vuln_type: r.vuln_type, sources: r.sources,
+    first_seen_at: r.first_seen_at || r.last_seen_at || "",
+  }));
   ROWS._total = d.total;
   renderDrill();
 }
@@ -777,12 +812,19 @@ $("#f-kind").addEventListener("change", () => { state.kind = $("#f-kind").value;
 $("#f-src").addEventListener("change", () => { state.source = $("#f-src").value; applyAll(); });
 $("#f-cvss").addEventListener("change", () => { state.cvssMin = +$("#f-cvss").value; renderDrill(); });
 $("#f-kev").addEventListener("change", () => { state.kevOnly = $("#f-kev").checked; applyAll(); });
+$("#s-gran").addEventListener("click", ev => {
+  const b = ev.target.closest("button[data-v]"); if (!b) return;
+  [...$("#s-gran").children].forEach(x => x.classList.toggle("on", x === b));
+  state.sgran = b.dataset.v;
+  renderDrill();                      // solo re-dibuja: no hace falta refetch
+});
 let tdeb;
 $("#f-tech").addEventListener("input", () => { clearTimeout(tdeb);
   tdeb = setTimeout(() => { state.tech = $("#f-tech").value.trim(); applyAll(); }, 250); });
 $("#f-reset").addEventListener("click", () => {
   Object.assign(state, { win: "ytd", gran: "month", mat: "all", period: null,
-                         tech: "", kind: "all", source: "", kevOnly: false, cvssMin: 0 });
+                         tech: "", kind: "all", source: "", kevOnly: false, cvssMin: 0, sgran: "week" });
+  [...$("#s-gran").children].forEach(x => x.classList.toggle("on", x.dataset.v === "week"));
   $("#f-tech").value = ""; $("#f-kind").value = "all"; $("#f-src").value = "";
   $("#f-cvss").value = "0"; $("#f-kev").checked = false;
   [["#f-win", "ytd"], ["#f-gran", "month"], ["#f-mat", "all"]].forEach(([id, v]) =>

@@ -239,7 +239,7 @@ tbody tr[data-key]:hover,tbody tr[data-key]:focus-visible{background:var(--accen
     <p class="sub" style="margin-bottom:0">Foreshock rastrea fuentes públicas (avisos de GitHub y OSV, commits, boletines de fabricante, ZDI, MSRC, listas de exploits…) buscando vulnerabilidades que todavía no aparecen en NVD, la base de datos oficial. Ese hueco temporal es la ventaja que mide todo lo que ves aquí.</p>
     <div class="parentbox">
       <b>Pendiente — la métrica central</b>
-      <p>Vulnerabilidad ya detectada en alguna fuente, con la tecnología afectada identificada, de la que NVD aún no ha publicado nada. Toda pendiente está en exactamente uno de estos tres subconjuntos, según cómo de avanzado va su identificador camino de ser un CVE público (de claro a oscuro en todas las gráficas):</p>
+      <p>Detectada en alguna fuente, con la tecnología identificada, y sin nada publicado en NVD. Cada pendiente está en exactamente uno de estos tres estados, de claro a oscuro en todas las gráficas:</p>
       <div class="subsets">
         <div class="subbox sb-m1"><b>pre-CVE <span class="cnt" id="g-c1">—</span></b>
           <p>Solo tiene el código nativo de su fuente (GHSA-, RUSTSEC-, ZDI-CAN-, VU#…). Nadie le ha asignado todavía un número CVE.</p></div>
@@ -260,11 +260,11 @@ tbody tr[data-key]:hover,tbody tr[data-key]:focus-visible{background:var(--accen
   <div class="filters" id="filters">
     <label>Ventana
       <span class="seg" id="f-win">
-        <button data-v="ytd" class="on">2026</button><button data-v="12">12 m</button><button data-v="24">24 m</button>
+        <button data-v="w1" hidden>1 sem</button><button data-v="m1">1 m</button><button data-v="m6">6 m</button><button data-v="ytd" class="on">2026</button><button data-v="12">12 m</button><button data-v="24">24 m</button>
       </span>
     </label>
     <label>Granularidad
-      <span class="seg" id="f-gran"><button data-v="month" class="on">Mes</button><button data-v="year">Año</button></span>
+      <span class="seg" id="f-gran"><button data-v="week" hidden>Semana</button><button data-v="month" class="on">Mes</button><button data-v="year">Año</button></span>
     </label>
     <label>Madurez
       <span class="seg" id="f-mat">
@@ -282,14 +282,14 @@ tbody tr[data-key]:hover,tbody tr[data-key]:focus-visible{background:var(--accen
     <div class="card">
       <div class="tile"><div class="lbl">Pendientes ahora</div></div>
       <div class="hero-n" id="hero-n">—</div>
-      <p class="hero-cap">Vulnerabilidades detectadas en fuentes públicas, con la tecnología afectada identificada, de las que NVD todavía no ha publicado nada. Cada una es tiempo de reacción ganado: puedes evaluar y mitigar antes de que exista información oficial.</p>
+      <p class="hero-cap">Detectadas en fuentes públicas, con tecnología identificada, sin nada publicado en NVD. Cada una es margen de reacción ganado.</p>
     </div>
     <div class="card">
       <h2>En qué estado de madurez están las pendientes</h2>
-      <p class="sub">Cada bloque es uno de los tres estados; su ancho, cuántas pendientes hay ahora en él. Los tres suman el total de la izquierda. Clic en un estado para filtrar todo el panel.</p>
+      <p class="sub">El ancho de cada bloque = pendientes en ese estado (suman el total de la izquierda). Clic para filtrar todo el panel.</p>
       <div class="meter" id="meter" role="img" aria-label="Reparto por madurez"></div>
       <div class="mlegend" id="mleg"></div>
-      <p class="note">El color avanza con la madurez, de claro a oscuro: primero solo existe el código de la fuente (pre-CVE), luego alguien asigna un número CVE que aún no tiene ficha pública (CVE pre-reservado), y por último MITRE crea la ficha pero NVD sigue sin publicar el análisis (CVE reservado). Cuanto más oscuro, más cerca de hacerse oficial.</p>
+      <p class="note">Cuanto más oscuro, más cerca de hacerse oficial.</p>
     </div>
   </div>
 
@@ -299,18 +299,18 @@ tbody tr[data-key]:hover,tbody tr[data-key]:focus-visible{background:var(--accen
   <!-- ============ evolución por madurez ============ -->
   <div class="card" style="margin-bottom:14px">
     <h2>Evolución: cuándo se detectaron las pendientes actuales</h2>
-    <p class="sub">Cada columna es un periodo; su altura, cuántas de las vulnerabilidades hoy pendientes se detectaron por primera vez en él, coloreadas por su estado de madurez actual.</p>
-    <div class="howto"><b>Cómo leerla:</b> una columna alta y reciente significa mucha señal nueva ese mes. Las columnas antiguas que siguen aquí son vulnerabilidades que NVD lleva meses sin publicar. La marca vertical señala <b>marzo de 2026</b>, cuando arranca la aceleración. <b>Clic en una columna</b> para inspeccionar sus vulnerabilidades en la sección de abajo.</div>
+    <p class="sub">Cuántas de las pendientes actuales se detectaron por primera vez en cada periodo, por su madurez actual.</p>
+    <div class="howto"><b>Cómo leerla:</b> columna alta y reciente = mucha señal nueva; columnas antiguas = NVD lleva meses sin publicarlas. La marca ▲ señala el inicio de la aceleración (mar 2026). <b>Clic en una columna</b> para inspeccionarla abajo.</div>
     <svg class="chart" id="c-mat" viewBox="0 0 940 250" role="img" aria-label="Detecciones pendientes por madurez y periodo"></svg>
     <div class="mlegend" id="mleg2" style="margin-top:8px"></div>
-    <p class="note">El periodo en curso está incompleto; su columna crecerá hasta cerrar el mes.</p>
+    <p class="note">El periodo en curso está incompleto.</p>
   </div>
 
   <!-- ============ publicados vs pendientes ============ -->
   <div class="card" style="margin-bottom:14px">
     <h2>Contexto: lo oficial frente a lo anticipado — la aceleración de 2026</h2>
-    <p class="sub">Arriba, en gris, los CVEs que NVD/MITRE publican oficialmente cada periodo (miles). Abajo, en azul, las vulnerabilidades que Foreshock detectó y siguen sin publicarse (cientos).</p>
-    <div class="howto"><b>Cómo leerla:</b> los dos paneles comparten el eje temporal pero cada uno tiene su propia escala — los volúmenes difieren en un orden de magnitud y en un solo eje la señal azul sería invisible. La franja sombreada marca la aceleración iniciada en <b>marzo de 2026</b>: si el panel azul crece más deprisa que el gris, la brecha entre lo que se sabe y lo que NVD publica se está ensanchando. <b>Zoom:</b> arrastra sobre la gráfica para acercar un rango; doble clic o «12 m» para volver a un año.</div>
+    <p class="sub">Gris: CVEs publicados oficialmente (miles/mes). Azul: detecciones que siguen sin publicarse (cientos).</p>
+    <div class="howto"><b>Cómo leerla:</b> dos escalas distintas, un mismo eje temporal. La franja marca la aceleración desde mar 2026. <b>Zoom:</b> arrastra para acercar un rango; doble clic vuelve a 12 m.</div>
     <div style="display:flex;align-items:center;gap:10px;margin:0 0 8px;flex-wrap:wrap">
       <span class="seg" id="ctx-win">
         <button data-v="6">6 m</button><button data-v="12" class="on">12 m</button><button data-v="24">24 m</button>
@@ -326,21 +326,21 @@ tbody tr[data-key]:hover,tbody tr[data-key]:focus-visible{background:var(--accen
       <div class="sub mono" style="margin:8px 0 0">Detecciones pendientes (NVD sin publicar) / periodo</div>
       <svg class="chart" id="c-pre" viewBox="0 0 940 150" role="img" aria-label="Detecciones pendientes por periodo"></svg>
     </div>
-    <p class="note">Los indicadores «desde mar 2026» comparan la media mensual de los meses completos desde marzo con la del semestre anterior.</p>
+    <p class="note">Los chips comparan la media mensual desde mar 2026 (meses completos) con el semestre previo.</p>
   </div>
 
   <!-- ============ tiempo hasta CVE público ============ -->
   <div class="grid g-lag">
     <div class="card">
       <h2>Tiempo hasta CVE público</h2>
-      <p class="sub">De las vulnerabilidades que ya llegaron a publicarse en NVD (últimos 12 meses): cuántos días antes las había detectado Foreshock.</p>
-      <div class="howto"><b>Cómo leerla:</b> cada barra agrupa CVEs por los días de antelación conseguidos. Este es el indicador que resume el valor del sistema: cuánto tiempo real de reacción da.</div>
+      <p class="sub">CVEs ya publicados (últimos 12 m): cuántos días antes los detectó Foreshock.</p>
+      <div class="howto"><b>Cómo leerla:</b> cada barra agrupa CVEs por la antelación conseguida — el margen real de reacción que da el sistema.</div>
       <svg class="chart" id="c-hist" viewBox="0 0 520 222" role="img" aria-label="Histograma de días de ventaja"></svg>
       <p class="note" id="lag-note"></p>
     </div>
     <div class="card">
       <h2>Qué fuentes avisan antes</h2>
-      <p class="sub">Media de días de antelación sobre NVD que consigue cada fuente de detección, con cuántas vulnerabilidades aporta.</p>
+      <p class="sub">Media de días de antelación por fuente, y cuántas vulnerabilidades aporta cada una.</p>
       <svg class="chart" id="c-src" viewBox="0 0 460 290" role="img" aria-label="Ventaja media por fuente"></svg>
       <p class="note" id="src-note">Una barra larga con pocas vulnerabilidades (pasa el cursor para ver el número) es una fuente nicho pero muy temprana; una media con miles, el grueso fiable de la señal.</p>
     </div>
@@ -349,20 +349,20 @@ tbody tr[data-key]:hover,tbody tr[data-key]:focus-visible{background:var(--accen
   <!-- ============ cola de espera ============ -->
   <div class="card" style="margin-bottom:14px">
     <h2>La cola de espera: qué está atascado y desde cuándo</h2>
-    <p class="sub">Dos preguntas sobre lo que sigue sin ser oficial: ¿cuántos advisories con número CVE llevan X días esperando a que NVD publique su análisis? ¿Y cuántos siguen esperando siquiera la asignación de un CVE?</p>
-    <div class="howto"><b>Cómo leerla:</b> cada par de barras agrupa las vulnerabilidades pendientes por el tiempo que llevan esperando desde su primera detección. El azul medio (con CVE) es cola que se mueve: NVD suele resolverla en semanas. El azul claro (sin CVE) es la cola profunda: si un advisory pasa meses sin número CVE, lo probable es que nunca lo reciba — y solo Foreshock lo tiene identificado con su tecnología afectada.</div>
+    <p class="sub">¿Cuántos advisories con CVE esperan la publicación de NVD, y cuántos esperan siquiera un número CVE?</p>
+    <div class="howto"><b>Cómo leerla:</b> pares de barras por tiempo en espera desde la primera detección. Azul medio: con CVE, cola que NVD resuelve en semanas. Azul claro: sin CVE — pasado un año, probablemente nunca lo reciba.</div>
     <svg class="chart" id="c-queue" viewBox="0 0 940 260" role="img" aria-label="Cola de espera por antigüedad"></svg>
     <div class="mlegend" style="margin-top:8px">
       <span class="k"><span class="sw" style="background:var(--m1)"></span> <span id="q-leg-sin">Esperando asignación de CVE</span></span>
       <span class="k"><span class="sw" style="background:var(--m2)"></span> <span id="q-leg-con">Esperando publicación en NVD (ya con CVE)</span></span>
     </div>
-    <p class="note">La cola sin CVE de más de un año es en su mayoría archivo histórico de GitHub/OSV que nunca recibió número. Se excluyen fechas de advisory corruptas (anteriores a 1990).</p>
+    <p class="note" id="q-note">La cola antigua sin CVE procede del archivo histórico importado (GitHub/OSV/Gemnasium), no de la vigilancia en vivo.</p>
   </div>
 
   <!-- ============ top software ============ -->
   <div class="card" style="margin-bottom:14px">
     <h2>Software con más vulnerabilidades pendientes</h2>
-    <p class="sub">Qué tecnologías acumulan más vulnerabilidades sin publicar en NVD, con su reparto por madurez. Clic en una fila para acotar la inspección de abajo a ese software.</p>
+    <p class="sub">Tecnologías con más pendientes y su reparto por madurez. Clic en una fila para acotar la inspección.</p>
     <div style="overflow-x:auto">
       <table>
         <thead><tr><th>Software</th><th class="num">pre-CVE</th><th class="num">CVE pre-res.</th><th class="num">CVE res.</th><th class="num">Total</th><th>Reparto</th></tr></thead>
@@ -374,7 +374,7 @@ tbody tr[data-key]:hover,tbody tr[data-key]:focus-visible{background:var(--accen
   <!-- ============ drill-down ============ -->
   <div class="drill" id="drill">
     <h2>Inspección de la selección</h2>
-    <p class="sub" style="margin:2px 0 8px">Aquí aterriza cualquier acotación que hagas arriba — un periodo (clic en una columna), un estado de madurez o un software del top — y con los filtros de esta caja puedes afinar más. Se muestran las vulnerabilidades concretas que componen la selección; las etiquetas resumen los filtros activos y la × los quita.</p>
+    <p class="sub" style="margin:2px 0 8px">Cualquier acotación de arriba (periodo, madurez, software) aterriza aquí; afínala con estos filtros. Las etiquetas resumen los filtros activos; la × los quita.</p>
     <div class="filters" style="margin:8px 0 10px;padding:10px 14px">
       <label>Tecnología
         <input type="text" id="f-tech" placeholder="p. ej. typo3" size="13">
@@ -391,11 +391,14 @@ tbody tr[data-key]:hover,tbody tr[data-key]:focus-visible{background:var(--accen
           <option value="7">≥ 7 (alta)</option><option value="9">≥ 9 (crítica)</option></select>
       </label>
       <label class="chk"><input type="checkbox" id="f-kev"> solo KEV (explotación activa)</label>
+      <label>Eje temporal
+        <span class="seg" id="s-gran"><button data-v="week" class="on">Semana</button><button data-v="month">Mes</button></span>
+      </label>
     </div>
     <div class="chips" id="chips"></div>
     <div class="drill-grid">
       <div>
-        <p class="sub" style="margin-bottom:4px">Cada punto es una vulnerabilidad pendiente: su posición horizontal es la fecha de primera detección; la vertical, su gravedad CVSS (las aún sin puntuar van en la banda inferior). Un anillo rojo marca explotación activa (KEV). Clic en un punto para abrir su ficha.</p>
+        <p class="sub" style="margin-bottom:4px">Cada punto: una pendiente. X = primera detección; Y = CVSS (sin puntuar: banda inferior). Anillo rojo = KEV. Clic → ficha.</p>
         <svg class="chart" id="c-scatter" viewBox="0 0 520 300" role="img" aria-label="Vulnerabilidades de la selección por fecha y CVSS"></svg>
         <div class="mlegend" id="sleg" style="margin-top:6px"></div>
       </div>
