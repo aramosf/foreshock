@@ -251,7 +251,8 @@ def pending_top(session: Session, kind: str = "product", top: int = 20,
     if period:
         bounds = _period_bounds(period, granularity)
         if bounds:
-            extra = " AND c.first_seen_at >= :pstart AND c.first_seen_at < :pend"
+            # += : un period NO debe descartar el filtro de madurez ya acumulado
+            extra += " AND c.first_seen_at >= :pstart AND c.first_seen_at < :pend"
             params["pstart"], params["pend"] = bounds
 
     total = session.execute(text(
