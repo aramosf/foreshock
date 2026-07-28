@@ -40,6 +40,12 @@ def test_kernel_cve_regex_y_producto():
     assert _CVE.search("sin cve aquí") is None
 
 
+def test_nessus_usa_el_listado_vigente():
+    from app.sources.nessus import LISTING
+
+    assert LISTING == "https://www.tenable.com/plugins/newest?type=nessus"
+
+
 def test_trickest_product_y_pocs(tmp_path):
     from app.sources.poc_repos import TrickestCveSource
     md = tmp_path / "CVE-2024-4577.md"
@@ -61,6 +67,72 @@ def test_wordfence_cves_extrae_de_cve_y_titulo():
     assert _cves({"cve": ["CVE-2026-1001", "CVE-2026-1002"]}) == ["CVE-2026-1001", "CVE-2026-1002"]
     assert _cves({"cve": None, "title": "SQLi (CVE-2026-3333)"}) == ["CVE-2026-3333"]
     assert _cves({"cve": None, "title": "sin cve"}) == []
+
+
+def test_vulncheck_kev_date_convencion_fechas():
+    """_kev_date: fecha real más temprana; sin fechas -> None; < 1990 -> descartada."""
+    from app.sources.vulncheck_kev import _kev_date
+
+    # fecha antigua real -> datetime UTC-aware de ese año
+    dt = _kev_date({"date_added": "2013-01-15T00:00:00Z"})
+    assert dt is not None and dt.year == 2013 and dt.tzinfo is not None
+
+    # gana la MÁS temprana entre date_added y las de explotación reportada
+    dt2 = _kev_date({"date_added": "2024-05-01",
+                     "vulncheck_reported_exploitation": [{"date_added": "2022-02-20"}]})
+    assert dt2 is not None and (dt2.year, dt2.month) == (2022, 2)
+
+    # sin ninguna fecha -> None (la ingesta usará now())
+    assert _kev_date({}) is None
+    assert _kev_date({"date_added": None}) is None
+
+    # fecha corrupta / zero-value (< 1990) -> descartada -> None
+    assert _kev_date({"date_added": "0001-01-01T00:00:00Z"}) is None
+
+
+def test_vulncheck_fetch_estampa_seen_at_real_no_now():
+    """La FetchedMention lleva seen_at = fecha KEV real (no now()) y kev_date (Date)."""
+    import asyncio
+
+    import app.sources.vulncheck_kev as mod
+    from app.sources.base import FetchContext
+
+    page = {"data": [{"cve": ["CVE-2013-0808"],
+                      "date_added": "2013-05-10T00:00:00Z",
+                      "vendorProject": "Adobe", "product": "Flash"}],
+            "_meta": {"total_pages": 1}}
+
+    class _Resp:
+        def json(self):
+            return page
+
+    class _Settings:
+        vulncheck_token = "x"
+        vulncheck_max_pages = 5
+        vulncheck_api_base = "https://api.test"
+
+    async def run():
+        orig_get, orig_settings = mod.get, mod.get_settings
+
+        async def fake_get(*a, **k):
+            return _Resp()
+
+        mod.get = fake_get
+        mod.get_settings = lambda: _Settings()
+        try:
+            return await mod.VulnCheckKevSource().fetch(FetchContext(http=None))  # type: ignore[arg-type]
+        finally:
+            mod.get, mod.get_settings = orig_get, orig_settings
+
+    ms = asyncio.run(run())
+    assert len(ms) == 1
+    m = ms[0]
+    assert m.cve_id == "CVE-2013-0808"
+    # seen_at = fecha KEV real (2013), NUNCA el momento de ingesta.
+    assert m.seen_at is not None and m.seen_at.year == 2013
+    # kev_date es un date (columna candidates.kev_date), igual que cisa_kev.
+    assert m.flags["kev_date"].year == 2013
+    assert m.flags["in_kev"] is True and m.flags["kev_source"] == "vulncheck"
 
 
 def test_cisco_parse_json_multi_cve():

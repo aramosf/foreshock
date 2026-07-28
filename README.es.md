@@ -4,9 +4,9 @@
 *antes* de que MITRE/NVD los publiquen oficialmente, midiendo los "días de
 ventaja" sobre NVD por fuente.
 
-Este repositorio es el **backend de carga de datos** (sin UI): workers que
-ingieren señal de fuentes públicas a una base de datos Postgres, un pipeline de
-ingesta/reconciliación, enriquecimiento por LLM + CVSS, y una CLI de operación.
+Este repositorio es la **plataforma de carga y consulta**: workers que ingieren
+señal de fuentes públicas a Postgres, un pipeline de ingesta/reconciliación,
+enriquecimiento por LLM + CVSS, una CLI y dashboards web de solo lectura.
 
 ---
 
@@ -28,10 +28,10 @@ Ver [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) y
 | Servicio | Rol |
 |---|---|
 | `postgres` | Postgres 16 — estado canónico y señal |
-| `redis` | cache / rate-limit |
 | `migrate` | aplica migraciones Alembic y termina (los workers esperan a que acabe) |
 | `baseline-worker` | sincroniza cvelistV5 + NVD 2.0 + EPSS |
-| `sources-worker` | ejecuta los fetchers en sus cadencias e ingiere las menciones |
+| `sources-worker` | ejecuta los fetchers con concurrencia acotada e ingiere las menciones |
+| `api` | API y dashboards de vulnerabilidades y estado operativo |
 
 ```mermaid
 flowchart LR
@@ -82,13 +82,16 @@ Diagrama de componentes detallado en [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.
 ## Quickstart
 
 ```bash
-# Levanta todo: postgres + redis + migraciones + workers
+# Levanta todo: postgres + migraciones + workers + API
 docker compose up --build
 
 # Solo infraestructura para desarrollo
-docker compose up -d postgres redis
+docker compose up -d postgres
 docker compose run --rm migrate            # aplica migraciones
 ```
+
+Dashboards: <http://localhost:8000/> y estado administrativo en
+<http://localhost:8000/pending_status>.
 
 Operación con la CLI (`foreshock`, dentro de cualquier imagen del proyecto):
 
@@ -155,5 +158,5 @@ docker compose run --rm --no-deps \
 
 ## Stack
 
-Python 3.12, SQLModel/SQLAlchemy 2, Alembic, Postgres 16, Redis, httpx, feedparser,
+Python 3.12, SQLModel/SQLAlchemy 2, Alembic, Postgres 16, httpx, feedparser,
 selectolax, APScheduler, Playwright (opcional), Typer, structlog. Docker + docker-compose.

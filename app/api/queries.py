@@ -9,13 +9,12 @@ Devuelven estructuras JSON-friendly (dicts/listas). El concepto central:
 
 from __future__ import annotations
 
+import datetime as _dt
 import uuid
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-
-import datetime as _dt
 
 # Allowlist de granularidad -> (unidad date_trunc, formato to_char).
 # granularidad -> (unidad date_trunc, formato to_char). 'week' usa semana ISO
@@ -34,13 +33,18 @@ _GRAN = {"week": ("week", 'IYYY-"W"IW'),
 # Siempre con tecnología asociada NO-malware: los advisories de paquetes
 # maliciosos (OSV MAL-*, kind='malware') son señal de otra naturaleza y se
 # cuentan aparte, no aquí. Excluye tombstones fusionados y rejected.
+# El dashboard operativo empieza en 2016: registros anteriores proceden de
+# backfills/catálogos históricos heterogéneos y no representan la ventana de
+# detección que se pretende explicar. Se conservan en BD, pero no se mezclan con
+# pending ni con sus KPIs (incluido KEV).
 # La CLI (app/cli.py) reutiliza estas funciones: NO dupliques este fragmento.
+_PENDING_MIN_DATE = "2016-01-01"
 _NVD_SILENT_SQL = (
     "( c.cve_id IS NULL OR NOT EXISTS (SELECT 1 FROM published_cves p"
     " WHERE p.id = c.cve_id"
     " AND (p.nvd_published_at IS NOT NULL OR p.state = 'REJECTED')) )"
 )
-_PENDING_CORE_SQL = (
+_PENDING_SIGNAL_SQL = (
     _NVD_SILENT_SQL
     + " AND EXISTS (SELECT 1 FROM affected_products ap0"
     " WHERE ap0.candidate_id = c.id"
@@ -50,9 +54,13 @@ _PENDING_CORE_SQL = (
 )
 # withdrawn IS NOT TRUE: advisories retirados o "Duplicate Advisory" de GHSA
 # no son pendientes reales.
-PENDING_WHERE_SQL = (
+PENDING_BASE_WHERE_SQL = (
     "c.merged_into IS NULL AND c.status <> 'rejected'"
-    " AND c.withdrawn IS NOT TRUE AND " + _PENDING_CORE_SQL
+    " AND c.withdrawn IS NOT TRUE AND " + _PENDING_SIGNAL_SQL
+)
+PENDING_WHERE_SQL = (
+    PENDING_BASE_WHERE_SQL
+    + f" AND c.first_seen_at >= '{_PENDING_MIN_DATE}'::timestamptz"
 )
 
 # Desglose de `pending` por MADUREZ del identificador. cvelistV5 (MITRE) solo
@@ -73,9 +81,9 @@ MATURITY_SQL = {
     "cve_reserved": "c.cve_id IS NOT NULL AND " + _HAS_MIRROR,
 }
 
-# Variante booleana (sin exigir producto) para etiquetar filas que ya vienen
-# unidas a affected_products, p.ej. en software_detail.
-PENDING_EXPR_SQL = "( " + _NVD_SILENT_SQL + " )"
+# Variante booleana para etiquetar filas, p.ej. en software_detail. Reutiliza la
+# definición completa para no reintroducir retirados, malware o pre-2016.
+PENDING_EXPR_SQL = "( " + PENDING_WHERE_SQL + " )"
 
 # Fuentes de BACKFILL histórico: en el arranque inicial ingirieron catálogos
 # enteros (GHSA, todos los ecosistemas OSV) con `seen_at` = fecha REAL de
@@ -277,23 +285,39 @@ def pending_top(session: Session, kind: str = "product", top: int = 20,
             extra += " AND c.first_seen_at >= :pstart AND c.first_seen_at < :pend"
             params["pstart"], params["pend"] = bounds
 
-    total = session.execute(text(
-        f"SELECT count(*) FROM candidates c WHERE {PENDING_WHERE_SQL}{extra}"
-    ), params).scalar_one()
-
-    by_kind = session.execute(text(f"""
-        SELECT a.kind, count(DISTINCT c.id) AS n
-        FROM candidates c JOIN affected_products a ON a.candidate_id = c.id
-        WHERE {PENDING_WHERE_SQL}{extra}
-        GROUP BY a.kind
+    # RENDIMIENTO: antes se evaluaba PENDING_WHERE_SQL 6 veces (total + by_kind +
+    # 3× madurez + top), y cada una fuerza el escaneo caro de affected_products.
+    # Ahora son 2 queries, cada una con `pend AS MATERIALIZED` -> el predicado se
+    # evalúa UNA sola vez por query. total/by_kind/by_maturity salen de un solo
+    # UNION ALL; el top va aparte (necesita ORDER BY ... LIMIT).
+    metrics = session.execute(text(f"""
+        WITH pend AS MATERIALIZED (
+          SELECT c.id, c.cve_id FROM candidates c WHERE {PENDING_WHERE_SQL}{extra}
+        )
+        SELECT 'total' AS dim, '' AS key, count(*) AS n FROM pend
+        UNION ALL
+        SELECT 'kind', COALESCE(a.kind, ''), count(DISTINCT p.id)
+          FROM pend p JOIN affected_products a ON a.candidate_id = p.id
+          GROUP BY a.kind
+        UNION ALL
+        SELECT 'maturity', 'pre_cve', count(*) FROM pend WHERE cve_id IS NULL
+        UNION ALL
+        SELECT 'maturity', 'cve_prereserved', count(*) FROM pend p WHERE cve_id IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM published_cves pp WHERE pp.id = p.cve_id)
+        UNION ALL
+        SELECT 'maturity', 'cve_reserved', count(*) FROM pend p WHERE cve_id IS NOT NULL
+          AND EXISTS (SELECT 1 FROM published_cves pp WHERE pp.id = p.cve_id)
     """), params).all()
-
-    by_maturity = {
-        label: int(session.execute(text(
-            f"SELECT count(*) FROM candidates c WHERE {PENDING_WHERE_SQL}{extra}"
-            f" AND {cond}"), params).scalar_one())
-        for label, cond in MATURITY_SQL.items()
-    } if maturity == "all" else None
+    total = 0
+    by_kind: dict[str, int] = {}
+    by_maturity_all: dict[str, int] = {}
+    for dim, key, n in metrics:
+        if dim == "total":
+            total = int(n)
+        elif dim == "kind" and key:
+            by_kind[key] = int(n)
+        elif dim == "maturity":
+            by_maturity_all[key] = int(n)
 
     filt = ""
     if kind != "all":
@@ -304,22 +328,25 @@ def pending_top(session: Session, kind: str = "product", top: int = 20,
         params["tech"] = _like_pattern(tech)
     params["top"] = top
     rows = session.execute(text(f"""
-        SELECT a.product, count(DISTINCT c.id) AS pending
-        FROM candidates c JOIN affected_products a ON a.candidate_id = c.id
-        WHERE {PENDING_WHERE_SQL}{extra}{filt}
+        WITH pend AS MATERIALIZED (
+          SELECT c.id FROM candidates c WHERE {PENDING_WHERE_SQL}{extra}
+        )
+        SELECT a.product, count(DISTINCT p.id) AS pending
+        FROM pend p JOIN affected_products a ON a.candidate_id = p.id
+        WHERE TRUE{filt}
         GROUP BY a.product
         ORDER BY pending DESC, a.product
         LIMIT :top
     """), params).all()
     out = {
-        "total": int(total),
-        "by_kind": {k: int(n) for k, n in by_kind if k is not None},
+        "total": total,
+        "by_kind": by_kind,
         "kind": kind,
         "maturity": maturity,
         "top": [{"software": s, "pending": int(n)} for s, n in rows],
     }
-    if by_maturity is not None:
-        out["by_maturity"] = by_maturity
+    if maturity == "all":
+        out["by_maturity"] = by_maturity_all
     return out
 
 
@@ -514,8 +541,9 @@ def emerging_list(session: Session, *, since_days: int | None = None, source: st
     if in_kev:
         where.append("c.in_kev IS TRUE")
     if pending_only:
-        # Definición canónica de pending (merged_into ya está filtrado arriba).
-        where.append(_PENDING_CORE_SQL)
+        # Definición canónica completa: además de la fecha, excluye rejected,
+        # withdrawn y tombstones exactamente igual que el resto del dashboard.
+        where.append(PENDING_WHERE_SQL)
     if source or tier is not None:
         sub = ["SELECT 1 FROM mentions m JOIN sources s ON s.id=m.source_id "
                "WHERE m.candidate_id=c.id"]
@@ -661,3 +689,133 @@ def source_stats(session: Session) -> list[dict[str, Any]]:
         ) t GROUP BY source ORDER BY avg_days DESC
     """)).mappings().all()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------- pendientes críticos
+# Score de criticidad para el conjunto pending (lo que NVD aún NO ha publicado).
+# Determinista y explicable — combina las señales que YA hay en BD:
+#   in_kev          +50  (explotado en real: la señal de máxima prioridad)
+#   has_public_poc  +20  (hay PoC/exploit circulando)
+#   severidad       0-40 (CVSS base autoritativo * 4 si lo hay; si no, mapa del
+#                         severity_hint del enrichment)
+#   tier fuente      1-15 (min(tier) de sus fuentes: tier 1 avisa más pronto)
+# Rango ~0-125. No se inventa gravedad: si no hay CVSS ni severity_hint, esa
+# componente es 0 (el CVE pendiente puede no tener aún datos de severidad).
+_CRIT_SEVERITY_SQL = (
+    "COALESCE(cv.bs * 4.0, CASE lower(p.severity_hint)"
+    " WHEN 'critical' THEN 40 WHEN 'high' THEN 28 WHEN 'medium' THEN 14"
+    " WHEN 'low' THEN 4 ELSE 0 END)"
+)
+_CRIT_TIER_SQL = ("CASE tr.mt WHEN 1 THEN 15 WHEN 2 THEN 10 WHEN 3 THEN 6"
+                  " WHEN 4 THEN 3 ELSE 1 END")
+_CRIT_SCORE_SQL = (
+    "(CASE WHEN p.in_kev THEN 50 ELSE 0 END)"
+    " + (CASE WHEN p.has_public_poc THEN 20 ELSE 0 END)"
+    " + " + _CRIT_SEVERITY_SQL + " + " + _CRIT_TIER_SQL
+)
+
+
+def pending_critical(session: Session, top: int = 50, maturity: str = "all",
+                     kind: str | None = None, tech: str | None = None,
+                     ) -> dict[str, Any]:
+    """Pendientes ordenados por criticidad (en TODAS las categorías de madurez).
+
+    Evalúa el predicado pending UNA vez (CTE MATERIALIZED) y le une, por lotes,
+    el CVSS máximo (cvss_scores) y el tier mínimo de sus fuentes; ordena por el
+    score. Devuelve el top-N con el DESGLOSE del score (para justificar el orden).
+    """
+    extra, params = "", {}
+    if maturity != "all":
+        if maturity not in MATURITY_SQL:
+            raise ValueError(f"maturity inválida: {maturity!r}")
+        extra += " AND " + MATURITY_SQL[maturity]
+    if kind or tech:
+        frag, fparams = _pending_filter(kind, tech)
+        if frag:
+            extra += " AND " + frag
+            params.update(fparams)
+    params["top"] = top
+    rows = session.execute(text(f"""
+        WITH sig AS MATERIALIZED (
+          -- "Crítico" exige AL MENOS una señal de gravedad/explotación: sin
+          -- ninguna, el score sería solo el del tier (<=15) y nunca alcanzaría el
+          -- top. Construir primero el conjunto CON señal (índices: in_kev, cvss;
+          -- seq scan barato de candidates para poc/severity) hace que el chequeo
+          -- pending sobre affected_products sea por-candidato -> la query baja de
+          -- ~14 s a ~2 s SIN materializar todo el conjunto pending (238k).
+          SELECT id FROM candidates WHERE merged_into IS NULL AND in_kev
+          UNION SELECT id FROM candidates WHERE merged_into IS NULL AND has_public_poc
+          UNION SELECT id FROM candidates WHERE merged_into IS NULL AND severity_hint IS NOT NULL
+          UNION SELECT candidate_id FROM cvss_scores
+        ),
+        pend AS MATERIALIZED (
+          SELECT c.id, c.cve_id, c.in_kev, c.has_public_poc, c.severity_hint,
+                 c.vuln_type, c.first_seen_at, c.days_ahead_vs_nvd_present AS days_ahead
+          FROM sig JOIN candidates c ON c.id = sig.id
+          WHERE {PENDING_WHERE_SQL}{extra}
+        )
+        SELECT p.id, p.cve_id, p.in_kev, p.has_public_poc, p.severity_hint,
+               p.vuln_type, p.first_seen_at, p.days_ahead,
+               cv.bs AS cvss, tr.mt AS min_tier, ap.product,
+               (CASE WHEN p.cve_id IS NULL THEN 'pre_cve'
+                     WHEN NOT EXISTS (SELECT 1 FROM published_cves pp WHERE pp.id=p.cve_id)
+                        THEN 'cve_prereserved'
+                     ELSE 'cve_reserved' END) AS maturity,
+               round(({_CRIT_SCORE_SQL})::numeric, 1) AS score
+        FROM pend p
+        -- LATERAL correlado (no agregación de tablas enteras): pend es pequeño,
+        -- así que un lookup por candidato vía índice es mucho más barato que un
+        -- GROUP BY sobre los 1.5M de mentions / todos los cvss_scores.
+        LEFT JOIN LATERAL (SELECT max(base_score) AS bs FROM cvss_scores v
+                   WHERE v.candidate_id = p.id) cv ON true
+        LEFT JOIN LATERAL (SELECT min(s.tier) AS mt FROM mentions m
+                   JOIN sources s ON s.id=m.source_id WHERE m.candidate_id=p.id) tr ON true
+        LEFT JOIN LATERAL (SELECT product FROM affected_products a
+                   WHERE a.candidate_id=p.id AND (a.kind IS NULL OR a.kind<>'malware')
+                   ORDER BY a.product LIMIT 1) ap ON true
+        ORDER BY score DESC, p.first_seen_at DESC NULLS LAST
+        LIMIT :top
+    """), params).mappings().all()
+    return {
+        "maturity": maturity, "top": top,
+        "rows": [{
+            "id": str(r["id"]), "cve_id": r["cve_id"], "product": r["product"],
+            "maturity": r["maturity"], "score": float(r["score"]),
+            "in_kev": r["in_kev"], "has_public_poc": r["has_public_poc"],
+            "cvss": float(r["cvss"]) if r["cvss"] is not None else None,
+            "severity_hint": r["severity_hint"], "vuln_type": r["vuln_type"],
+            "min_tier": r["min_tier"], "first_seen_at": r["first_seen_at"],
+            "days_ahead": r["days_ahead"],
+        } for r in rows],
+    }
+
+
+# ------------------------------------------------ desglose pending (eco/madurez)
+def pending_breakdown(session: Session) -> dict[str, Any]:
+    """Distribución del conjunto pending por ECOSISTEMA y embudo de MADUREZ, en
+    una sola evaluación del predicado (CTE MATERIALIZED + UNION ALL)."""
+    rows = session.execute(text(f"""
+        WITH pend AS MATERIALIZED (
+          SELECT c.id, c.cve_id FROM candidates c WHERE {PENDING_WHERE_SQL}
+        )
+        SELECT 'eco' AS dim, COALESCE(a.ecosystem, '(sin ecosistema)') AS key,
+               count(DISTINCT p.id) AS n
+        FROM pend p JOIN affected_products a ON a.candidate_id=p.id
+          AND (a.kind IS NULL OR a.kind<>'malware')
+        GROUP BY key
+        UNION ALL
+        SELECT 'maturity', 'pre_cve', count(*) FROM pend WHERE cve_id IS NULL
+        UNION ALL
+        SELECT 'maturity', 'cve_prereserved', count(*) FROM pend p
+          WHERE cve_id IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM published_cves pp WHERE pp.id=p.cve_id)
+        UNION ALL
+        SELECT 'maturity', 'cve_reserved', count(*) FROM pend p
+          WHERE cve_id IS NOT NULL
+            AND EXISTS (SELECT 1 FROM published_cves pp WHERE pp.id=p.cve_id)
+    """)).mappings().all()
+    eco = sorted(({"ecosystem": r["key"], "pending": int(r["n"])}
+                  for r in rows if r["dim"] == "eco"),
+                 key=lambda x: x["pending"], reverse=True)
+    maturity = {r["key"]: int(r["n"]) for r in rows if r["dim"] == "maturity"}
+    return {"by_ecosystem": eco, "by_maturity": maturity}

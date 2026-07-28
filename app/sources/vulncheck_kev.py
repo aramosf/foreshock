@@ -8,15 +8,14 @@ queda inactiva (devuelve []).
 from __future__ import annotations
 
 import re
-
-from dateutil.parser import isoparse
+from datetime import datetime
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.ingest.affected import AffectedInput
-from app.sources.base import BaseSource, FetchContext, register
-from app.sources.http import get
 from app.ingest.service import FetchedMention
+from app.sources.base import BaseSource, FetchContext, parse_advisory_date, register
+from app.sources.http import get
 
 log = get_logger(__name__)
 
@@ -24,17 +23,18 @@ log = get_logger(__name__)
 _SSH = re.compile(r"git@github\.com:([\w.-]+/[\w.-]+?)(?:\.git)?$")
 
 
-def _kev_date(it: dict):
-    """Fecha KEV = la MÁS TEMPRANA entre date_added propio y las de explotación
-    reportada (VulnCheck reporta a veces ANTES que CISA -> señal pre-KEV)."""
+def _kev_date(it: dict) -> datetime | None:
+    """Fecha KEV = la MÁS TEMPRANA (datetime UTC-aware) entre date_added propio y
+    las de explotación reportada (VulnCheck reporta a veces ANTES que CISA ->
+    señal pre-KEV). Es la fecha REAL del primer registro público de la señal:
+    debe alimentar seen_at (no el momento de ingesta). parse_advisory_date
+    normaliza a UTC y descarta fechas cero/imposibles (< 1990)."""
     dates = []
     for src in ([it.get("date_added")]
                 + [r.get("date_added") for r in (it.get("vulncheck_reported_exploitation") or [])]):
-        if src:
-            try:
-                dates.append(isoparse(src).date())
-            except (ValueError, TypeError):
-                pass
+        dt = parse_advisory_date(src)
+        if dt is not None:
+            dates.append(dt)
     return min(dates) if dates else None
 
 
@@ -96,7 +96,7 @@ class VulnCheckKevSource(BaseSource):
                 break
             for it in items:
                 cves = it.get("cve") or []
-                kev_date = _kev_date(it)
+                kev_dt = _kev_date(it)
                 name = (it.get("vulnerabilityName") or it.get("name")
                         or it.get("product") or (cves[0] if cves else None))
                 ransom = it.get("knownRansomwareCampaignUse")
@@ -107,15 +107,21 @@ class VulnCheckKevSource(BaseSource):
                 ] if p)[:2000] or None
                 enr = _enrichment(it)
                 # PoC público -> flag; el resto (afectado, cwe, refs) se aplica
-                # al candidate vía _apply_candidate_updates.
-                flags = {"in_kev": True, "kev_date": kev_date, "kev_source": "vulncheck"}
+                # al candidate vía _apply_candidate_updates. kev_date es un Date
+                # (columna candidates.kev_date), igual que en cisa_kev.
+                flags = {"in_kev": True,
+                         "kev_date": kev_dt.date() if kev_dt else None,
+                         "kev_source": "vulncheck"}
                 if enr.pop("has_public_poc"):
                     flags["has_public_poc"] = True
                 for cve in cves:
                     out.append(FetchedMention(
                         url=f"https://nvd.nist.gov/vuln/detail/{cve}",
                         title=f"VulnCheck KEV: {name}"[:200],
-                        snippet=snippet, cve_id=cve, flags=flags, **enr))
+                        # seen_at = fecha KEV real (no now()): un CVE viejo que
+                        # entra hoy en el catálogo NO es señal "de esta semana".
+                        snippet=snippet, cve_id=cve, seen_at=kev_dt,
+                        flags=flags, **enr))
             meta = body.get("_meta") or {}
             total_pages = meta.get("total_pages")
             if total_pages is not None:

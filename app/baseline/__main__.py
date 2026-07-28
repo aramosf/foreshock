@@ -31,28 +31,37 @@ from app.baseline.epss import sync_epss, tracked_cve_ids
 from app.baseline.nvd import sync_nvd_delta
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
+from app.core.runtime import publish_runtime_metrics
 
 log = get_logger("baseline.worker")
 
 # Cadencia del enriquecimiento incremental (diario por defecto).
 _ENRICH_SYNC_SECONDS = int(os.environ.get("ENRICH_SYNC_SECONDS", "86400"))
+_HEARTBEAT_SECONDS = 30
+_ACTIVE_JOBS: set[str] = set()
 
 
 async def _cvelist_job() -> None:
+    _ACTIVE_JOBS.add("cvelist")
     try:
         await asyncio.to_thread(sync_cvelist)
     except Exception as exc:  # noqa: BLE001
         log.error("baseline.cvelist_error", error=str(exc))
+    finally:
+        _ACTIVE_JOBS.discard("cvelist")
 
 
 async def _nvd_job() -> None:
     # Corre en hilo con su propio event loop: la escritura BD es síncrona y no
     # debe bloquear el loop del scheduler. La reconciliación del KPI
     # (days_ahead/promoción de candidates) va DENTRO de sync_nvd_delta.
+    _ACTIVE_JOBS.add("nvd")
     try:
         await asyncio.to_thread(asyncio.run, sync_nvd_delta())
     except Exception as exc:  # noqa: BLE001
         log.error("baseline.nvd_error", error=str(exc))
+    finally:
+        _ACTIVE_JOBS.discard("nvd")
 
 
 async def _epss_job() -> None:
@@ -65,18 +74,36 @@ async def _epss_job() -> None:
             asyncio.run(sync_epss(cve_ids=cve_ids))
         asyncio.run(sync_epss())  # complemento: top global por score
 
+    _ACTIVE_JOBS.add("epss")
     try:
         await asyncio.to_thread(_run)
     except Exception as exc:  # noqa: BLE001
         log.error("baseline.epss_error", error=str(exc))
+    finally:
+        _ACTIVE_JOBS.discard("epss")
 
 
 async def _enrich_job() -> None:
     """Enriquecimiento estructurado incremental (raw_json -> tablas cve_*)."""
+    _ACTIVE_JOBS.add("enrich-nvd")
     try:
         await asyncio.to_thread(enrich_all)
     except Exception as exc:  # noqa: BLE001
         log.error("baseline.enrich_error", error=str(exc))
+    finally:
+        _ACTIVE_JOBS.discard("enrich-nvd")
+
+
+async def _runtime_job() -> None:
+    try:
+        await asyncio.to_thread(
+            publish_runtime_metrics,
+            "baseline-worker",
+            active=sorted(_ACTIVE_JOBS),
+            scheduled=4,
+        )
+    except Exception as exc:  # noqa: BLE001 - telemetría no tumba baseline
+        log.warning("baseline.runtime_error", error=str(exc))
 
 
 async def main() -> None:
@@ -95,6 +122,14 @@ async def main() -> None:
                       id="epss", max_instances=1, next_run_time=now)
     scheduler.add_job(_enrich_job, "interval", seconds=_ENRICH_SYNC_SECONDS,
                       id="enrich-nvd", max_instances=1, next_run_time=now)
+    scheduler.add_job(
+        _runtime_job,
+        "interval",
+        seconds=_HEARTBEAT_SECONDS,
+        id="_runtime",
+        max_instances=1,
+        next_run_time=now,
+    )
     scheduler.start()
     log.info("baseline.worker_started")
 

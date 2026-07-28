@@ -1,11 +1,11 @@
 # Foreshock Architecture
 
-Foreshock is an **early vulnerability radar**: a data-ingestion backend (no UI) that
+Foreshock is an **early vulnerability radar**: a data-ingestion platform that
 picks up signals that a vulnerability exists **before** its CVE is published and
 analyzed in NVD, and measures how many *lead days* each source gains over NVD.
 
 All code lives in the `app/` package and runs as plain Python processes over
-Postgres 16 + Redis. There is no web server and no frontend.
+Postgres 16. FastAPI serves a read-only API and two static dashboards.
 
 > **Framing.** MITRE (cvelistV5) and OSV are the **finish line** — the authoritative,
 > canonical record of what a vulnerability *is*. Foreshock does not try to replace them;
@@ -93,12 +93,10 @@ flowchart LR
     CAND --- VIEW
 
     %% ---------------- Infra / operation ----------------
-    REDIS["Redis<br/>cache · rate-limit"]
     VOL["Volume data:/data<br/>raw_html · cvelistV5 clone · GitHub caches"]
     MIG["migrate<br/>alembic upgrade head"]
     CLI["CLI foreshock<br/>db · sources · baseline · emerging · cve · enrich · stats · pending · trend · backfill-products"]
 
-    SW -.-> REDIS
     BW -.-> VOL
     SW -.-> VOL
     MIG --> PG
@@ -118,9 +116,9 @@ soft reconciliation by `cve_id` (a *lookup*, never a foreign key).
 
 ---
 
-## The three application processes
+## Application processes
 
-`docker-compose.yml` brings up infrastructure (`postgres`, `redis`) and three
+`docker-compose.yml` brings up Postgres and four
 application processes built from the same image (`docker/Dockerfile`,
 `python:3.12-slim`, dependencies installed with `uv`, `git` present for the cvelistV5
 clone):
@@ -130,10 +128,12 @@ clone):
 | `migrate` | `alembic upgrade head` | Applies the migrations and exits. Both workers wait for it via `depends_on: migrate: {condition: service_completed_successfully}`. |
 | `baseline-worker` | `python -m app.baseline` | Syncs the canonical state (cvelistV5 + NVD 2.0 delta + EPSS) in a loop. |
 | `sources-worker` | `python -m app.sources` | Runs the enabled fetchers on their cadences; ingests mentions and enriches candidates. |
+| `api` | `uvicorn app.api.main:app` | Read-only JSON API plus `/` and `/pending_status`. |
 
-`migrate` is an ephemeral single-use job; the two workers are long-running
-(`restart: unless-stopped`). All three share the `data:/data` volume (raw HTML,
-cvelistV5 clone, GitHub caches) and point at the same `DATABASE_URL`.
+`migrate` is an ephemeral single-use job; the two workers and API are
+long-running (`restart: unless-stopped`). The workers share `data:/data` (raw
+HTML, cvelistV5 clone, GitHub caches); every process points at the same
+`DATABASE_URL`.
 
 ### `baseline-worker` (`app/baseline/__main__.py`)
 An `AsyncIOScheduler` with three interval jobs at cadences from `Settings`:
@@ -151,8 +151,10 @@ reuses.
 
 ### `sources-worker` (`app/sources/__main__.py`) — scheduler with hot reconcile
 On startup it calls `sync_registry_to_db()` (registers every code-declared fetcher into
-the `sources` table) and then schedules each **enabled** source at its `cadence_seconds`
-with `jitter=30` and `max_instances=1`.
+the `sources` table) and then schedules each **enabled** source at its
+`cadence_seconds` with `jitter=30` and `max_instances=1`. Initial executions are
+spread across `FORESHOCK_SOURCES_STARTUP_SPREAD_SECONDS` instead of launching
+every fetcher simultaneously.
 
 The distinctive part is `_reconcile_jobs()`, wired as its own interval job
 (`id="_reconcile"`, every 60 s):
@@ -170,7 +172,15 @@ code re-syncs.
 Each fetch is isolated twice over: `run_source()` catches any exception from
 `fetch()` (recording it in `sources.last_error`), and every individual mention is
 ingested inside a `session.begin_nested()` savepoint, so one bad mention neither aborts
-the batch nor loses the valid ones.
+the batch nor loses the valid ones. The complete fetch/parse/ingest lifecycle is
+bounded globally (default 4), heavy sources are serialized (default 1), and Git
+sources share a separate process limit (default 1). Git subprocesses run in
+their own process group and are always killed and reaped on timeout/cancellation;
+Compose also enables a tiny init process as a final orphan-reaping guard.
+
+Both workers publish a 30-second runtime heartbeat in `sync_state`. The
+`/pending_status` dashboard uses it to show process/thread/zombie counts, memory,
+active/queued jobs and worker liveness without mounting the Docker socket.
 
 ---
 

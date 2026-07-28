@@ -1,7 +1,7 @@
 # Operación
 
-Backend de carga de datos sin UI. Todo se ejecuta con `docker compose` sobre
-Postgres 16 + Redis 7. Imagen común en `docker/Dockerfile` (Python 3.12-slim +
+Plataforma de carga de datos y dashboards de solo lectura. Todo se ejecuta con
+`docker compose` sobre Postgres 16. Imagen común en `docker/Dockerfile` (Python 3.12-slim +
 `git` + deps con `uv`).
 
 ---
@@ -9,12 +9,12 @@ Postgres 16 + Redis 7. Imagen común en `docker/Dockerfile` (Python 3.12-slim +
 ## Quickstart
 
 ```bash
-docker compose up            # levanta postgres, redis, migrate, y los 2 workers
+docker compose up            # levanta postgres, migrate, workers y API
 ```
 
 Orden de arranque (definido en `docker-compose.yml`):
 
-1. `postgres` y `redis` arrancan y pasan su healthcheck.
+1. `postgres` arranca y pasa su healthcheck.
 2. `migrate` corre `alembic upgrade head` y **termina**.
 3. `baseline-worker` (`python -m app.baseline`) y `sources-worker`
    (`python -m app.sources`) arrancan solo cuando `migrate` acaba con éxito
@@ -24,6 +24,11 @@ Orden de arranque (definido en `docker-compose.yml`):
 El `baseline-worker` hace una pasada inicial inmediata y luego programa
 cvelist/NVD/EPSS a sus cadencias. El `sources-worker` registra los fetchers en
 la tabla `sources` (`sync_registry_to_db`) y programa cada fuente habilitada.
+Las primeras ejecuciones se reparten durante una hora y el ciclo completo de
+cada fetcher queda acotado por límites global, Git y fuentes pesadas.
+
+Dashboards: `/` para las señales y `/pending_status` para workers, fetchers,
+procesos, PostgreSQL y cobertura de ingesta.
 
 Para operar manualmente dentro de un contenedor:
 
@@ -45,7 +50,6 @@ compose local; nunca se hardcodean secretos.
 | Var | Default | Uso |
 |---|---|---|
 | `DATABASE_URL` | `postgresql+psycopg://foreshock:foreshock@localhost:5432/foreshock` | Conexión Postgres (driver psycopg3 sync). |
-| `REDIS_URL` | `redis://localhost:6379/0` | Redis. |
 | `FORESHOCK_DATA_DIR` | `/data` | Raíz de datos (raw HTML, cachés, contextos browser). |
 | `FORESHOCK_RAW_HTML_DIR` | `/data/raw` | HTML crudo de menciones. |
 | `FORESHOCK_CVELIST_REPO_DIR` | `/data/cvelistV5` | Clon de cvelistV5. |
@@ -94,6 +98,10 @@ Además de `top_n` y de `reference`/`past_cve` (siempre activas), el registro
 | `FORESHOCK_RESPECT_ROBOTS` | `True` |
 | `FORESHOCK_BROWSER_MAX_CONCURRENT` | `3` |
 | `FORESHOCK_BROWSER_RECYCLE_AFTER` | `50` |
+| `FORESHOCK_SOURCES_MAX_CONCURRENT` | `4` |
+| `FORESHOCK_SOURCES_GIT_MAX_CONCURRENT` | `1` |
+| `FORESHOCK_SOURCES_HEAVY_MAX_CONCURRENT` | `1` |
+| `FORESHOCK_SOURCES_STARTUP_SPREAD_SECONDS` | `3600` |
 
 ### Enriquecimiento LLM
 | Var | Default |
@@ -131,9 +139,10 @@ GitHub y el HTML crudo sean visibles para ambos.
 ## Healthchecks
 
 - `postgres`: `pg_isready -U foreshock -d foreshock` (interval 3s, retries 20).
-- `redis`: `redis-cli ping` (interval 3s, retries 20).
 - `migrate` no tiene healthcheck: es un job que corre y sale con éxito; los
   workers dependen de su `service_completed_successfully`.
+- `api`: `/healthz` ejecuta `SELECT 1`; `/pending_status` muestra los heartbeats
+  y la presión de ejecución de los workers.
 
 ---
 

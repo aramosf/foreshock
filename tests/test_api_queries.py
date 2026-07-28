@@ -93,6 +93,35 @@ def test_pending_top_agrega_en_sql_por_candidate(pending_dataset, session: Sessi
     assert out["by_kind"] == {"product": 3}
 
 
+def test_pending_breakdown(pending_dataset, session: Session) -> None:
+    out = q.pending_breakdown(session)
+    # partición exacta del conjunto pending (3) por madurez.
+    assert out["by_maturity"] == {"pre_cve": 1, "cve_prereserved": 1, "cve_reserved": 1}
+    # los productos del fixture no llevan ecosystem -> '(sin ecosistema)'.
+    ecos = {e["ecosystem"]: e["pending"] for e in out["by_ecosystem"]}
+    assert ecos == {"(sin ecosistema)": 3}
+
+
+def test_pending_critical_solo_con_senal_y_orden(pending_dataset, session: Session) -> None:
+    # Sin ninguna señal de gravedad/explotación, no hay "críticos".
+    assert q.pending_critical(session)["rows"] == []
+    # Marca señales: in_kev (pend con CVE) y has_public_poc (pre-CVE).
+    session.execute(text("UPDATE candidates SET in_kev=true WHERE id=:id"),
+                    {"id": pending_dataset["pend_nofila"]})
+    session.execute(text("UPDATE candidates SET has_public_poc=true WHERE id=:id"),
+                    {"id": pending_dataset["precve"]})
+    session.commit()
+    out = q.pending_critical(session, top=10)
+    assert len(out["rows"]) == 2
+    # in_kev (+50) pesa más que has_public_poc (+20): el KEV va primero.
+    assert out["rows"][0]["cve_id"] == "CVE-2026-0003"
+    assert out["rows"][0]["in_kev"] is True and out["rows"][0]["score"] >= 50
+    assert out["rows"][1]["has_public_poc"] is True
+    assert out["rows"][1]["score"] < out["rows"][0]["score"]
+    # el filtro de madurez respeta el conjunto crítico.
+    assert q.pending_critical(session, maturity="pre_cve")["rows"][0]["cve_id"] is None
+
+
 def test_like_wildcards_escapados(db, session: Session) -> None:
     _mk_candidate(session, cve="CVE-2026-0100", product="100%beef")
     _mk_candidate(session, cve="CVE-2026-0101", product="100beef")
@@ -115,6 +144,36 @@ def test_emerging_pending_only(pending_dataset, session: Session) -> None:
     got = {r["cve_id"] for r in out["rows"]}
     assert got == {"CVE-2026-0002", "CVE-2026-0003", None}  # None = pre-CVE
     assert out["total"] == 3
+
+
+def test_pending_pre2016_fuera_del_dashboard_y_de_kev(
+    pending_dataset, session: Session,
+) -> None:
+    """El archivo histórico pre-2016 se conserva, pero no contamina pending ni
+    el KPI/tarjeta KEV del dashboard."""
+    old = _mk_candidate(
+        session,
+        cve="CVE-2015-9999",
+        product="legacy-inconsistency",
+        first_seen=dt.datetime(2015, 12, 31, tzinfo=dt.UTC),
+    )
+    session.execute(
+        text("UPDATE candidates SET in_kev=true, has_public_poc=true WHERE id=:id"),
+        {"id": old},
+    )
+    session.commit()
+
+    pending = q.pending_top(session, kind="all", top=20)
+    assert pending["total"] == 3
+    assert all(r["software"] != "legacy-inconsistency" for r in pending["top"])
+
+    kev = q.emerging_list(
+        session, pending_only=True, in_kev=True, page_size=50,
+    )
+    assert all(r["cve_id"] != "CVE-2015-9999" for r in kev["rows"])
+
+    critical = q.pending_critical(session, top=50)
+    assert all(r["cve_id"] != "CVE-2015-9999" for r in critical["rows"])
 
 
 def test_candidate_detail_ignora_tombstones(pending_dataset, session: Session) -> None:
@@ -152,6 +211,30 @@ def test_healthz_y_cabeceras_seguridad(db) -> None:
         assert r.headers["X-Content-Type-Options"] == "nosniff"
         assert "script-src 'self'" in r.headers["Content-Security-Policy"]
         assert r.headers["Referrer-Policy"] == "no-referrer"
+
+
+def test_pending_status_dashboard_y_api(sources_seeded) -> None:
+    from fastapi.testclient import TestClient
+
+    from app.api.main import app
+
+    with TestClient(app) as client:
+        page = client.get("/pending_status")
+        assert page.status_code == 200
+        assert "Estado operativo" in page.text
+        assert "/static/pending_status.js" in page.text
+
+        response = client.get("/api/admin/status")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["health"] in {"ok", "degraded", "critical"}
+        assert data["summary"]["workers_expected"] == 2
+        assert data["fetchers"]["summary"]["total"] > 0
+        assert {row["role"] for row in data["workers"]} == {
+            "api", "baseline-worker", "sources-worker",
+        }
+        assert data["ingestion"]["pending_min_date"] == "2016-01-01"
+        assert data["database"]["migration"]
 
 
 def test_pending_desglose_por_madurez(pending_dataset, session: Session) -> None:

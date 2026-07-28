@@ -9,13 +9,12 @@ design see `ARCHITECTURE.md`, for the data model `DATA_MODEL.md`, for sources
 
 ## 1. What the system is made of
 
-`docker-compose.yml` defines six services (each service builds its **own** image
+`docker-compose.yml` defines five services (each application service builds its **own** image
 from `docker/Dockerfile` — see the pitfall in §9):
 
 | Service | Role | Notes |
 |---|---|---|
 | `postgres` | Database (Postgres 16) | Persistent volume `pgdata` |
-| `redis` | Worker state / scheduling backend | |
 | `migrate` | Runs `alembic upgrade head` and exits | Others wait for it to finish |
 | `baseline-worker` | Scheduler for the **baseline**: cvelistV5 + NVD + EPSS | The "finish line" data |
 | `sources-worker` | Scheduler for the **12 radar sources** | The "race" — early signals |
@@ -58,7 +57,8 @@ Without tokens the system still runs; token-gated sources just fetch less.
 ./scripts/start.sh --stop-workers   # pause ONLY the schedulers (safe for re-ingest)
 ```
 
-Dashboard/API: <http://localhost:8000>.
+Dashboard/API: <http://localhost:8000>. Administrative status:
+<http://localhost:8000/pending_status>.
 
 `docker compose up -d` (what `start.sh` runs) starts `migrate` first; the workers
 and `api` wait for migrations to complete, then the schedulers begin fetching on
@@ -104,6 +104,13 @@ docker compose run --rm sources-worker foreshock sources list
 docker compose run --rm sources-worker foreshock sources disable <name>
 docker compose run --rm sources-worker foreshock sources enable  <name>
 ```
+
+At worker boot the first source runs are spread across one hour by default.
+The full lifecycle is capped at four concurrent sources, with separate
+single-slot limits for Git and heavy sources. Workers publish process, zombie,
+thread, memory, active-job and queue metrics every 30 seconds to
+`/pending_status`. Compose runs both under an init process so orphaned children
+are reaped.
 
 While the workers are **stopped**, nothing scheduled runs — this is intentional
 during a manual re-ingest.

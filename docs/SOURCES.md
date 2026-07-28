@@ -424,7 +424,16 @@ The `sources-worker` runs enabled fetchers on their cadences with
 `AsyncIOScheduler`:
 
 - On startup it calls `sync_registry_to_db()` and schedules every enabled source
-  (`interval`, `seconds=cadence`, `max_instances=1`, `jitter=30`).
+  (`interval`, `seconds=cadence`, `max_instances=1`, `jitter=30`). Initial runs
+  are deterministically spread across
+  `FORESHOCK_SOURCES_STARTUP_SPREAD_SECONDS` (default one hour).
+- `run_source()` bounds the **complete** fetch/parse/ingest lifecycle with
+  `FORESHOCK_SOURCES_MAX_CONCURRENT` (default 4). Git sources also share
+  `FORESHOCK_SOURCES_GIT_MAX_CONCURRENT` (default 1), and large-batch sources
+  share `FORESHOCK_SOURCES_HEAVY_MAX_CONCURRENT` (default 1).
+- Git children run in their own process groups and are killed **and reaped** on
+  timeout or cancellation. Compose enables an init process for both workers as
+  a second orphan-reaping layer.
 - **Hot reconcile** (`_reconcile_jobs`, re-run every 60 s via the `_reconcile`
   job): it re-reads the `sources` table and reconciles scheduler jobs with it —
   **adds** newly enabled sources, **removes** disabled ones, and **reschedules**

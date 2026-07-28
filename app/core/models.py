@@ -337,6 +337,10 @@ class GithubRepo(SQLModel, table=True):
     watermark: str | None = Field(default=None, sa_column=SAColumn(Text))
     first_seen_at: datetime | None = Field(default=None, sa_column=_ts_now())
     last_scanned_at: datetime | None = Field(default=None, sa_column=_ts())
+    # Marca de escaneo INDEPENDIENTE de github_repo_advisories (advisories/releases
+    # vía REST): no comparte watermark/last_scanned_at con el escaneo de commits. 0013.
+    adv_watermark: str | None = Field(default=None, sa_column=SAColumn(Text))
+    adv_last_scanned_at: datetime | None = Field(default=None, sa_column=_ts())
 
 
 class CveSoftReference(SQLModel, table=True):

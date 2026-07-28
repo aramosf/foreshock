@@ -56,7 +56,9 @@ const SURGE_PERIOD = "2026-03";           // inflexión observada en publicacion
 /* ================= estado ================= */
 const state = { win: "ytd", gran: "month", mat: "all", period: null,
                 tech: "", kind: "all", source: "", kevOnly: false, cvssMin: 0,
-                sgran: "week" };            // eje temporal de la inspección
+                sgran: "week",              // eje temporal de la inspección
+                tpage: 1 };                 // página de la tabla de inspección
+const TPAGE_SIZE = 25;
 const CAPS = { week: false, days: false };  // se sondea contra la API al arrancar
 function winParams() {
   switch (state.win) {
@@ -126,7 +128,7 @@ function annotate(svg, periods, xAt, mT, ih, label) {
   el("rect", { x, y: mT, width: Math.max(0, xAt(periods.length - 1) - x), height: ih,
                class: "ann-band" }, svg);
   el("line", { x1: x, y1: mT, x2: x, y2: mT + ih, class: "ann-line" }, svg);
-  if (label) txt(el("text", { x: x + 5, y: mT + 11, class: "ann-tag" }, svg), "▲ mar 2026");
+  if (label) txt(el("text", { x: x + 5, y: mT + 11, class: "ann-tag" }, svg), "▲ aceleración mar 2026");
 }
 
 /* ================= gráfica: columnas apiladas por madurez ================= */
@@ -149,6 +151,7 @@ function drawMat() {
     const x = mL + band * i + (band - bw) / 2;
     const vals = [d.pre_cve, d.cve_prereserved, d.cve_reserved];
     const isSel = state.period === d.period;
+    const partial = i === data.length - 1;        // el periodo en curso, atenuado
     let acc = 0;
     const segs = [];
     MK.forEach((k, ki) => { if (vals[ki]) { segs.push({ k, v: vals[ki], y0: acc }); acc += vals[ki]; } });
@@ -158,6 +161,7 @@ function drawMat() {
       const r = el("path", { class: MAT[s.k].cls,
         d: roundTopRect(x, yTop, bw, hpx, si === segs.length - 1 ? 4 : 0) }, svg);
       if (state.mat !== "all" && state.mat !== s.k) r.setAttribute("opacity", ".25");
+      else if (partial) r.setAttribute("opacity", ".55");
     });
     if (isSel) el("rect", { x: x - 3, y: y(acc) - 3, width: bw + 6, height: y(0) - y(acc) + 3, rx: 5, class: "col-sel" }, svg);
     if (data.length <= 26 && (data.length <= 13 || i % 2 === (data.length - 1) % 2))
@@ -310,24 +314,33 @@ function drawHist(lag) {
     const x = mL + band * i + (band - bw) / 2;
     el("path", { d: roundTopRect(x, y(d.count), bw, y(0) - y(d.count), 4), class: "f-acc" }, svg);
     txt(el("text", { x: mL + band * i + band / 2, y: H - 26, "text-anchor": "middle", class: "axis" }, svg), d.label);
-    if (d.count === max)
-      txt(el("text", { x: x + bw / 2, y: y(d.count) - 6, "text-anchor": "middle", class: "dlabel" }, svg), fmt(d.count));
+    txt(el("text", { x: x + bw / 2, y: y(d.count) - 6, "text-anchor": "middle", class: "dlabel" }, svg), fmt(d.count));
     const hit = el("rect", { x: mL + band * i, y: mT, width: band, height: ih, class: "colhit" }, svg);
     hit.addEventListener("pointermove", ev => showTT(ev.clientX, ev.clientY, d.label + " días", [[null, "CVEs", fmt(d.count)]]));
     hit.addEventListener("pointerleave", hideTT);
   });
+  const pub = lag.metric === "published";
   txt(el("text", { x: mL + iw / 2, y: H - 7, "text-anchor": "middle", class: "axis" }, svg),
-      "días de antelación conseguidos →");
+      pub ? "días de atraso de NVD →" : "días de antelación conseguidos →");
+  $("#lag-sub").textContent = pub
+    ? "CVEs ya publicados (últimos 12 m): días entre la fecha del advisory y la publicación de NVD. «<=0» = NVD publicó antes o a la vez."
+    : "CVEs ya publicados (últimos 12 m): cuántos días antes los detectó Foreshock.";
   const note = $("#lag-note"); note.replaceChildren();
   note.appendChild(document.createTextNode("Mediana "));
   let b = document.createElement("b"); b.textContent = fmt(lag.median) + " días"; note.appendChild(b);
-  note.appendChild(document.createTextNode(": la mitad de los CVEs se conocieron aquí al menos esa antelación. p90 "));
+  note.appendChild(document.createTextNode(pub
+    ? " de atraso frente a la fecha oficial del advisory. p90 "
+    : ": la mitad de los CVEs se conocieron aquí al menos esa antelación. p90 "));
   b = document.createElement("b"); b.textContent = fmt(lag.p90) + " días"; note.appendChild(b);
-  note.appendChild(document.createTextNode(`. ${fmt(lag.count)} CVEs publicados en los últimos ${lag.months} meses; se excluyen fuentes con backfill histórico.`));
+  note.appendChild(document.createTextNode(`. ${fmt(lag.count)} CVEs en los últimos ${lag.months} meses` +
+    (pub ? " (incluye el archivo histórico: aquí es el objeto de estudio)."
+         : "; se excluyen fuentes con backfill histórico.")));
 }
 function drawQueue(qa) {
   const svg = $("#c-queue"); svg.replaceChildren();
-  const bins = qa.unassigned.bins.map((d, i) => ({ b: d.label, sin: d.count, con: qa.assigned.bins[i]?.count ?? 0 }));
+  const all = qa.unassigned.bins.map((d, i) => ({ b: d.label, sin: d.count, con: qa.assigned.bins[i]?.count ?? 0 }));
+  const bins = all.filter(d => d.b !== ">365");        // el eje cubre el último año
+  const hist = all.find(d => d.b === ">365") || { sin: 0, con: 0 };
   const W = 940, H = 260, mL = 50, mR = 14, mT = 16, mB = 44;
   const iw = W - mL - mR, ih = H - mT - mB;
   const max = Math.max(...bins.flatMap(d => [d.sin, d.con]), 1);
@@ -344,8 +357,8 @@ function drawQueue(qa) {
     el("path", { d: roundTopRect(cx - bw - 1, y(d.sin), bw, y(0) - y(d.sin), 4), class: "f-m1" }, svg);
     el("path", { d: roundTopRect(cx + 1, y(d.con), bw, y(0) - y(d.con), 4), class: "f-m2" }, svg);
     txt(el("text", { x: cx, y: H - 26, "text-anchor": "middle", class: "axis" }, svg), d.b);
-    if (d.sin === max)
-      txt(el("text", { x: cx - bw / 2 - 1, y: y(d.sin) - 6, "text-anchor": "middle", class: "dlabel" }, svg), fmt(d.sin));
+    txt(el("text", { x: cx - bw / 2 - 1, y: y(d.sin) - 5, "text-anchor": "middle", class: "dlabel" }, svg), fmt(d.sin));
+    txt(el("text", { x: cx + bw / 2 + 1, y: y(d.con) - 5, "text-anchor": "middle", class: "dlabel" }, svg), fmt(d.con));
     const hit = el("rect", { x: mL + band * i, y: mT, width: band, height: ih, class: "colhit" }, svg);
     hit.addEventListener("pointermove", ev => showTT(ev.clientX, ev.clientY, d.b + " días esperando", [
       ["--m1", "Sin CVE asignado", fmt(d.sin)],
@@ -354,24 +367,30 @@ function drawQueue(qa) {
   });
   txt(el("text", { x: mL + iw / 2, y: H - 7, "text-anchor": "middle", class: "axis" }, svg),
       "días en la cola desde la primera detección →");
-  $("#q-leg-sin").textContent = `Esperando asignación de CVE — ${fmt(qa.unassigned.total)} en cola · mediana ${fmt(qa.unassigned.median_days)} días`;
-  $("#q-leg-con").textContent = `Esperando publicación en NVD (ya con CVE) — ${fmt(qa.assigned.total)} en cola · mediana ${fmt(qa.assigned.median_days)} días`;
+  const sinYr = qa.unassigned.total - hist.sin, conYr = qa.assigned.total - hist.con;
+  $("#q-leg-sin").textContent = `Esperando asignación de CVE — ${fmt(sinYr)} en el último año`;
+  $("#q-leg-con").textContent = `Esperando publicación en NVD (con CVE) — ${fmt(conYr)} en el último año`;
+  $("#q-note").textContent = `El eje cubre la cola del último año. Aparte, el archivo histórico acumula ` +
+    `${fmt(hist.sin)} sin CVE y ${fmt(hist.con)} con CVE esperando más de un año ` +
+    `(importaciones de GitHub/OSV/Gemnasium, no vigilancia en vivo).`;
 }
 function drawSrc(stats) {
   const svg = $("#c-src"); svg.replaceChildren();
   const rows = stats.slice(0, 12);              // la API ya ordena por ventaja media desc
   const rest = stats.length - rows.length;
-  const W = 460, mL = 128, mR = 46, rh = 26, mT = 8;
+  const W = 460, mL = 128, mR = 60, rh = 34, mT = 8;
   const H = mT + rows.length * rh + 10;
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   const iw = W - mL - mR;
   const max = Math.max(...rows.map(d => +d.avg_days), 1);
   rows.forEach((d, i) => {
-    const yy = mT + i * rh, bh = 14;
+    const yy = mT + i * rh + 3, bh = 15;
     const w = Math.max(2, +d.avg_days / max * iw);
-    txt(el("text", { x: mL - 8, y: yy + bh - 2.5, "text-anchor": "end", class: "axis" }, svg), d.source);
+    txt(el("text", { x: mL - 8, y: yy + bh - 3, "text-anchor": "end", class: "axis" }, svg), d.source);
     el("path", { d: `M${mL} ${yy} h${Math.max(0, w - 4)} q4 0 4 4 v${bh - 8} q0 4 -4 4 H${mL} Z`, class: "f-acc" }, svg);
-    txt(el("text", { x: mL + w + 7, y: yy + bh - 2.5, class: "dlabel" }, svg), Math.round(+d.avg_days) + " d");
+    txt(el("text", { x: mL + w + 7, y: yy + bh / 2 + 1, class: "dlabel" }, svg), Math.round(+d.avg_days) + " d");
+    txt(el("text", { x: mL + w + 7, y: yy + bh / 2 + 13, class: "axis", style: "font-size:9.5px" }, svg),
+        fmt(d.candidates) + " vuln.");
     const hit = el("rect", { x: 0, y: yy - 3, width: W, height: rh, class: "colhit" }, svg);
     hit.addEventListener("pointermove", ev => showTT(ev.clientX, ev.clientY, d.source,
       [[null, "Ventaja media", (+d.avg_days).toFixed(1) + " días"], [null, "Vulnerabilidades", fmt(d.candidates)]]));
@@ -393,10 +412,14 @@ function drawSrc(stats) {
 function renderPending(pall, pmats) {
   const bm = pall.by_maturity || { pre_cve: 0, cve_prereserved: 0, cve_reserved: 0 };
   $("#hero-n").textContent = fmt(state.mat === "all" ? pall.total : pmats[state.mat].total);
-  if (!state.period) {           // el glosario habla del "hoy" global, sin filtros de periodo
-    $("#g-c1").textContent = fmt(bm.pre_cve) + " hoy";
-    $("#g-c2").textContent = fmt(bm.cve_prereserved) + " hoy";
-    $("#g-c3").textContent = fmt(bm.cve_reserved) + " hoy";
+  if (!state.period) {           // el carril del concepto habla del "hoy" global
+    $("#rc1").textContent = fmt(bm.pre_cve);
+    $("#rc2").textContent = fmt(bm.cve_prereserved);
+    $("#rc3").textContent = fmt(bm.cve_reserved);
+    const withCve = (bm.cve_prereserved || 0) + (bm.cve_reserved || 0);
+    $("#k-cve-v").textContent = fmt(withCve);
+    $("#k-cve-c").textContent = "El " + Math.round(withCve / (pall.total || 1) * 100) +
+      " % de las pendientes ya tiene CVE citado, aún sin ficha pública.";
   }
   const meter = $("#meter"); meter.replaceChildren();
   const sum = MK.reduce((a, k) => a + (bm[k] || 0), 0) || 1;
@@ -420,59 +443,6 @@ function renderPending(pall, pmats) {
       b.addEventListener("click", () => setMat(state.mat === k ? "all" : k));
       box.appendChild(b);
     });
-  });
-}
-function spark(vals, w = 120, h = 30) {
-  const svg = el("svg", { viewBox: `0 0 ${w} ${h}`, width: w, height: h });
-  svg.setAttribute("class", "chart");
-  const max = Math.max(...vals, 1);
-  const dx = vals.length > 1 ? (w - 14) / (vals.length - 1) : 0;
-  const xa = i => 2 + i * dx, ya = v => h - 3 - v / max * (h - 8);
-  let dline = "";
-  vals.forEach((v, i) => dline += (i ? " L" : "M") + xa(i) + " " + ya(v));
-  el("path", { d: dline, class: "l-ctx" }, svg);
-  el("circle", { cx: xa(vals.length - 1), cy: ya(vals[vals.length - 1]), r: 4, class: "f-acc ring" }, svg);
-  return svg;
-}
-function drawKpis(lag) {
-  const box = $("#kpis"); box.replaceChildren();
-  if (!TREND.length) return;
-  const last = TREND[TREND.length - 1], prev = TREND[TREND.length - 2] || last;
-  const pl = fmtP(last.period), pp = fmtP(prev.period);
-  const items = [
-    { lbl: `CVE pre-reservado — nuevas en ${pl}`, star: true, v: last.cve_prereserved,
-      d: last.cve_prereserved - prev.cve_prereserved, dlbl: "vs " + pp,
-      cap: "La señal estrella: CVE ya asignado pero sin ficha pública.",
-      vals: TREND.map(d => d.cve_prereserved) },
-    { lbl: `pre-CVE — nuevas en ${pl}`, v: last.pre_cve, d: last.pre_cve - prev.pre_cve, dlbl: "vs " + pp,
-      cap: "Solo tienen el código de su fuente (GHSA, RUSTSEC, ZDI…), sin CVE aún.",
-      vals: TREND.map(d => d.pre_cve) },
-    { lbl: `CVE reservado — nuevas en ${pl}`, v: last.cve_reserved, d: last.cve_reserved - prev.cve_reserved,
-      dlbl: "vs " + pp,
-      cap: "Con ficha MITRE; NVD aún sin publicar. A un paso de ser oficial.",
-      vals: TREND.map(d => d.cve_reserved) },
-    lag ? { lbl: "Mediana días hasta CVE público", v: lag.median, unit: " d",
-      fixed: `p90: ${fmt(lag.p90)} d — 1 de cada 10 se anticipó más`,
-      cap: "La mitad de los CVEs publicados (últimos 12 m) se conocieron aquí con esa antelación o más.",
-      vals: null } : null,
-  ].filter(Boolean);
-  items.forEach(it => {
-    const c = document.createElement("div"); c.className = "card tile" + (it.star ? " star" : "");
-    const l = document.createElement("div"); l.className = "lbl"; l.textContent = it.lbl;
-    const v = document.createElement("div"); v.className = "val"; v.textContent = fmt(it.v) + (it.unit || "");
-    const de = document.createElement("div"); de.className = "delta";
-    if (it.fixed) de.textContent = it.fixed;
-    else {
-      const sp = document.createElement("span");
-      if (it.d > 0 && it.star) sp.className = "up";
-      sp.textContent = (it.d >= 0 ? "+" : "") + fmt(it.d);
-      de.append(sp, document.createTextNode(" " + it.dlbl));
-    }
-    const cap = document.createElement("div"); cap.className = "tcap"; cap.textContent = it.cap;
-    c.append(l, v, de);
-    if (it.vals) c.append(spark(it.vals));
-    c.append(cap);
-    box.appendChild(c);
   });
 }
 
@@ -599,7 +569,9 @@ function drawScatter(rows) {
 }
 function drawTable(rows, total) {
   const tb = $("#tbody"); tb.replaceChildren();
-  const shown = rows.slice(0, 14);
+  const maxPage = Math.max(1, Math.ceil(rows.length / TPAGE_SIZE));
+  if (state.tpage > maxPage) state.tpage = maxPage;
+  const shown = rows.slice((state.tpage - 1) * TPAGE_SIZE, state.tpage * TPAGE_SIZE);
   shown.forEach(r => {
     const tr = document.createElement("tr");
     tr.dataset.key = r.key; tr.tabIndex = 0;
@@ -628,8 +600,31 @@ function drawTable(rows, total) {
     td.colSpan = 6; td.className = "muted"; td.textContent = "sin resultados con esta selección";
     tr.appendChild(td); tb.appendChild(tr);
   }
-  $("#tmore").textContent = total > shown.length
-    ? `Mostrando ${shown.length} de ${fmt(total)} (las ${fmt(Math.min(total, 400))} más recientes alimentan la gráfica).` : "";
+  drawPager(rows);
+}
+function drawPager(rows) {
+  const box = $("#tpager"); box.replaceChildren();
+  if (!rows.length) return;
+  const serverTotal = ROWS._total || rows.length;
+  const loadedPages = Math.ceil(rows.length / TPAGE_SIZE);
+  const moreOnServer = ROWS.length < serverTotal;
+  const prev = document.createElement("button");
+  prev.textContent = "‹ anterior"; prev.disabled = state.tpage <= 1;
+  prev.addEventListener("click", () => { state.tpage--; renderDrill(); });
+  const next = document.createElement("button");
+  next.textContent = "siguiente ›";
+  next.disabled = state.tpage >= loadedPages && !moreOnServer;
+  next.addEventListener("click", async () => {
+    if (state.tpage >= loadedPages && moreOnServer) {
+      next.disabled = true; next.textContent = "cargando…";
+      try { await fetchMoreDrill(); } catch (e) { console.error(e); }
+    }
+    state.tpage++; renderDrill();
+  });
+  const info = document.createElement("span");
+  info.textContent = `página ${state.tpage} · ${fmt(rows.length)} cargadas` +
+    (moreOnServer ? ` de ${fmt(serverTotal)} (se cargan más al avanzar)` : ` de ${fmt(rows.length)}`);
+  box.append(prev, next, info);
 }
 function renderDrill() {
   const rows = drillRows();
@@ -637,6 +632,16 @@ function renderDrill() {
   drawScatter(rows);
   drawTable(rows, rows.length);
 }
+/* círculos del carril: filtran por madurez y llevan a la tabla de inspección */
+MK.forEach((k, i) => {
+  const b = $("#rc" + (i + 1)); if (!b) return;
+  b.addEventListener("click", () => {
+    setMat(state.mat === k ? "all" : k);
+    $("#drill").scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+});
+$("#rc4")?.addEventListener("click", () =>
+  $("#lagcard").scrollIntoView({ behavior: "smooth", block: "start" }));
 
 /* ================= drawer (ficha /api/candidate) ================= */
 const drawer = $("#drawer"), ovl = $("#ovl");
@@ -720,6 +725,105 @@ $("#dclose").addEventListener("click", closeDrawer);
 ovl.addEventListener("click", closeDrawer);
 addEventListener("keydown", ev => { if (ev.key === "Escape") closeDrawer(); });
 
+/* ================= pendientes críticos ================= */
+function drawCritical(d) {
+  const tb = $("#crit-body"); tb.replaceChildren();
+  const rows = (d.rows || []).slice(0, 25);
+  const max = rows.length ? Math.max(...rows.map(r => r.score), 1) : 1;
+  rows.forEach((r, i) => {
+    const key = r.cve_id || r.id;
+    const tr = document.createElement("tr"); tr.dataset.key = key; tr.tabIndex = 0;
+    const tdn = document.createElement("td"); tdn.className = "num"; tdn.textContent = i + 1;
+    const td1 = document.createElement("td"); td1.className = "mono"; td1.textContent = r.cve_id || "(pre-CVE)";
+    const tdp = document.createElement("td"); tdp.className = "mono"; tdp.textContent = r.product || "—";
+    const tdm = document.createElement("td");
+    const m = MAT[r.maturity] || MAT.pre_cve;
+    const pm = document.createElement("span"); pm.className = "pill";
+    const dot = document.createElement("span"); dot.className = "dot"; dot.style.background = `var(${m.varn})`;
+    pm.append(dot, document.createTextNode(m.label)); tdm.appendChild(pm);
+    const tds = document.createElement("td");
+    if (r.in_kev) { const p = document.createElement("span"); p.className = "pill kev"; p.textContent = "KEV";
+      tds.append(p, document.createTextNode(" ")); }
+    if (r.has_public_poc) { const p = document.createElement("span"); p.className = "pill";
+      p.style.cssText = "background:var(--accent-wash);color:var(--ink2)"; p.textContent = "PoC"; tds.appendChild(p); }
+    if (!r.in_kev && !r.has_public_poc) { tds.className = "muted"; tds.textContent = "—"; }
+    const tdc = document.createElement("td"); tdc.className = "num";
+    tdc.textContent = r.cvss == null ? "—" : (+r.cvss).toFixed(1);
+    const tdsc = document.createElement("td");
+    const wrap = document.createElement("div"); wrap.style.cssText = "display:flex;align-items:center;gap:8px";
+    const track = document.createElement("div");
+    track.style.cssText = "flex:1;height:12px;background:var(--page);border-radius:3px;overflow:hidden";
+    const fill = document.createElement("div");
+    fill.style.cssText = `height:100%;width:${Math.round(r.score / max * 100)}%;border-radius:3px;` +
+      `background:${r.in_kev ? "var(--crit)" : "var(--accent)"}`;
+    track.appendChild(fill);
+    const sc = document.createElement("b"); sc.style.cssText = "width:34px;text-align:right;font-variant-numeric:tabular-nums";
+    sc.textContent = Math.round(r.score);
+    wrap.append(track, sc); tdsc.appendChild(wrap);
+    tr.append(tdn, td1, tdp, tdm, tds, tdc, tdsc);
+    tr.addEventListener("click", () => openCandidate(key));
+    tr.addEventListener("keydown", ev => { if (ev.key === "Enter") openCandidate(key); });
+    tb.appendChild(tr);
+  });
+  if (!rows.length) {
+    const tr = document.createElement("tr"); const td = document.createElement("td");
+    td.colSpan = 7; td.className = "muted";
+    td.textContent = "sin pendientes con señal de criticidad (KEV, PoC, CVSS o severidad) en esta selección";
+    tr.appendChild(td); tb.appendChild(tr);
+  }
+  $("#crit-note").textContent = rows.length
+    ? `Se muestran las ${rows.length} de mayor score. Solo entran pendientes con al menos una señal de gravedad o explotación.`
+    : "";
+}
+async function loadCritical() {
+  try {
+    const d = await j("/api/pending/critical?" + qs({
+      top: 50, maturity: state.mat === "all" ? null : state.mat,
+      kind: state.kind === "all" ? null : state.kind, tech: state.tech,
+    }));
+    drawCritical(d);
+  } catch (e) { console.error(e); $("#crit-note").textContent = "error al cargar los críticos"; }
+}
+
+/* ================= pendientes por ecosistema ================= */
+function drawBreakdown(d) {
+  const box = $("#eco-bars"); box.replaceChildren();
+  const rows = (d.by_ecosystem || []).slice(0, 12);
+  const max = rows.length ? Math.max(...rows.map(r => r.pending), 1) : 1;
+  rows.forEach(r => {
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;gap:10px;margin:5px 0";
+    const name = document.createElement("span"); name.className = "mono";
+    name.style.cssText = "width:130px;flex:none;font-size:12px"; name.textContent = r.ecosystem;
+    const track = document.createElement("div");
+    track.style.cssText = "flex:1;height:16px;background:var(--page);border-radius:4px;overflow:hidden";
+    const fill = document.createElement("div");
+    fill.style.cssText = `height:100%;width:${Math.round(r.pending / max * 100)}%;background:var(--accent);border-radius:4px`;
+    track.appendChild(fill);
+    const n = document.createElement("b");
+    n.style.cssText = "width:60px;flex:none;text-align:right;font-variant-numeric:tabular-nums;font-size:12px";
+    n.textContent = fmt(r.pending);
+    row.append(name, track, n); box.appendChild(row);
+  });
+  if (!rows.length) { const p = document.createElement("p"); p.className = "muted";
+    p.textContent = "sin datos"; box.appendChild(p); }
+  const m = d.by_maturity || {};
+  $("#eco-note").textContent = "Madurez del total pendiente — pre-CVE: " + fmt(m.pre_cve || 0) +
+    " · CVE pre-reservado: " + fmt(m.cve_prereserved || 0) + " · CVE reservado: " + fmt(m.cve_reserved || 0) + ".";
+}
+async function loadBreakdown() {
+  try { drawBreakdown(await j("/api/pending/breakdown")); }
+  catch (e) { console.error(e); }
+}
+
+/* Exportar la selección del triage (drill-down) a CSV. */
+$("#f-csv").addEventListener("click", () => {
+  const a = document.createElement("a");
+  a.href = "/api/emerging?" + drillParams(1) + "&format=csv";
+  a.download = "foreshock_triage.csv";
+  document.body.appendChild(a); a.click(); a.remove();
+});
+
 /* ================= carga de datos ================= */
 async function loadStatic() {
   // sonda: ¿soporta la API granularidad semanal y ventana en días?
@@ -732,7 +836,7 @@ async function loadStatic() {
   const months = 24;
   const [lagR, queueR, statsR, ctxR] = await Promise.allSettled([
     j("/api/lag/histogram?months=12"),
-    j("/api/queue/age"),
+    j("/api/queue/age?exclude_backfill=false"),
     j("/api/stats"),
     j(`/api/trend?months=${months}&granularity=month`),
   ]);
@@ -744,7 +848,44 @@ async function loadStatic() {
   if (queueR.status === "fulfilled") drawQueue(queueR.value);
   if (statsR.status === "fulfilled") drawSrc(statsR.value.sources);
   window._lag = lagR.status === "fulfilled" ? lagR.value : null;
-  if (window._lag) drawHist(window._lag);
+  if (window._lag) {
+    drawHist(window._lag);
+    $("#k-med-v").textContent = fmt(window._lag.median);
+    $("#k-med-p90").textContent = fmt(window._lag.p90);
+    // fase final del carril: las que ya cruzaron a "CVE público"
+    $("#rc4").textContent = fmt(window._lag.count);
+    $("#pub-cap").textContent = "NVD publica su análisis y la vulnerabilidad sale de pendientes: " +
+      `en los últimos 12 meses cruzaron ${fmt(window._lag.count)} de las vigiladas en vivo, ` +
+      `conocidas aquí con una mediana de ${fmt(window._lag.median)} días de antelación.`;
+  }
+  fillKevKpi(); fillWeekKpi(); loadBreakdown();
+}
+async function fillKevKpi() {
+  try {
+    const d = await j("/api/emerging?pending_only=true&in_kev=true&page_size=1");
+    $("#k-kev-v").textContent = fmt(d.total);
+  } catch { $("#k-kev-v").textContent = "—"; }
+}
+async function fillWeekKpi() {
+  const tile = $("#k-wk-v").closest(".tile");
+  if (!CAPS.week) { tile.hidden = true; return; }
+  try {
+    // 10 semanas: la última completa frente a la media de las anteriores
+    const d = await j("/api/trend?granularity=week&days=70");
+    const s = d.series.slice(0, -1);              // descarta la semana en curso (parcial)
+    if (s.length < 3) { tile.hidden = true; return; }
+    const last = s[s.length - 1], prev = s.slice(0, -1);
+    const mean = prev.reduce((a, x) => a + x.pre_published, 0) / prev.length;
+    $("#k-wk-v").textContent = fmt(last.pre_published);
+    const cap = $("#k-wk-c"); cap.replaceChildren();
+    if (mean > 0) {
+      const pct = Math.round((last.pre_published / mean - 1) * 100);
+      const sp = document.createElement("span");
+      if (pct > 0) { sp.className = "up"; sp.textContent = "▲ " + pct + " %"; }
+      else sp.textContent = (pct === 0 ? "=" : "▼ " + Math.abs(pct) + " %");
+      cap.append(sp, document.createTextNode(` frente a la media de las ${prev.length} semanas previas (${fmtP(last.period)}).`));
+    } else cap.textContent = "semana " + fmtP(last.period) + ".";
+  } catch { tile.hidden = true; }
 }
 async function loadMain() {
   const base = { top: 100, kind: "all", period: state.period, granularity: state.gran };
@@ -756,30 +897,44 @@ async function loadMain() {
   TREND = trend.series;
   const pmats = Object.fromEntries(MK.map((k, i) => [k, mats[i]]));
   renderPending(pall, pmats);
-  drawKpis(window._lag);
   drawMat();
   drawTopSw(pall, pmats);
 }
-async function loadDrill() {
-  const d = await j(`/api/emerging?${qs({
-    pending_only: true, page_size: 400,
+function drillParams(page) {
+  return qs({
+    pending_only: true, page_size: 400, page,
     maturity: state.mat === "all" ? null : state.mat,
     period: state.period, granularity: state.gran,
     kind: state.kind === "all" ? null : state.kind,
     tech: state.tech, source: state.source, in_kev: state.kevOnly || null,
-  })}`);
-  ROWS = d.rows.map(r => ({
+  });
+}
+function mapDrillRows(rows) {
+  return rows.map(r => ({
     key: r.cve_id || r.id, cvss: r.cvss, maturity: r.maturity, in_kev: r.in_kev,
     vuln_type: r.vuln_type, sources: r.sources,
     first_seen_at: r.first_seen_at || r.last_seen_at || "",
   }));
+}
+async function loadDrill() {
+  state.tpage = 1;
+  const d = await j("/api/emerging?" + drillParams(1));
+  ROWS = mapDrillRows(d.rows);
   ROWS._total = d.total;
+  ROWS._page = 1;
   renderDrill();
+}
+async function fetchMoreDrill() {
+  const d = await j("/api/emerging?" + drillParams(ROWS._page + 1));
+  const total = ROWS._total;
+  ROWS = ROWS.concat(mapDrillRows(d.rows));
+  ROWS._total = total;
+  ROWS._page = (ROWS._page || 1) + 1;
 }
 async function applyAll() {
   $("#stamp").textContent = "consultando API…";
   try {
-    await Promise.all([loadMain(), loadDrill()]);
+    await Promise.all([loadMain(), loadDrill(), loadCritical()]);
     $("#stamp").textContent = "datos en vivo · " + new Date().toLocaleString("es-ES",
       { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
   } catch (e) {
@@ -810,8 +965,18 @@ $("#f-mat").addEventListener("click", ev => {
 });
 $("#f-kind").addEventListener("change", () => { state.kind = $("#f-kind").value; applyAll(); });
 $("#f-src").addEventListener("change", () => { state.source = $("#f-src").value; applyAll(); });
-$("#f-cvss").addEventListener("change", () => { state.cvssMin = +$("#f-cvss").value; renderDrill(); });
+$("#f-cvss").addEventListener("change", () => { state.cvssMin = +$("#f-cvss").value; state.tpage = 1; renderDrill(); });
 $("#f-kev").addEventListener("change", () => { state.kevOnly = $("#f-kev").checked; applyAll(); });
+$("#lag-metric").addEventListener("click", async ev => {
+  const b = ev.target.closest("button[data-v]"); if (!b) return;
+  [...$("#lag-metric").children].forEach(x => x.classList.toggle("on", x === b));
+  const m = b.dataset.v;
+  try {
+    drawHist(await j(m === "published"
+      ? "/api/lag/histogram?months=12&metric=published&exclude_backfill=false"
+      : "/api/lag/histogram?months=12"));
+  } catch (e) { console.error(e); }
+});
 $("#s-gran").addEventListener("click", ev => {
   const b = ev.target.closest("button[data-v]"); if (!b) return;
   [...$("#s-gran").children].forEach(x => x.classList.toggle("on", x === b));

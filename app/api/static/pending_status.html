@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Foreshock — Estado de la plataforma</title>
+<style>
+:root{
+  color-scheme:light;
+  --page:#f5f6f4;--surface:#fff;--surface2:#f0f2ef;--hair:#dfe2dc;
+  --ink:#151715;--ink2:#555b55;--muted:#7b827b;--accent:#286fc1;
+  --ok:#15803d;--warn:#b45309;--bad:#c52d2d;--info:#48627c;
+}
+@media(prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;--page:#0d100e;--surface:#171a18;--surface2:#202420;
+    --hair:#303630;--ink:#f4f6f3;--ink2:#c1c7c0;--muted:#8f978e;
+    --accent:#65a8f5;--ok:#4ade80;--warn:#f59e0b;--bad:#f87171;--info:#9fb8d1;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;--page:#0d100e;--surface:#171a18;--surface2:#202420;
+  --hair:#303630;--ink:#f4f6f3;--ink2:#c1c7c0;--muted:#8f978e;
+  --accent:#65a8f5;--ok:#4ade80;--warn:#f59e0b;--bad:#f87171;--info:#9fb8d1;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--ink);
+  font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+a{color:var(--accent);text-decoration:none}
+button,input,select{font:inherit}
+header{position:sticky;top:0;z-index:5;border-bottom:1px solid var(--hair);
+  background:color-mix(in srgb,var(--surface) 94%,transparent)}
+.head{max-width:1440px;margin:auto;padding:13px 24px;display:flex;align-items:center;gap:16px}
+.brand{font:700 17px ui-monospace,Menlo,monospace;letter-spacing:.14em;text-transform:uppercase}
+.title{color:var(--muted);font-size:12px}
+.spacer{flex:1}
+.head button,.head a{border:1px solid var(--hair);background:var(--surface2);color:var(--ink2);
+  border-radius:7px;padding:6px 11px;cursor:pointer}
+.head button:hover,.head a:hover{border-color:var(--accent);color:var(--ink)}
+main{max-width:1440px;margin:auto;padding:24px 24px 80px}
+.intro{display:flex;align-items:flex-end;gap:18px;flex-wrap:wrap;margin-bottom:18px}
+h1{font-size:24px;margin:0 0 3px}.lede{color:var(--ink2);margin:0;max-width:82ch}
+.stamp{margin-left:auto;color:var(--muted);font:12px ui-monospace,Menlo,monospace}
+.grid{display:grid;gap:14px}.kpis{grid-template-columns:repeat(6,minmax(140px,1fr));margin-bottom:14px}
+@media(max-width:1080px){.kpis{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:620px){.kpis{grid-template-columns:1fr 1fr}.head .title{display:none}}
+.card{background:var(--surface);border:1px solid var(--hair);border-radius:11px;padding:17px 18px}
+.kpi .label{font-size:10.5px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase}
+.kpi .value{font:650 28px/1.25 ui-monospace,Menlo,monospace;margin:3px 0}
+.kpi .caption{color:var(--ink2);font-size:11.5px}
+.split{grid-template-columns:minmax(320px,2fr) minmax(270px,1fr);margin-bottom:14px}
+@media(max-width:900px){.split{grid-template-columns:1fr}}
+.section-head{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
+h2{font-size:15px;margin:0}.sub{color:var(--muted);font-size:12px}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;border-radius:999px;
+  font-size:11px;font-weight:650;background:var(--surface2);color:var(--info)}
+.pill::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+.ok{color:var(--ok)}.warning,.stale,.queued{color:var(--warn)}
+.critical,.error,.offline{color:var(--bad)}.active{color:var(--accent)}
+.disabled,.never{color:var(--muted)}
+.alerts{display:grid;gap:7px}.alert{border-left:3px solid currentColor;background:var(--surface2);
+  border-radius:6px;padding:8px 10px;font-size:12px}
+.empty{color:var(--ok);background:var(--surface2);padding:10px;border-radius:7px}
+.scroll{overflow:auto;max-height:540px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th,td{padding:8px 9px;border-bottom:1px solid var(--hair);text-align:left;white-space:nowrap}
+th{position:sticky;top:0;background:var(--surface);z-index:1;color:var(--muted);
+  text-transform:uppercase;letter-spacing:.05em;font-size:10px}
+td.wrap{white-space:normal;min-width:220px}.num{text-align:right;font-family:ui-monospace,Menlo,monospace}
+.workers{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+@media(max-width:760px){.workers{grid-template-columns:1fr}}
+.worker{background:var(--surface2);border-radius:8px;padding:12px}
+.worker-head{display:flex;justify-content:space-between;gap:8px;margin-bottom:9px}
+.worker-name{font:650 12px ui-monospace,Menlo,monospace}
+.kv{display:grid;grid-template-columns:1fr auto;gap:4px 12px;font-size:11.5px}
+.kv span:nth-child(odd){color:var(--muted)}.kv span:nth-child(even){font-family:ui-monospace,Menlo,monospace}
+.bar{height:5px;background:var(--hair);border-radius:5px;overflow:hidden;margin:10px 0 5px}
+.bar i{display:block;height:100%;background:var(--accent);width:0}
+.filters{display:flex;gap:8px;margin-left:auto}
+.filters input,.filters select{border:1px solid var(--hair);background:var(--surface2);
+  color:var(--ink);border-radius:6px;padding:5px 8px}
+.two{grid-template-columns:1fr 1fr;margin-bottom:14px}
+@media(max-width:900px){.two{grid-template-columns:1fr}}
+.metric-list{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+@media(max-width:620px){.metric-list{grid-template-columns:1fr 1fr}}
+.metric{background:var(--surface2);padding:9px 10px;border-radius:7px}
+.metric b{display:block;font:650 17px ui-monospace,Menlo,monospace}
+.metric span{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.footnote{color:var(--muted);font-size:11px;margin:11px 0 0}
+#load-error{display:none;color:var(--bad);border:1px solid var(--bad);padding:10px;
+  border-radius:8px;margin-bottom:14px}
+</style>
+</head>
+<body>
+<header>
+  <div class="head">
+    <span class="brand">Foreshock</span>
+    <span class="title">administración · estado de la plataforma</span>
+    <span class="spacer"></span>
+    <a href="/">Dashboard</a>
+    <button id="refresh">Actualizar</button>
+    <button id="theme">Tema: auto</button>
+  </div>
+</header>
+<main>
+  <div class="intro">
+    <div>
+      <h1>Estado operativo</h1>
+      <p class="lede">Salud de workers y fetchers, presión de procesos, PostgreSQL y cobertura de ingesta. Esta vista es de solo lectura.</p>
+    </div>
+    <div class="stamp" id="stamp">cargando…</div>
+  </div>
+  <div id="load-error"></div>
+
+  <section class="grid kpis" aria-label="Resumen">
+    <div class="card kpi"><div class="label">Plataforma</div><div class="value" id="k-health">—</div><div class="caption" id="k-workers">—</div></div>
+    <div class="card kpi"><div class="label">Procesos reportados</div><div class="value" id="k-processes">—</div><div class="caption"><span id="k-threads">—</span> hilos</div></div>
+    <div class="card kpi"><div class="label">Zombies</div><div class="value" id="k-zombies">—</div><div class="caption">deben permanecer en cero</div></div>
+    <div class="card kpi"><div class="label">Fetchers activos</div><div class="value" id="k-fetchers">—</div><div class="caption" id="k-fetcher-state">—</div></div>
+    <div class="card kpi"><div class="label">Pendientes desde 2016</div><div class="value" id="k-pending">—</div><div class="caption">universo operativo del dashboard</div></div>
+    <div class="card kpi"><div class="label">Histórico excluido</div><div class="value" id="k-history">—</div><div class="caption">inconsistencias anteriores a 2016</div></div>
+  </section>
+
+  <section class="grid split">
+    <div class="card">
+      <div class="section-head"><h2>Workers y procesos</h2><span class="sub">heartbeat cada 30 s</span></div>
+      <div class="workers" id="workers"></div>
+    </div>
+    <div class="card">
+      <div class="section-head"><h2>Alertas</h2><span class="pill" id="alert-count">—</span></div>
+      <div class="alerts" id="alerts"></div>
+    </div>
+  </section>
+
+  <section class="card" style="margin-bottom:14px">
+    <div class="section-head">
+      <h2>Fetchers</h2>
+      <span class="sub" id="source-summary">—</span>
+      <div class="filters">
+        <input id="source-search" type="search" placeholder="buscar fuente">
+        <select id="source-state" aria-label="Filtrar estado">
+          <option value="">todos los estados</option>
+          <option value="active">ejecutando</option><option value="queued">en cola</option>
+          <option value="ok">correctos</option><option value="error">con error</option>
+          <option value="stale">retrasados</option><option value="never">sin completar</option>
+          <option value="disabled">deshabilitados</option>
+        </select>
+      </div>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Fuente</th><th>Estado</th><th>Método</th><th>Tier</th><th>Cadencia</th><th>Último éxito</th><th>Error actual</th></tr></thead>
+        <tbody id="source-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="grid two">
+    <div class="card">
+      <div class="section-head"><h2>PostgreSQL</h2><span class="sub" id="db-version">—</span></div>
+      <div class="metric-list" id="db-metrics"></div>
+      <p class="footnote">Las conexiones incluyen la consulta que construye este snapshot.</p>
+    </div>
+    <div class="card">
+      <div class="section-head"><h2>Cobertura de ingesta</h2><span class="sub">qué está dentro y qué falta</span></div>
+      <div class="metric-list" id="ingest-metrics"></div>
+    </div>
+  </section>
+
+  <section class="grid two">
+    <div class="card">
+      <div class="section-head"><h2>Inventario de tablas</h2><span class="sub">estimación de PostgreSQL</span></div>
+      <div class="scroll">
+        <table><thead><tr><th>Tabla</th><th class="num">Filas</th><th class="num">Muertas</th><th>Autoanalyze</th></tr></thead><tbody id="table-body"></tbody></table>
+      </div>
+    </div>
+    <div class="card">
+      <div class="section-head"><h2>Cursores baseline</h2><span class="sub">último punto confirmado</span></div>
+      <div class="scroll">
+        <table><thead><tr><th>Proceso</th><th>Actualizado</th><th>Cursor</th></tr></thead><tbody id="sync-body"></tbody></table>
+      </div>
+    </div>
+  </section>
+</main>
+<script src="/static/pending_status.js"></script>
+</body>
+</html>

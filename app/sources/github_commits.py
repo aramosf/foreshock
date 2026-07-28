@@ -19,7 +19,6 @@ El descubrimiento de la lista top-N sigue usando la Search API (cacheada semanal
 
 from __future__ import annotations
 
-import asyncio
 import gzip
 import os
 import re
@@ -31,6 +30,7 @@ from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
 from app.ingest.service import FetchedMention
 from app.sources.base import BaseSource, FetchContext, register
+from app.sources.gitproc import run_git_process
 
 log = get_logger(__name__)
 
@@ -66,17 +66,7 @@ def _clone_url(settings: Settings, full: str) -> str:
 async def _run_git(*args: str, timeout: float = 180.0) -> tuple[int, str, str]:
     """Ejecuta git de forma async. Devuelve (returncode, stdout, stderr).
     rc=124 en timeout (convención de coreutils `timeout`)."""
-    proc = await asyncio.create_subprocess_exec(
-        "git", *args,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        return 124, "", f"timeout tras {timeout}s"
-    return proc.returncode or 0, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
+    return await run_git_process(*args, timeout=timeout)
 
 
 def _mentions_from_log(full: str, log_out: str,

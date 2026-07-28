@@ -12,11 +12,13 @@ from __future__ import annotations
 
 from selectolax.parser import HTMLParser
 
+from app.ingest.service import FetchedMention
 from app.sources.base import BaseSource, FetchContext, register
 from app.sources.http import get
-from app.ingest.service import FetchedMention
 
-LISTING = "https://www.tenable.com/plugins/nessus/newest"
+# Tenable retiró la ruta histórica ``/plugins/nessus/newest`` (ahora responde
+# 400). La lista vigente filtra el catálogo común por producto.
+LISTING = "https://www.tenable.com/plugins/newest?type=nessus"
 BASE = "https://www.tenable.com"
 
 
@@ -54,6 +56,12 @@ class NessusSource(BaseSource):
                     url=f"{BASE}{href}" if href.startswith("/") else href,
                     title=title or None,
                     snippet=snippet[:2000] if snippet else None,
+                    # SIN fecha fiable en el payload: el listado 'newest' no trae
+                    # la fecha de publicación por fila (vive en el detalle del
+                    # plugin, que no se descarga). seen_at=None -> la ingesta usará
+                    # now(); aceptable porque el listado es de plugins recientes y
+                    # nessus rara vez es la fuente MÁS temprana de un candidate.
+                    seen_at=None,
                     # raw por-fila se omite para no duplicar el listado completo N veces;
                     # el detalle del plugin se capturaría en un fetch de segundo nivel.
                     raw_html=None,

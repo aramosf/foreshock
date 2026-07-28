@@ -4,9 +4,9 @@
 *before* MITRE/NVD publish them officially, and measures the **lead days** each source
 gains over NVD.
 
-This repository is the **data-ingestion backend** (no UI): worker processes that pull
-signal from public sources into a Postgres 16 database, an ingestion/reconciliation
-pipeline, LLM + CVSS enrichment, and an operations/query CLI.
+This repository is the **data-ingestion platform**: worker processes that pull signal
+from public sources into Postgres 16, an ingestion/reconciliation pipeline, LLM + CVSS
+enrichment, an operations/query CLI, and read-only web dashboards.
 
 > **Framing.** MITRE (cvelistV5) and OSV are the finish line — the authoritative record of
 > what a vulnerability *is*. Foreshock doesn't replace them; it watches the **race** that
@@ -30,10 +30,10 @@ time *we* observed the CVE in NVD (robust against NVD date backfill).
 | Service | Role |
 |---|---|
 | `postgres` | Postgres 16 — canonical state and signal |
-| `redis` | cache / rate-limit |
 | `migrate` | applies Alembic migrations and exits (workers wait for it) |
 | `baseline-worker` | syncs cvelistV5 + NVD 2.0 delta + EPSS on schedule |
-| `sources-worker` | runs the 11 fetchers on their cadences (hot reconcile) and ingests the mentions |
+| `sources-worker` | runs the registered fetchers with bounded concurrency and ingests mentions |
+| `api` | read-only API, vulnerability dashboard and platform-status dashboard |
 
 ```mermaid
 flowchart LR
@@ -89,22 +89,26 @@ Detailed component diagram in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 ./scripts/start.sh --status     # service + dashboard status
 ```
 
+Dashboards: <http://localhost:8000/> (vulnerability signal) and
+<http://localhost:8000/pending_status> (workers, fetchers, processes, database
+and ingestion coverage).
+
 Full operational guide (startup, first-time load, safe re-ingest, the 12 sources,
 monitoring, migrations, and pitfalls): **[`docs/RUNBOOK.md`](docs/RUNBOOK.md)**.
 
 Under the hood `start.sh` is just:
 
 ```bash
-# Bring everything up: postgres + redis + migrations + both workers + api
+# Bring everything up: postgres + migrations + both workers + api
 docker compose up -d --build
 
 # Infrastructure only, for development
-docker compose up -d postgres redis
+docker compose up -d postgres
 docker compose run --rm migrate            # apply Alembic migrations
 ```
 
 Configuration is 12-factor via environment variables (prefix `FORESHOCK_`, plus
-`DATABASE_URL` / `REDIS_URL`), read from the environment or a local `.env`. Defaults point
+`DATABASE_URL`), read from the environment or a local `.env`. Defaults point
 at the docker-compose stack. Common ones:
 
 ```bash
@@ -115,6 +119,10 @@ FORESHOCK_NVD_API_KEY=                 # raises NVD rate limit
 FORESHOCK_GITHUB_TOKEN=                # PAT -> 5000 req/h
 FORESHOCK_GITHUB_TOP_N=10000           # popular repos to watch (scales to 100k+)
 FORESHOCK_GITHUB_REPOS_PER_RUN=150     # incremental crawl batch size
+FORESHOCK_SOURCES_MAX_CONCURRENT=4     # complete fetch/parse/ingest cycles
+FORESHOCK_SOURCES_GIT_MAX_CONCURRENT=1 # external Git processes
+FORESHOCK_SOURCES_HEAVY_MAX_CONCURRENT=1
+FORESHOCK_SOURCES_STARTUP_SPREAD_SECONDS=3600
 FORESHOCK_VULNCHECK_TOKEN=             # free token from vulncheck.com
 FORESHOCK_OSV_ECOSYSTEMS=PyPI,Go,crates.io,RubyGems,Packagist
 ```
@@ -279,7 +287,7 @@ docker compose run --rm --no-deps \
 
 ## Stack
 
-Python 3.12 · SQLModel / SQLAlchemy 2 · Alembic · Postgres 16 · Redis · httpx · feedparser ·
+Python 3.12 · SQLModel / SQLAlchemy 2 · Alembic · Postgres 16 · httpx · feedparser ·
 selectolax · tenacity · APScheduler · `cvss` · Playwright (optional, `browser` extra) ·
 Typer + rich · structlog · pydantic / pydantic-settings. Packaged with `uv` / hatchling;
 Docker + docker-compose.

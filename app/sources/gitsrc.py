@@ -10,26 +10,20 @@ los años recientes. Devuelve el directorio local del working tree.
 
 from __future__ import annotations
 
-import asyncio
 import os
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.sources.gitproc import run_git_process
 
 log = get_logger(__name__)
 
 
 async def _git(*args: str, cwd: str | None = None, timeout: float = 1800.0) -> tuple[int, str]:
-    proc = await asyncio.create_subprocess_exec(
-        "git", *args, cwd=cwd,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    rc, out, err = await run_git_process(
+        *args, cwd=cwd, timeout=timeout, merge_stderr=True,
     )
-    try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        return 124, "timeout"
-    return proc.returncode or 0, out.decode("utf-8", "replace")
+    return rc, out or err
 
 
 def repo_dir(name: str) -> str:

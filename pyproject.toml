@@ -20,9 +20,8 @@ dependencies = [
     "selectolax>=0.3",
     "tenacity>=9.0",
     "python-dateutil>=2.9",
-    # scheduling / cache / colas
+    # scheduling
     "apscheduler>=3.10",
-    "redis>=5.0",
     # scoring
     "cvss>=3.2",
     # CLI

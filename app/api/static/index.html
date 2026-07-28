@@ -14,7 +14,7 @@
   --m1:#86b6ef; --m2:#2a78d6; --m3:#104281;          /* rampa madurez: pre_cve → prereservado → reservado */
   --accent:#2a78d6; --accent-wash:rgba(42,120,214,.10);
   --ctx:#b5b3ab; --ctx-wash:rgba(137,135,129,.12);   /* contexto NVD (des-énfasis) */
-  --crit:#d03b3b; --good-txt:#006300;
+  --crit:#d03b3b; --good-txt:#006300; --rc4-ink:#0b0b0b;
 }
 @media (prefers-color-scheme: dark){
   :root:not([data-theme="light"]){
@@ -25,7 +25,7 @@
     --m1:#9ec5f4; --m2:#3987e5; --m3:#184f95;
     --accent:#3987e5; --accent-wash:rgba(57,135,229,.13);
     --ctx:#6f6e68; --ctx-wash:rgba(137,135,129,.14);
-    --crit:#d03b3b; --good-txt:#0ca30c;
+    --crit:#d03b3b; --good-txt:#0ca30c; --rc4-ink:#fff;
   }
 }
 :root[data-theme="dark"]{
@@ -36,34 +36,90 @@
   --m1:#9ec5f4; --m2:#3987e5; --m3:#184f95;
   --accent:#3987e5; --accent-wash:rgba(57,135,229,.13);
   --ctx:#6f6e68; --ctx-wash:rgba(137,135,129,.14);
-  --crit:#d03b3b; --good-txt:#0ca30c;
+  --crit:#d03b3b; --good-txt:#0ca30c; --rc4-ink:#fff;
 }
 
 /* ============ base ============ */
 *{box-sizing:border-box}
 body{margin:0;background:var(--page);color:var(--ink);
-  font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+  font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
 .mono{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
-.wrap{max-width:1220px;margin:0 auto;padding:0 20px 80px}
-a{color:var(--accent)}
+.wrap{max-width:1220px;margin:0 auto;padding:0 24px 88px}
+a{color:var(--accent);text-decoration:none}
+a:hover{color:var(--m3)}
+::selection{background:var(--accent-wash)}
 
-header{border-bottom:1px solid var(--hair);background:var(--surface)}
-.hd{max-width:1220px;margin:0 auto;padding:16px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+header{border-bottom:1px solid var(--hair);background:var(--surface);position:sticky;top:0;z-index:20}
+.hd{max-width:1220px;margin:0 auto;padding:14px 24px;display:flex;align-items:center;gap:20px;flex-wrap:wrap}
+.brand{display:flex;align-items:baseline;gap:12px}
 .wordmark{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
-  font-size:17px;font-weight:700;letter-spacing:.18em;text-transform:uppercase}
-.wordmark small{display:block;letter-spacing:.06em;font-weight:500;font-size:11px;color:var(--muted);text-transform:none}
-.trace{flex:1;min-width:120px;height:34px;opacity:.85}
+  font-size:18px;font-weight:700;letter-spacing:.18em;text-transform:uppercase}
+.brand small{font-size:11.5px;color:var(--muted);font-weight:500}
+.trace{flex:1;min-width:120px;height:30px;opacity:.85}
 .trace path{stroke:var(--accent);stroke-width:1.5;fill:none}
-.hd .stamp{font-size:11.5px;color:var(--muted);text-align:right}
+.hd .stamp{font-size:11.5px;color:var(--muted);text-align:right;line-height:1.4}
 #themebtn{background:none;border:1px solid var(--hair);border-radius:6px;color:var(--ink2);
   padding:6px 12px;cursor:pointer;font-size:12.5px;font-family:inherit}
 #themebtn:hover{background:var(--accent-wash)}
+.admin-link{border:1px solid var(--hair);border-radius:6px;color:var(--ink2);
+  padding:6px 12px;font-size:12.5px}
+.admin-link:hover{background:var(--accent-wash);color:var(--ink)}
+
+/* tarjetas y titulares */
+.card{background:var(--surface);border:1px solid var(--hair);border-radius:12px;
+  padding:20px 22px;position:relative}
+.card h3{font-size:14px;margin:0 0 2px;font-weight:650}
+.card .sub{font-size:12px;color:var(--muted);margin:0 0 14px}
+.eyebrow{font-family:ui-monospace,Menlo,monospace;font-size:11px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--muted);font-weight:600}
+.headline{font-size:19px;font-weight:650;margin:6px 0 4px;letter-spacing:-.01em}
+.lede{font-size:13px;color:var(--ink2);margin:0;max-width:88ch;line-height:1.55;text-wrap:pretty}
+.grid{display:grid;gap:16px;margin-bottom:16px}
+.g-hero{grid-template-columns:minmax(280px,340px) 1fr}
+.g-kpi{grid-template-columns:repeat(4,1fr)}
+.g-lag{grid-template-columns:5fr 4fr}
+@media (max-width:960px){.g-hero,.g-kpi,.g-lag{grid-template-columns:1fr 1fr}}
+@media (max-width:640px){.g-hero,.g-kpi,.g-lag{grid-template-columns:1fr}}
+
+/* carril del concepto */
+.rail{border:1px solid var(--hair);border-left:4px solid var(--accent);border-radius:12px;
+  padding:18px 22px 20px;margin-top:18px;background:var(--page)}
+.rail>b{font-size:14px}
+.rail>p{margin:4px 0 0;font-size:12.5px;color:var(--ink2);max-width:92ch;text-wrap:pretty}
+.rail-axis{display:flex;justify-content:space-between;font-family:ui-monospace,Menlo,monospace;
+  font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:22px 0 6px}
+.rail-track{position:relative;padding-top:8px}
+.rail-track .line{position:absolute;top:32px;left:calc(100%/8);right:calc(100%/8);height:3px;
+  border-radius:2px;background:linear-gradient(90deg,var(--m1),var(--m2),var(--m3),var(--ctx))}
+.rail-track .row{display:grid;grid-template-columns:repeat(4,1fr);position:relative}
+.rail-track .cell{display:flex;justify-content:center}
+.rc{width:52px;height:52px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-weight:650;font-size:14px;font-variant-numeric:tabular-nums;box-shadow:0 0 0 4px var(--page);
+  cursor:pointer;border:0;font-family:inherit}
+.rc:hover{box-shadow:0 0 0 4px var(--page),0 0 0 6px var(--accent-wash)}
+.rc:focus-visible{outline:2px solid var(--accent);outline-offset:4px}
+.rc1{background:var(--m1);color:#0b0b0b}
+.rc2{background:var(--m2);color:#fff}
+.rc3{background:var(--m3);color:#fff}
+.rc4{background:var(--ctx);color:var(--rc4-ink)}
+.subsets{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-top:18px}
+@media(max-width:1080px){.subsets{grid-template-columns:1fr 1fr}}
+@media(max-width:760px){.subsets{grid-template-columns:1fr}}
+.subbox{border:1px solid var(--hair);border-top:3px solid;border-radius:8px;
+  padding:12px 14px;background:var(--surface)}
+.subbox b{display:block;font-size:12.5px;margin-bottom:4px}
+.subbox p{margin:0;font-size:11.5px;color:var(--ink2);line-height:1.5}
+.sb-m1{border-top-color:var(--m1)} .sb-m2{border-top-color:var(--m2)} .sb-m3{border-top-color:var(--m3)}
+.sb-pub{border-top-color:var(--ctx)}
+.gloss-strip{display:flex;flex-wrap:wrap;gap:8px 30px;margin-top:16px;padding-top:12px;
+  border-top:1px solid var(--grid);font-size:12px;color:var(--ink2)}
+.gloss-strip b{color:var(--ink)}
 
 /* filtros */
-.filters{display:flex;gap:14px;align-items:end;flex-wrap:wrap;
+.filters{display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap;
   background:var(--surface);border:1px solid var(--hair);border-radius:10px;
-  padding:12px 16px;margin:18px 0}
-.filters label{display:flex;flex-direction:column;gap:4px;font-size:10.5px;
+  padding:12px 18px;margin:18px 0}
+.filters label{display:flex;flex-direction:column;gap:5px;font-size:10.5px;
   letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600}
 select,input[type=text]{background:var(--page);color:var(--ink);border:1px solid var(--hair);
   border-radius:6px;padding:6px 9px;font-size:13px;font-family:inherit}
@@ -74,68 +130,35 @@ select,input[type=text]{background:var(--page);color:var(--ink);border:1px solid
 .seg button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 .reset{margin-left:auto;background:none;border:1px solid var(--hair);border-radius:6px;
   color:var(--ink2);padding:6px 12px;cursor:pointer;font-size:12.5px;font-family:inherit}
-
-/* tarjetas */
-.card{background:var(--surface);border:1px solid var(--hair);border-radius:10px;
-  padding:16px 18px;position:relative}
-.card h2{font-size:13.5px;margin:0 0 2px;font-weight:650}
-.card .sub{font-size:12px;color:var(--muted);margin:0 0 12px}
-.grid{display:grid;gap:14px;margin-bottom:14px}
-.g-hero{grid-template-columns:minmax(280px,340px) 1fr}
-.g-kpi{grid-template-columns:repeat(4,1fr)}
-.g-lag{grid-template-columns:5fr 4fr}
-@media (max-width:960px){.g-hero,.g-kpi,.g-lag{grid-template-columns:1fr 1fr}}
-@media (max-width:640px){.g-hero,.g-kpi,.g-lag{grid-template-columns:1fr}}
-
-/* glosario */
-.gloss{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:2px 30px;margin:8px 0 0}
-.gloss div{font-size:12.5px;padding:7px 0;border-bottom:1px solid var(--grid)}
-.gloss dt{font-weight:650;display:inline}
-.gloss dt::after{content:" — "}
-.gloss dd{display:inline;margin:0;color:var(--ink2)}
-.howto{font-size:12px;color:var(--ink2);background:var(--page);border:1px solid var(--hair);
-  border-radius:7px;padding:8px 12px;margin:0 0 12px}
-.howto b{font-weight:650}
-.parentbox{border:1px solid var(--hair);border-left:4px solid var(--accent);border-radius:10px;
-  padding:12px 14px;margin:12px 0;background:var(--page)}
-.parentbox>b{font-size:13.5px}
-.parentbox>p{margin:4px 0 0;font-size:12.5px;color:var(--ink2)}
-.subsets{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px}
-@media(max-width:760px){.subsets{grid-template-columns:1fr}}
-.subbox{border:1px solid var(--hair);border-left:4px solid;border-radius:8px;
-  padding:10px 12px;font-size:12.5px;background:var(--surface)}
-.subbox b{display:block;margin-bottom:3px}
-.subbox .cnt{float:right;font-weight:650;font-variant-numeric:tabular-nums;color:var(--muted);font-size:11.5px}
-.subbox p{margin:0;color:var(--ink2)}
-.sb-m1{border-left-color:var(--m1)} .sb-m2{border-left-color:var(--m2)} .sb-m3{border-left-color:var(--m3)}
 label.chk{flex-direction:row !important;align-items:center;gap:7px;text-transform:none !important;
   letter-spacing:0 !important;font-size:12.5px !important;font-weight:500 !important;color:var(--ink2) !important}
-.minibar{display:flex;height:12px;border-radius:3px;overflow:hidden;gap:2px;min-width:120px}
-.minibar div{min-width:2px}
 
 /* hero + meter */
-.hero-n{font-size:52px;font-weight:650;line-height:1.05;letter-spacing:-.01em}
-.hero-cap{font-size:12.5px;color:var(--ink2);max-width:30ch}
-.meter{display:flex;height:26px;border-radius:5px;overflow:hidden;gap:2px;background:var(--surface);margin:10px 0 8px}
+.hero-n{font-size:56px;font-weight:650;line-height:1.05;letter-spacing:-.02em;
+  font-variant-numeric:tabular-nums;margin:2px 0 8px}
+.hero-cap{font-size:12.5px;color:var(--ink2);max-width:32ch;line-height:1.5;margin:0}
+.lbl{font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.meter{display:flex;height:30px;border-radius:6px;overflow:hidden;gap:2px;margin:0 0 12px}
 .meter div{min-width:3px}
 .meter .s1{background:var(--m1)} .meter .s2{background:var(--m2)} .meter .s3{background:var(--m3)}
-.mlegend{display:flex;gap:18px;flex-wrap:wrap;font-size:12.5px;color:var(--ink2)}
-.mlegend .k{display:flex;align-items:center;gap:7px;border:0;background:none;
+.mlegend{display:flex;gap:22px;flex-wrap:wrap;font-size:12.5px;color:var(--ink2)}
+.mlegend .k{display:flex;align-items:center;gap:8px;border:0;background:none;
   font:inherit;color:inherit;padding:2px 4px;border-radius:5px}
 .mlegend button.k{cursor:pointer}
 .mlegend button.k:hover{background:var(--accent-wash)}
 .mlegend .k.dim{opacity:.4}
 .sw{width:11px;height:11px;border-radius:3px;display:inline-block;flex:none}
-.mlegend b{font-variant-numeric:tabular-nums}
+.mlegend b{font-variant-numeric:tabular-nums;color:var(--ink)}
 
-/* stat tiles */
-.tile .lbl{font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:600}
-.tile .val{font-size:30px;font-weight:650;line-height:1.15;margin:2px 0}
-.tile .delta{font-size:12px;color:var(--ink2)}
-.tile .delta .up{color:var(--good-txt);font-weight:650}
-.tile .tcap{font-size:11.5px;color:var(--muted);margin-top:4px;line-height:1.4}
-.tile.star{outline:2px solid var(--accent);outline-offset:-2px}
-.tile.star .lbl{color:var(--accent)}
+/* KPIs */
+.tile{background:var(--surface);border:1px solid var(--hair);border-radius:12px;padding:16px 18px}
+.tile .val{font-size:30px;font-weight:650;line-height:1.15;margin:3px 0;font-variant-numeric:tabular-nums}
+.tile .val small{font-size:15px;color:var(--muted);font-weight:500}
+.tile .cap{font-size:11.5px;color:var(--muted);line-height:1.4}
+.tile .cap .up{color:var(--good-txt);font-weight:650}
+.tile.kev{border:2px solid var(--crit);padding:15px 17px}
+.tile.kev .lbl{color:var(--crit);font-weight:700}
+.tile.kev .cap{color:var(--ink2)}
 
 /* charts */
 svg.chart{display:block;width:100%;height:auto}
@@ -157,9 +180,21 @@ svg.chart{display:block;width:100%;height:auto}
 .ann-line{stroke:var(--accent);stroke-width:1;opacity:.7}
 .ann-tag{fill:var(--accent);font:600 10.5px ui-monospace,Menlo,monospace}
 .note{font-size:11.5px;color:var(--muted);margin-top:10px}
+.howto{font-size:12px;color:var(--ink2);background:var(--page);border:1px solid var(--hair);
+  border-radius:8px;padding:9px 13px;margin:0 0 14px;line-height:1.5}
+.howto b{font-weight:650;color:var(--ink)}
 .chipstat{display:inline-flex;align-items:baseline;gap:6px;font-size:12px;border:1px solid var(--hair);
   border-radius:7px;padding:4px 10px;background:var(--page);color:var(--ink2)}
 .chipstat b{color:var(--ink);font-variant-numeric:tabular-nums}
+.minibar{display:flex;height:12px;border-radius:3px;overflow:hidden;gap:2px;min-width:120px}
+.minibar div{min-width:2px}
+.tscroll{max-height:560px;overflow:auto}
+.tscroll thead th{position:sticky;top:0;background:var(--surface);z-index:1}
+.pager{display:flex;align-items:center;gap:10px;margin-top:10px;font-size:12px;color:var(--ink2);flex-wrap:wrap}
+.pager button{background:var(--page);color:var(--ink2);border:1px solid var(--hair);border-radius:6px;
+  padding:4px 12px;cursor:pointer;font-size:12.5px;font-family:inherit}
+.pager button:hover:not(:disabled){background:var(--accent-wash)}
+.pager button:disabled{opacity:.4;cursor:default}
 
 /* tooltip */
 #tt{position:fixed;pointer-events:none;opacity:0;z-index:40;background:var(--surface);
@@ -171,8 +206,8 @@ svg.chart{display:block;width:100%;height:auto}
 #tt .key{width:12px;height:3px;border-radius:2px;display:inline-block}
 
 /* drill-down */
-.drill{border:1px solid var(--hair);border-left:3px solid var(--accent);border-radius:10px;
-  background:var(--surface);padding:16px 18px;margin-bottom:14px;position:relative}
+.drill{border:1px solid var(--hair);border-left:4px solid var(--accent);border-radius:12px;
+  background:var(--surface);padding:20px 22px;margin-bottom:16px;position:relative}
 .chips{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 12px}
 .chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;border:1px solid var(--hair);
   border-radius:20px;padding:3px 10px;color:var(--ink2);background:var(--page)}
@@ -182,7 +217,7 @@ svg.chart{display:block;width:100%;height:auto}
 @media (max-width:960px){.drill-grid{grid-template-columns:1fr}}
 
 table{width:100%;border-collapse:collapse;font-size:12.5px}
-th,td{padding:6px 9px;border-bottom:1px solid var(--grid);text-align:left;vertical-align:top}
+th,td{padding:8px 10px;border-bottom:1px solid var(--grid);text-align:left;vertical-align:top}
 th{color:var(--muted);font-weight:600;font-size:10.5px;letter-spacing:.06em;text-transform:uppercase}
 td.num,th.num{text-align:right;font-family:ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums}
 tbody tr[data-key]{cursor:pointer}
@@ -222,38 +257,62 @@ tbody tr[data-key]:hover,tbody tr[data-key]:focus-visible{background:var(--accen
 
 <header>
   <div class="hd">
-    <div class="wordmark">Foreshock<small>señales de vulnerabilidad antes de NVD</small></div>
+    <div class="brand">
+      <span class="wordmark">Foreshock</span>
+      <small>señales de vulnerabilidad antes de NVD</small>
+    </div>
     <svg class="trace" viewBox="0 0 420 34" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
       <path d="M0 17 h60 l4 -3 4 3 h30 l3 -6 3 9 3 -3 h40 l2 -4 3 4 h28 l4 -14 5 24 4 -17 4 7 h30 l3 -5 3 5 h50 l5 -9 5 9 h120"/>
     </svg>
     <div class="stamp mono" id="stamp">cargando…</div>
+    <a class="admin-link" href="/pending_status">Estado</a>
     <button id="themebtn" title="Cambiar tema de color">Tema: auto</button>
   </div>
 </header>
 
 <div class="wrap">
 
-  <!-- ============ conceptos ============ -->
-  <div class="card" style="margin-top:18px">
-    <h2>Qué mide este panel</h2>
-    <p class="sub" style="margin-bottom:0">Foreshock rastrea fuentes públicas (avisos de GitHub y OSV, commits, boletines de fabricante, ZDI, MSRC, listas de exploits…) buscando vulnerabilidades que todavía no aparecen en NVD, la base de datos oficial. Ese hueco temporal es la ventaja que mide todo lo que ves aquí.</p>
-    <div class="parentbox">
+  <!-- ============ concepto + carril ============ -->
+  <div class="card" style="margin-top:22px">
+    <div class="eyebrow">Qué mide este panel</div>
+    <h2 class="headline">La ventaja de ver una vulnerabilidad antes de que sea oficial</h2>
+    <p class="lede">Foreshock rastrea fuentes públicas — avisos de GitHub y OSV, commits, boletines de fabricante, ZDI, MSRC, listas de exploits — buscando vulnerabilidades que todavía no aparecen en NVD, la base de datos oficial. Ese hueco temporal es la ventaja que mide todo lo que ves aquí.</p>
+
+    <div class="rail">
       <b>Pendiente — la métrica central</b>
-      <p>Detectada en alguna fuente, con la tecnología identificada, y sin nada publicado en NVD. Cada pendiente está en exactamente uno de estos tres estados, de claro a oscuro en todas las gráficas:</p>
+      <p>Detectada en alguna fuente, con la tecnología identificada, y sin nada publicado en NVD. Cada pendiente está en exactamente uno de los tres estados azules — de claro a oscuro en todas las gráficas — hasta que NVD publica y pasa a la fase final, en gris:</p>
+
+      <div class="rail-axis">
+        <span>◄ señal más temprana</span>
+        <span>público en NVD ►</span>
+      </div>
+      <div class="rail-track">
+        <div class="line"></div>
+        <div class="row">
+          <div class="cell"><button class="rc rc1" id="rc1" title="Ver las pre-CVE en la tabla de inspección">—</button></div>
+          <div class="cell"><button class="rc rc2" id="rc2" title="Ver las CVE pre-reservado en la tabla de inspección">—</button></div>
+          <div class="cell"><button class="rc rc3" id="rc3" title="Ver las CVE reservado en la tabla de inspección">—</button></div>
+          <div class="cell"><button class="rc rc4" id="rc4" title="Ir al tiempo hasta CVE público">—</button></div>
+        </div>
+      </div>
+
       <div class="subsets">
-        <div class="subbox sb-m1"><b>pre-CVE <span class="cnt" id="g-c1">—</span></b>
+        <div class="subbox sb-m1"><b>pre-CVE</b>
           <p>Solo tiene el código nativo de su fuente (GHSA-, RUSTSEC-, ZDI-CAN-, VU#…). Nadie le ha asignado todavía un número CVE.</p></div>
-        <div class="subbox sb-m2"><b>CVE pre-reservado <span class="cnt" id="g-c2">—</span></b>
-          <p>Ya circula un número CVE (citado en un commit o aviso) pero no existe ficha pública en MITRE ni NVD. La señal más temprana que llega con número CVE: la más valiosa.</p></div>
-        <div class="subbox sb-m3"><b>CVE reservado <span class="cnt" id="g-c3">—</span></b>
+        <div class="subbox sb-m2"><b>CVE pre-reservado</b>
+          <p>Ya circula un número CVE (citado en un commit o aviso) pero sin ficha pública en MITRE ni NVD. La señal más temprana que llega con número CVE: la más valiosa.</p></div>
+        <div class="subbox sb-m3"><b>CVE reservado</b>
           <p>MITRE ya tiene ficha del CVE, pero NVD aún no ha publicado su análisis. Último paso antes de hacerse oficial.</p></div>
+        <div class="subbox sb-pub"><b>CVE público</b>
+          <p id="pub-cap">NVD publica su análisis: deja de estar pendiente y cierra el ciclo.</p></div>
+      </div>
+
+      <div class="gloss-strip">
+        <div><b>Tiempo hasta CVE público</b> — días entre la primera detección en Foreshock y la publicación en NVD.</div>
+        <div><b>KEV</b> — catálogo de CISA con explotación activa confirmada.</div>
+        <div><b>CVSS · EPSS</b> — gravedad (0–10) y probabilidad de explotación a 30 días (0–1).</div>
       </div>
     </div>
-    <dl class="gloss">
-      <div><dt>Tiempo hasta CVE público</dt><dd>días entre la primera detección en Foreshock y la publicación en NVD. Solo puede medirse en vulnerabilidades que ya llegaron a publicarse.</dd></div>
-      <div><dt>KEV</dt><dd>catálogo de CISA de vulnerabilidades con explotación activa confirmada. Si una pendiente está en KEV, alguien la está explotando antes de que sea oficial.</dd></div>
-      <div><dt>CVSS · EPSS</dt><dd>gravedad estimada (0–10) y probabilidad de que se explote en los próximos 30 días (0–1).</dd></div>
-    </dl>
   </div>
 
   <!-- ============ filtros globales ============ -->
@@ -277,40 +336,71 @@ tbody tr[data-key]:hover,tbody tr[data-key]:focus-visible{background:var(--accen
     <button class="reset" id="f-reset">Restablecer todo</button>
   </div>
 
-  <!-- ============ hero + madurez actual ============ -->
+  <!-- ============ hero + meter ============ -->
   <div class="grid g-hero">
     <div class="card">
-      <div class="tile"><div class="lbl">Pendientes ahora</div></div>
+      <div class="lbl">Pendientes ahora</div>
       <div class="hero-n" id="hero-n">—</div>
       <p class="hero-cap">Detectadas en fuentes públicas, con tecnología identificada, sin nada publicado en NVD. Cada una es margen de reacción ganado.</p>
     </div>
     <div class="card">
-      <h2>En qué estado de madurez están las pendientes</h2>
-      <p class="sub">El ancho de cada bloque = pendientes en ese estado (suman el total de la izquierda). Clic para filtrar todo el panel.</p>
+      <h3>En qué estado de madurez están las pendientes</h3>
+      <p class="sub">El ancho de cada bloque = pendientes en ese estado. Cuanto más oscuro, más cerca de hacerse oficial. Clic para filtrar todo el panel.</p>
       <div class="meter" id="meter" role="img" aria-label="Reparto por madurez"></div>
       <div class="mlegend" id="mleg"></div>
-      <p class="note">Cuanto más oscuro, más cerca de hacerse oficial.</p>
     </div>
   </div>
 
   <!-- ============ KPIs ============ -->
-  <div class="grid g-kpi" id="kpis"></div>
+  <div class="grid g-kpi">
+    <div class="tile">
+      <div class="lbl">Ventaja mediana</div>
+      <div class="val"><span id="k-med-v">—</span> <small>días</small></div>
+      <div class="cap">Antelación típica sobre la publicación en NVD (últimos 12 m) · p90 <span id="k-med-p90">—</span> d.</div>
+    </div>
+    <div class="tile">
+      <div class="lbl">Ya con número CVE</div>
+      <div class="val" id="k-cve-v">—</div>
+      <div class="cap" id="k-cve-c">Pendientes con CVE ya citado, aún sin ficha pública.</div>
+    </div>
+    <div class="tile kev">
+      <div class="lbl">En KEV · explotación activa</div>
+      <div class="val" id="k-kev-v">—</div>
+      <div class="cap">Explotadas <b>antes</b> de ser oficiales en NVD.</div>
+    </div>
+    <div class="tile">
+      <div class="lbl">Nuevas la última semana</div>
+      <div class="val" id="k-wk-v">—</div>
+      <div class="cap" id="k-wk-c">frente a la media de las semanas previas.</div>
+    </div>
+  </div>
+
+  <!-- ============ pendientes críticos ============ -->
+  <div class="card" style="margin-bottom:16px">
+    <h3>Pendientes más críticos ahora</h3>
+    <p class="sub">Lo que NVD aún no ha publicado, ordenado por criticidad: explotación activa (KEV, +50), PoC público (+20), gravedad CVSS/severidad (0–40) y lo pronto que avisa la fuente (tier, 1–15). Respeta los filtros de arriba. Clic en una fila para la ficha.</p>
+    <div style="overflow-x:auto">
+      <table>
+        <thead><tr><th class="num">#</th><th>CVE / id</th><th>Software</th><th>Madurez</th><th>Señales</th><th class="num">CVSS</th><th style="width:170px">Score</th></tr></thead>
+        <tbody id="crit-body"></tbody>
+      </table>
+    </div>
+    <p class="note" id="crit-note"></p>
+  </div>
 
   <!-- ============ evolución por madurez ============ -->
-  <div class="card" style="margin-bottom:14px">
-    <h2>Evolución: cuándo se detectaron las pendientes actuales</h2>
+  <div class="card" style="margin-bottom:16px">
+    <h3>Evolución: cuándo se detectaron las pendientes actuales</h3>
     <p class="sub">Cuántas de las pendientes actuales se detectaron por primera vez en cada periodo, por su madurez actual.</p>
-    <div class="howto"><b>Cómo leerla:</b> columna alta y reciente = mucha señal nueva; columnas antiguas = NVD lleva meses sin publicarlas. La marca ▲ señala el inicio de la aceleración (mar 2026). <b>Clic en una columna</b> para inspeccionarla abajo.</div>
+    <div class="howto"><b>Cómo leerla:</b> columna alta y reciente = mucha señal nueva; columnas antiguas = NVD lleva meses sin publicarlas. La franja marca el inicio de la aceleración (mar 2026); el periodo en curso, atenuado, está incompleto. <b>Clic en una columna</b> para inspeccionarla abajo.</div>
     <svg class="chart" id="c-mat" viewBox="0 0 940 250" role="img" aria-label="Detecciones pendientes por madurez y periodo"></svg>
     <div class="mlegend" id="mleg2" style="margin-top:8px"></div>
-    <p class="note">El periodo en curso está incompleto.</p>
   </div>
 
   <!-- ============ publicados vs pendientes ============ -->
-  <div class="card" style="margin-bottom:14px">
-    <h2>Contexto: lo oficial frente a lo anticipado — la aceleración de 2026</h2>
-    <p class="sub">Gris: CVEs publicados oficialmente (miles/mes). Azul: detecciones que siguen sin publicarse (cientos).</p>
-    <div class="howto"><b>Cómo leerla:</b> dos escalas distintas, un mismo eje temporal. La franja marca la aceleración desde mar 2026. <b>Zoom:</b> arrastra para acercar un rango; doble clic vuelve a 12 m.</div>
+  <div class="card" style="margin-bottom:16px">
+    <h3>Contexto: lo oficial frente a lo anticipado — la aceleración de 2026</h3>
+    <p class="sub">Gris: CVEs publicados oficialmente (miles/mes). Azul: detecciones que siguen sin publicarse (cientos). Dos escalas, un mismo eje temporal. Arrastra para hacer zoom; doble clic restaura.</p>
     <div style="display:flex;align-items:center;gap:10px;margin:0 0 8px;flex-wrap:wrap">
       <span class="seg" id="ctx-win">
         <button data-v="6">6 m</button><button data-v="12" class="on">12 m</button><button data-v="24">24 m</button>
@@ -321,59 +411,71 @@ tbody tr[data-key]:hover,tbody tr[data-key]:focus-visible{background:var(--accen
       <span class="chipstat" id="surge-pre" hidden></span>
     </div>
     <div id="twopanel" style="position:relative;touch-action:pan-y">
-      <div class="sub mono" style="margin:4px 0 0">CVEs publicados oficialmente (cvelist) / periodo</div>
+      <div class="sub mono" style="margin:4px 0 4px">CVEs publicados oficialmente (cvelist) / periodo</div>
       <svg class="chart" id="c-pub" viewBox="0 0 940 150" role="img" aria-label="CVEs publicados por periodo"></svg>
-      <div class="sub mono" style="margin:8px 0 0">Detecciones pendientes (NVD sin publicar) / periodo</div>
+      <div class="sub mono" style="margin:14px 0 4px">Detecciones pendientes (NVD sin publicar) / periodo</div>
       <svg class="chart" id="c-pre" viewBox="0 0 940 150" role="img" aria-label="Detecciones pendientes por periodo"></svg>
     </div>
     <p class="note">Los chips comparan la media mensual desde mar 2026 (meses completos) con el semestre previo.</p>
   </div>
 
-  <!-- ============ tiempo hasta CVE público ============ -->
-  <div class="grid g-lag">
+  <!-- ============ tiempo hasta CVE público + fuentes ============ -->
+  <div class="grid g-lag" id="lagcard">
     <div class="card">
-      <h2>Tiempo hasta CVE público</h2>
-      <p class="sub">CVEs ya publicados (últimos 12 m): cuántos días antes los detectó Foreshock.</p>
-      <div class="howto"><b>Cómo leerla:</b> cada barra agrupa CVEs por la antelación conseguida — el margen real de reacción que da el sistema.</div>
+      <h3>Tiempo hasta CVE público</h3>
+      <p class="sub" id="lag-sub">CVEs ya publicados (últimos 12 m) agrupados por la antelación conseguida — el margen real de reacción.</p>
+      <div style="margin:0 0 10px">
+        <span class="seg" id="lag-metric">
+          <button data-v="present" class="on">Ventaja de detección</button>
+          <button data-v="published">Atraso de NVD</button>
+        </span>
+      </div>
       <svg class="chart" id="c-hist" viewBox="0 0 520 222" role="img" aria-label="Histograma de días de ventaja"></svg>
       <p class="note" id="lag-note"></p>
     </div>
     <div class="card">
-      <h2>Qué fuentes avisan antes</h2>
+      <h3>Qué fuentes avisan antes</h3>
       <p class="sub">Media de días de antelación por fuente, y cuántas vulnerabilidades aporta cada una.</p>
       <svg class="chart" id="c-src" viewBox="0 0 460 290" role="img" aria-label="Ventaja media por fuente"></svg>
-      <p class="note" id="src-note">Una barra larga con pocas vulnerabilidades (pasa el cursor para ver el número) es una fuente nicho pero muy temprana; una media con miles, el grueso fiable de la señal.</p>
+      <p class="note" id="src-note"></p>
     </div>
   </div>
 
   <!-- ============ cola de espera ============ -->
-  <div class="card" style="margin-bottom:14px">
-    <h2>La cola de espera: qué está atascado y desde cuándo</h2>
-    <p class="sub">¿Cuántos advisories con CVE esperan la publicación de NVD, y cuántos esperan siquiera un número CVE?</p>
-    <div class="howto"><b>Cómo leerla:</b> pares de barras por tiempo en espera desde la primera detección. Azul medio: con CVE, cola que NVD resuelve en semanas. Azul claro: sin CVE — pasado un año, probablemente nunca lo reciba.</div>
+  <div class="card" style="margin-bottom:16px">
+    <h3>La cola de espera: qué está atascado y desde cuándo</h3>
+    <p class="sub">Pares de barras por tiempo en espera desde la primera detección. Azul medio: con CVE, cola que NVD resuelve en semanas. Azul claro: sin CVE.</p>
     <svg class="chart" id="c-queue" viewBox="0 0 940 260" role="img" aria-label="Cola de espera por antigüedad"></svg>
-    <div class="mlegend" style="margin-top:8px">
+    <div class="mlegend" style="margin-top:10px">
       <span class="k"><span class="sw" style="background:var(--m1)"></span> <span id="q-leg-sin">Esperando asignación de CVE</span></span>
       <span class="k"><span class="sw" style="background:var(--m2)"></span> <span id="q-leg-con">Esperando publicación en NVD (ya con CVE)</span></span>
     </div>
-    <p class="note" id="q-note">La cola antigua sin CVE procede del archivo histórico importado (GitHub/OSV/Gemnasium), no de la vigilancia en vivo.</p>
+    <p class="note" id="q-note">cargando…</p>
   </div>
 
   <!-- ============ top software ============ -->
-  <div class="card" style="margin-bottom:14px">
-    <h2>Software con más vulnerabilidades pendientes</h2>
+  <div class="card" style="margin-bottom:16px">
+    <h3>Software con más vulnerabilidades pendientes</h3>
     <p class="sub">Tecnologías con más pendientes y su reparto por madurez. Clic en una fila para acotar la inspección.</p>
     <div style="overflow-x:auto">
       <table>
-        <thead><tr><th>Software</th><th class="num">pre-CVE</th><th class="num">CVE pre-res.</th><th class="num">CVE res.</th><th class="num">Total</th><th>Reparto</th></tr></thead>
+        <thead><tr><th>Software</th><th class="num">pre-CVE</th><th class="num">CVE pre-res.</th><th class="num">CVE res.</th><th class="num">Total</th><th style="width:180px">Reparto</th></tr></thead>
         <tbody id="topsw"></tbody>
       </table>
     </div>
   </div>
 
+  <!-- ============ pendientes por ecosistema ============ -->
+  <div class="card" style="margin-bottom:16px">
+    <h3>Pendientes por ecosistema</h3>
+    <p class="sub">Dónde se concentran las pendientes por ecosistema de paquetes. «(sin ecosistema)» = productos/distros no ligados a un gestor de paquetes.</p>
+    <div id="eco-bars"></div>
+    <p class="note" id="eco-note"></p>
+  </div>
+
   <!-- ============ drill-down ============ -->
   <div class="drill" id="drill">
-    <h2>Inspección de la selección</h2>
+    <h3>Inspección de la selección</h3>
     <p class="sub" style="margin:2px 0 8px">Cualquier acotación de arriba (periodo, madurez, software) aterriza aquí; afínala con estos filtros. Las etiquetas resumen los filtros activos; la × los quita.</p>
     <div class="filters" style="margin:8px 0 10px;padding:10px 14px">
       <label>Tecnología
@@ -394,6 +496,7 @@ tbody tr[data-key]:hover,tbody tr[data-key]:focus-visible{background:var(--accen
       <label>Eje temporal
         <span class="seg" id="s-gran"><button data-v="week" class="on">Semana</button><button data-v="month">Mes</button></span>
       </label>
+      <button class="reset" id="f-csv" title="Descargar la selección filtrada en CSV">Exportar CSV</button>
     </div>
     <div class="chips" id="chips"></div>
     <div class="drill-grid">
@@ -402,15 +505,19 @@ tbody tr[data-key]:hover,tbody tr[data-key]:focus-visible{background:var(--accen
         <svg class="chart" id="c-scatter" viewBox="0 0 520 300" role="img" aria-label="Vulnerabilidades de la selección por fecha y CVSS"></svg>
         <div class="mlegend" id="sleg" style="margin-top:6px"></div>
       </div>
-      <div style="overflow-x:auto">
-        <table>
-          <thead><tr><th>CVE / id</th><th>Madurez</th><th class="num">CVSS</th><th>Tipo</th><th>Detección</th><th>Fuentes</th></tr></thead>
-          <tbody id="tbody"></tbody>
-        </table>
-        <p class="note" id="tmore"></p>
+      <div>
+        <div class="tscroll" style="overflow-x:auto">
+          <table>
+            <thead><tr><th>CVE / id</th><th>Madurez</th><th class="num">CVSS</th><th>Tipo</th><th>Detección</th><th>Fuentes</th></tr></thead>
+            <tbody id="tbody"></tbody>
+          </table>
+        </div>
+        <div class="pager" id="tpager"></div>
       </div>
     </div>
   </div>
+
+  <p class="note" style="text-align:center;margin-top:20px">Foreshock · datos en vivo de la API local</p>
 
 </div>
 

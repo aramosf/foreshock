@@ -5,13 +5,16 @@ un fetcher de forma aislada y persiste sus menciones vía el pipeline de ingesta
 from __future__ import annotations
 
 import asyncio
+import random
 import time
+from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.db import session_scope
 from app.core.logging import get_logger
 from app.core.models import Source as SourceRow
@@ -21,10 +24,29 @@ from app.sources.http import make_client
 
 log = get_logger(__name__)
 
-# Acota la ingesta concurrente: cada _persist_mentions abre una sesión (=1
-# conexión). El pool es 5+10=15; con ~22 fuentes disparando a la vez al
-# arrancar agotaríamos el pool. 8 deja holgura para la CLI/otras sesiones.
-_INGEST_SEMAPHORE = asyncio.Semaphore(8)
+# Acota el ciclo COMPLETO de las fuentes, incluido fetch/parse/git, no solo la
+# persistencia. Los límites por método evitan que varios clones o lotes pesados
+# compitan a la vez aunque haya huecos en el límite global.
+_settings = get_settings()
+_RUN_SEMAPHORE = asyncio.Semaphore(_settings.sources_max_concurrent)
+_GIT_SEMAPHORE = asyncio.Semaphore(_settings.sources_git_max_concurrent)
+_HEAVY_SEMAPHORE = asyncio.Semaphore(_settings.sources_heavy_max_concurrent)
+_HEAVY_SOURCES = frozenset({
+    "gemnasium",
+    "github_commits",
+    "github_repo_advisories",
+    "osv",
+    "poc_in_github",
+    "trickest_cve",
+    "wordfence",
+})
+_QUEUED_SOURCES: set[str] = set()
+_ACTIVE_SOURCES: set[str] = set()
+
+
+def runtime_source_state() -> tuple[list[str], list[str]]:
+    """Estado ligero para el heartbeat del worker."""
+    return sorted(_ACTIVE_SOURCES), sorted(_QUEUED_SOURCES)
 
 
 def sync_registry_to_db() -> None:
@@ -66,10 +88,21 @@ def _get_source_row(session: Session, name: str) -> SourceRow | None:
 # matar una de las transacciones en conflicto; reintentar casi siempre resuelve.
 _RETRIABLE_PG = {"40P01", "40001"}
 
+# Commit periódico dentro de un lote de ingesta: acota cuánto tiempo una
+# transacción retiene locks de affected_products. Ver _persist_mentions.
+_COMMIT_CHUNK = 250
 
-def _ingest_isolated(session: Session, source_id: int, m, *, retries: int = 3):
+
+def _ingest_isolated(session: Session, source_id: int, m, *, retries: int = 6):
     """Ingesta UNA mención en su savepoint, reintentando ante deadlock/
-    serialización. Devuelve IngestResult (o propaga si no es transitorio)."""
+    serialización. Devuelve IngestResult (o propaga si no es transitorio).
+
+    Backoff EXPONENCIAL con jitter: con varias fuentes pesadas escribiendo a la
+    vez `affected_products` de paquetes gigantes (p.ej. 'n8n', que aparece en osv,
+    gemnasium y github_repo_advisories), el deadlock se REPITE de inmediato; una
+    espera fija y corta (≤150 ms) no da tiempo a que la transacción rival haga
+    commit y las dos víctimas re-colisionan en lockstep. El jitter las
+    desincroniza y el backeoff (hasta ~1.5 s) cubre el commit del rival."""
     for attempt in range(retries + 1):
         try:
             with session.begin_nested():
@@ -77,7 +110,13 @@ def _ingest_isolated(session: Session, source_id: int, m, *, retries: int = 3):
         except OperationalError as exc:
             code = getattr(getattr(exc, "orig", None), "sqlstate", None)
             if attempt < retries and code in _RETRIABLE_PG:
-                time.sleep(0.05 * (attempt + 1))
+                # Cap bajo (~0.4 s): el sleep ocurre con la transacción AÚN
+                # abierta reteniendo locks; una espera larga los mantendría más
+                # tiempo. El commit periódico (_COMMIT_CHUNK) ya reduce la
+                # contención, así que basta un backoff corto con jitter para
+                # desincronizar a las víctimas.
+                base = min(0.03 * (2 ** attempt), 0.4)
+                time.sleep(base + random.uniform(0, base))
                 continue
             raise
 
@@ -90,6 +129,28 @@ async def run_source(name: str) -> dict[str, int]:
         raise KeyError(f"fuente desconocida: {name}")
 
     inst = cls()
+    _QUEUED_SOURCES.add(name)
+    try:
+        # Adquirir primero los límites específicos evita que una cola de jobs git
+        # consuma todos los slots globales mientras espera su turno de Git.
+        async with AsyncExitStack() as slots:
+            if inst.method == "git":
+                await slots.enter_async_context(_GIT_SEMAPHORE)
+            if name in _HEAVY_SOURCES:
+                await slots.enter_async_context(_HEAVY_SEMAPHORE)
+            await slots.enter_async_context(_RUN_SEMAPHORE)
+            _QUEUED_SOURCES.discard(name)
+            _ACTIVE_SOURCES.add(name)
+            try:
+                return await _run_source_bounded(name, inst)
+            finally:
+                _ACTIVE_SOURCES.discard(name)
+    finally:
+        _QUEUED_SOURCES.discard(name)
+
+
+async def _run_source_bounded(name: str, inst: BaseSource) -> dict[str, int]:
+    """Fetch + persistencia con los límites de concurrencia ya adquiridos."""
     # Forma consistente en TODOS los caminos de retorno (incluido fetch fallido).
     stats = {"fetched": 0, "created": 0, "duplicate": 0, "errors": 0}
 
@@ -108,11 +169,9 @@ async def run_source(name: str) -> dict[str, int]:
 
     # La ingesta usa una sesión SÍNCRONA (psycopg) y puede procesar decenas de
     # miles de menciones (OSV). Ejecutarla en el event loop del AsyncIOScheduler
-    # lo CONGELA y bloquea al resto de fuentes (p.ej. github_commits esperaría a
-    # que OSV termine). Se despacha a un hilo para que las fuentes corran en
-    # paralelo real.
-    async with _INGEST_SEMAPHORE:
-        await asyncio.to_thread(_persist_mentions, name, inst, mentions, stats)
+    # lo CONGELA. Se despacha a un hilo; el límite global ya acota cuántas
+    # sesiones/hilos pueden coexistir.
+    await asyncio.to_thread(_persist_mentions, name, inst, mentions, stats)
 
     log.info("source.run", source=name, **stats)
     return stats
@@ -126,6 +185,7 @@ def _persist_mentions(name: str, inst: BaseSource, mentions: list,
         if row is None or row.id is None:
             raise RuntimeError(f"fuente '{name}' no está en la tabla sources; corre el seeding")
         source_id = row.id
+        since_commit = 0
         for m in mentions:
             stats["fetched"] += 1
             # Aislamiento por mención vía savepoint (con reintento ante deadlock):
@@ -139,6 +199,18 @@ def _persist_mentions(name: str, inst: BaseSource, mentions: list,
             except Exception as exc:  # noqa: BLE001
                 stats["errors"] += 1
                 log.warning("ingest.mention_error", source=name, error=str(exc))
+            # COMMIT PERIÓDICO: sin esto, TODO el lote (osv ~405k, este ~2.5k) era
+            # UNA transacción que retenía los locks de fila de affected_products
+            # (paquetes calientes como 'n8n' que osv/gemnasium/github_repo_advisories
+            # upsertan a la vez) durante MINUTOS -> otra fuente concurrente que
+            # tocaba el mismo producto quedaba en lock-wait/freeze. Commit cada
+            # _COMMIT_CHUNK suelta los locks a los pocos segundos y las fuentes
+            # interleavan. La ingesta ya es idempotente (content_hash), así que un
+            # commit parcial es seguro si el proceso muere a media (se re-escanea).
+            since_commit += 1
+            if since_commit >= _COMMIT_CHUNK:
+                session.commit()
+                since_commit = 0
         row.last_success_at = datetime.now(UTC)
         if stats["errors"]:
             row.last_error = f"{stats['errors']} menciones con error"

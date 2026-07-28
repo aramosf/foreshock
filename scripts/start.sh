@@ -4,7 +4,6 @@
 #
 # Servicios (docker-compose.yml):
 #   postgres        Base de datos (volumen persistente pgdata)
-#   redis           Cola/estado de los workers
 #   migrate         Aplica migraciones Alembic (alembic upgrade head) y termina
 #   baseline-worker Sincroniza el baseline: cvelistV5 + NVD + EPSS (scheduler)
 #   sources-worker  Ejecuta las fuentes de señal en sus cadencias (scheduler)
@@ -47,7 +46,7 @@ for arg in "$@"; do
     --stop-workers)
       echo ">> Pausando schedulers (baseline-worker, sources-worker)…"
       $COMPOSE stop sources-worker baseline-worker
-      echo ">> Hecho. api/postgres/redis siguen arriba."
+      echo ">> Hecho. api/postgres siguen arriba."
       exit 0 ;;
     --build) BUILD=1 ;;
     --full-load) FULL_LOAD=1 ;;

@@ -24,16 +24,7 @@ services:
       interval: 3s
       timeout: 3s
       retries: 20
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 3s
-      timeout: 3s
-      retries: 20
+    restart: unless-stopped
 
   # Aplica las migraciones Alembic y termina. El resto de servicios
   # esperan a que este acabe con éxito (service_completed_successfully).
@@ -48,19 +39,18 @@ services:
         condition: service_healthy
     command: ["alembic", "upgrade", "head"]
 
-  # ---- Workers de carga de datos (sin UI) ----
+  # ---- Workers de carga de datos ----
   baseline-worker:
     build: { context: ., dockerfile: docker/Dockerfile }
+    init: true
     environment:
       DATABASE_URL: *database-url
-      REDIS_URL: redis://redis:6379/0
       FORESHOCK_DATA_DIR: /data
       FORESHOCK_RAW_HTML_DIR: /data/raw
       FORESHOCK_CVELIST_REPO_DIR: /data/cvelistV5
       FORESHOCK_NVD_API_KEY: ${FORESHOCK_NVD_API_KEY:-}
     depends_on:
       migrate: { condition: service_completed_successfully }
-      redis: { condition: service_healthy }
     volumes:
       - data:/data
     command: ["python", "-m", "app.baseline"]
@@ -68,9 +58,9 @@ services:
 
   sources-worker:
     build: { context: ., dockerfile: docker/Dockerfile }
+    init: true
     environment:
       DATABASE_URL: *database-url
-      REDIS_URL: redis://redis:6379/0
       FORESHOCK_DATA_DIR: /data
       FORESHOCK_RAW_HTML_DIR: /data/raw
       # start.sh --full-load lanza `foreshock baseline nvd-full` en este
@@ -82,6 +72,10 @@ services:
       FORESHOCK_GITHUB_TOKEN: ${FORESHOCK_GITHUB_TOKEN:-}
       FORESHOCK_GITHUB_TOP_N: ${FORESHOCK_GITHUB_TOP_N:-1000}
       FORESHOCK_GITHUB_REPOS_PER_RUN: ${FORESHOCK_GITHUB_REPOS_PER_RUN:-500}
+      FORESHOCK_SOURCES_MAX_CONCURRENT: ${FORESHOCK_SOURCES_MAX_CONCURRENT:-4}
+      FORESHOCK_SOURCES_GIT_MAX_CONCURRENT: ${FORESHOCK_SOURCES_GIT_MAX_CONCURRENT:-1}
+      FORESHOCK_SOURCES_HEAVY_MAX_CONCURRENT: ${FORESHOCK_SOURCES_HEAVY_MAX_CONCURRENT:-1}
+      FORESHOCK_SOURCES_STARTUP_SPREAD_SECONDS: ${FORESHOCK_SOURCES_STARTUP_SPREAD_SECONDS:-3600}
       FORESHOCK_VULNCHECK_TOKEN: ${FORESHOCK_VULNCHECK_TOKEN:-}
       FORESHOCK_VULNCHECK_MAX_PAGES: ${FORESHOCK_VULNCHECK_MAX_PAGES:-50}
       FORESHOCK_WORDFENCE_API_KEY: ${FORESHOCK_WORDFENCE_API_KEY:-}
@@ -94,7 +88,6 @@ services:
       FORESHOCK_CACHE_RAW: ${FORESHOCK_CACHE_RAW:-true}
     depends_on:
       migrate: { condition: service_completed_successfully }
-      redis: { condition: service_healthy }
     volumes:
       - data:/data
     command: ["python", "-m", "app.sources"]

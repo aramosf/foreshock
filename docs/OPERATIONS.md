@@ -1,7 +1,7 @@
 # Operations
 
-Foreshock is a headless data-loading backend (no UI). Everything runs with
-`docker compose` on top of Postgres 16 + Redis 7. All application processes are
+Foreshock is a data-loading and read-only dashboard platform. Everything runs
+with `docker compose` on top of Postgres 16. All application processes are
 built from one image (`docker/Dockerfile`: `python:3.12-slim` + `git` +
 dependencies installed with `uv`).
 
@@ -10,26 +10,28 @@ dependencies installed with `uv`).
 ## Quickstart
 
 ```bash
-docker compose up            # postgres, redis, migrate, baseline-worker, sources-worker
+docker compose up            # postgres, migrate, workers and api
 ```
 
 Startup order (`docker-compose.yml`):
 
-1. **`postgres`** and **`redis`** start and must pass their healthchecks.
+1. **`postgres`** starts and must pass its healthcheck.
 2. **`migrate`** runs `alembic upgrade head` and **exits**. Every other
    application service `depends_on: migrate: condition:
    service_completed_successfully`.
-3. **`baseline-worker`** (`python -m app.baseline`) and **`sources-worker`**
-   (`python -m app.sources`) start only after `migrate` succeeds **and**
-   `redis: condition: service_healthy`. Both are `restart: unless-stopped`.
+3. **`baseline-worker`**, **`sources-worker`** and **`api`** start only after
+   `migrate` succeeds. They are `restart: unless-stopped`.
 
 On startup:
 - `baseline-worker` schedules `_cvelist_job` / `_nvd_job` / `_epss_job` on
   `AsyncIOScheduler` at their cadences and runs an immediate first pass.
 - `sources-worker` calls `sync_registry_to_db()` (registers the code's fetchers
   into the `sources` table), then schedules every `enabled` source at its
-  `cadence_seconds` (`jitter=30`, `max_instances=1`), and re-reconciles the job
-  set against the DB every 60 s (hot enable/disable and cadence changes).
+  `cadence_seconds` (`jitter=30`, `max_instances=1`), spreads initial runs over
+  one hour by default, and re-reconciles the job set against the DB every 60 s.
+
+Dashboards: `/` for vulnerability signal and `/pending_status` for worker,
+fetcher, process, database and ingestion status.
 
 Run operations manually inside a container:
 
@@ -44,16 +46,15 @@ docker compose run --rm baseline-worker foreshock emerging list --since 24h --ti
 ## Environment variables
 
 Configuration is centralized in `app/core/config.py` (`pydantic-settings`,
-`env_prefix="FORESHOCK_"`, `env_file=".env"`, `extra="ignore"`). Two variables use
-an explicit `validation_alias` and therefore have **no** `FORESHOCK_` prefix:
-`DATABASE_URL` and `REDIS_URL`. Defaults target the local compose network; no
+`env_prefix="FORESHOCK_"`, `env_file=".env"`, `extra="ignore"`). `DATABASE_URL`
+uses an explicit `validation_alias` and therefore has **no** `FORESHOCK_` prefix.
+Defaults target the local compose network; no
 secret is ever hardcoded.
 
 ### Infra / storage
 | Variable | Default | Purpose |
 |---|---|---|
 | `DATABASE_URL` | `postgresql+psycopg://foreshock:foreshock@localhost:5432/foreshock` | Postgres DSN (psycopg3 driver). Compose overrides host to `postgres`. |
-| `REDIS_URL` | `redis://localhost:6379/0` | Redis URL. Compose overrides host to `redis`. |
 | `FORESHOCK_DATA_DIR` | `/data` | Root for raw HTML, caches, browser contexts. |
 | `FORESHOCK_RAW_HTML_DIR` | `/data/raw` | Persisted raw mention HTML (`/data/raw/<source_id>/<hash>.html`). |
 | `FORESHOCK_CVELIST_REPO_DIR` | `/data/cvelistV5` | Local shallow clone of cvelistV5. |
@@ -119,6 +120,10 @@ references), the `github_repos` registry supports two opt-in discovery strategie
 | `FORESHOCK_RESPECT_ROBOTS` | `True` | Honour `robots.txt` for scrape fetchers (cached parser). |
 | `FORESHOCK_BROWSER_MAX_CONCURRENT` | `3` | Playwright pool concurrency (optional `browser` extra). |
 | `FORESHOCK_BROWSER_RECYCLE_AFTER` | `50` | Recycle a browser context after N uses. |
+| `FORESHOCK_SOURCES_MAX_CONCURRENT` | `4` | Maximum complete source lifecycles (fetch + parse + ingest). |
+| `FORESHOCK_SOURCES_GIT_MAX_CONCURRENT` | `1` | Maximum concurrent Git sources/process groups. |
+| `FORESHOCK_SOURCES_HEAVY_MAX_CONCURRENT` | `1` | Maximum concurrent large-batch sources. |
+| `FORESHOCK_SOURCES_STARTUP_SPREAD_SECONDS` | `3600` | Window used to stagger initial source executions. |
 
 ### LLM enrichment
 | Variable | Default | Purpose |
@@ -187,11 +192,10 @@ per-repo watermarks, crawl cursor, and raw HTML are visible to both.
 ## Healthchecks & worker dependencies
 
 - `postgres`: `pg_isready -U foreshock -d foreshock` (interval 3s, retries 20).
-- `redis`: `redis-cli ping` (interval 3s, retries 20).
 - `migrate` has no healthcheck — it is a run-once job; other services wait on its
   `service_completed_successfully`.
-- Both workers additionally `depends_on: redis: condition: service_healthy`, so
-  they never start against a Redis that is not yet accepting connections.
+- `api`: `/healthz` executes `SELECT 1` against PostgreSQL.
+- Worker liveness and runtime pressure are visible at `/pending_status`.
 
 ---
 

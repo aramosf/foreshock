@@ -25,7 +25,7 @@ import httpx
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from app.core.config import Settings, get_settings
+from app.core.config import Settings
 from app.core.db import session_scope
 from app.core.logging import get_logger
 from app.core.models import Candidate, CveReference, GithubRepo
@@ -147,7 +147,7 @@ def harvest_references() -> dict[str, int]:
         # Marca los que tienen CVE previo como past_cve (mayor prioridad).
         for repo in with_cve:
             found[repo] = {"origin": "past_cve"}
-        n = upsert_repos(session, found)
+        upsert_repos(session, found)
     log.info("registry.harvest_references", repos=len(found), with_cve=len(with_cve))
     return {"reference": len(found) - len(with_cve), "past_cve": len(with_cve)}
 
@@ -289,6 +289,47 @@ def next_batch(session, n: int) -> list[tuple[str, str | None]]:
         ).limit(n)
     ).all()
     return [(r[0], r[1]) for r in rows]
+
+
+def next_batch_adv(session, n: int) -> list[tuple[str, str | None]]:
+    """Como next_batch pero para el escaneo de advisories/releases: usa la marca
+    PROPIA (adv_last_scanned_at/adv_watermark), no la de commits. Devuelve
+    (full_name, adv_watermark). El índice idx_ghrepos_adv_scan sirve este ORDER BY.
+    Solo repos 'project' (no repos-PoC: un /releases de un repo-PoC no aporta el
+    software afectado, que es el objetivo de esta señal)."""
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import or_
+
+    threshold = datetime.now(UTC) - timedelta(hours=RESCAN_MIN_HOURS)
+    rows = session.execute(
+        select(GithubRepo.full_name, GithubRepo.adv_watermark)
+        .where(or_(GithubRepo.adv_last_scanned_at.is_(None),
+                   GithubRepo.adv_last_scanned_at < threshold))
+        .where(or_(GithubRepo.repo_kind.is_(None), GithubRepo.repo_kind != "poc"))
+        .order_by(
+            GithubRepo.priority.desc(),
+            GithubRepo.adv_last_scanned_at.asc().nulls_first(),
+            GithubRepo.stars.desc().nulls_last(),
+        ).limit(n)
+    ).all()
+    return [(r[0], r[1]) for r in rows]
+
+
+def update_adv_scan(session, full_name: str, watermark: str | None) -> None:
+    """Avanza adv_last_scanned_at (siempre) y adv_watermark (si hay uno más nuevo).
+    El watermark solo sube (max ISO): un lote antiguo no debe retroceder el cursor."""
+    from datetime import UTC, datetime
+
+    values: dict = {"adv_last_scanned_at": datetime.now(UTC)}
+    if watermark:
+        values["adv_watermark"] = func.greatest(
+            func.coalesce(GithubRepo.__table__.c.adv_watermark, watermark), watermark)
+    session.execute(
+        GithubRepo.__table__.update()
+        .where(GithubRepo.__table__.c.full_name == full_name)
+        .values(**values)
+    )
 
 
 def get_watermark(session, full_name: str) -> str | None:

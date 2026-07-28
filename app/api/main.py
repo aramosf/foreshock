@@ -2,14 +2,17 @@
 
 Sirve:
 - /api/*  -> JSON (trend, pending, emerging, lag/histogram, queue/age,
-             candidate, software, stats)
+             candidate, software, stats y estado administrativo)
 - /       -> la página del dashboard (app/api/static/index.html)
+- /pending_status -> dashboard operativo de administración
 
 Arranque: uvicorn app.api.main:app --host 0.0.0.0 --port 8000
 """
 
 from __future__ import annotations
 
+import csv
+import io
 import os
 from collections.abc import Iterator
 
@@ -19,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.api import admin
 from app.api import queries as q
 from app.core.db import get_session
 
@@ -125,12 +129,45 @@ def api_emerging(
     granularity: str = Query("month", pattern="^(week|month|year)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=500),
+    format: str = Query("json", pattern="^(json|csv)$"),
     s: Session = Depends(db),
-) -> dict:
-    return q.emerging_list(s, since_days=since_days, source=source, tier=tier, kind=kind,
+):
+    # CSV: exporta el conjunto filtrado en un lote grande (hasta 5000 filas) para
+    # el tablero de triage; JSON mantiene la paginación normal.
+    eff_size = 5000 if format == "csv" else page_size
+    data = q.emerging_list(s, since_days=since_days, source=source, tier=tier, kind=kind,
                            in_kev=in_kev, tech=tech, pending_only=pending_only,
                            maturity=maturity, period=period, granularity=granularity,
-                           page=page, page_size=page_size)
+                           page=page, page_size=eff_size)
+    if format == "json":
+        return data
+    cols = ["cve_id", "maturity", "in_kev", "cvss", "severity_hint", "vuln_type",
+            "days_ahead_vs_nvd_present", "source_count", "mention_count",
+            "sources", "first_seen_at", "last_seen_at"]
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(cols)
+    for r in data["rows"]:
+        w.writerow([r.get(c) for c in cols])
+    return Response(content=buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=foreshock_triage.csv"})
+
+
+@app.get("/api/pending/critical")
+def api_pending_critical(
+    top: int = Query(50, ge=1, le=500),
+    maturity: str = Query("all",
+        pattern="^(all|pre_cve|cve_prereserved|cve_reserved)$"),
+    kind: str | None = None,
+    tech: str | None = None,
+    s: Session = Depends(db),
+) -> dict:
+    return q.pending_critical(s, top=top, maturity=maturity, kind=kind, tech=tech)
+
+
+@app.get("/api/pending/breakdown")
+def api_pending_breakdown(s: Session = Depends(db)) -> dict:
+    return q.pending_breakdown(s)
 
 
 @app.get("/api/candidate/{key}")
@@ -157,6 +194,11 @@ def api_stats(s: Session = Depends(db)) -> dict:
     return {"sources": q.source_stats(s)}
 
 
+@app.get("/api/admin/status")
+def api_admin_status(s: Session = Depends(db)) -> dict:
+    return admin.platform_status(s)
+
+
 @app.get("/healthz")
 def healthz() -> dict:
     """Healthcheck real: verifica conectividad con la BD (503 si no responde)."""
@@ -174,6 +216,11 @@ def healthz() -> dict:
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(os.path.join(_STATIC, "index.html"))
+
+
+@app.get("/pending_status")
+def pending_status() -> FileResponse:
+    return FileResponse(os.path.join(_STATIC, "pending_status.html"))
 
 
 app.mount("/static", StaticFiles(directory=_STATIC), name="static")

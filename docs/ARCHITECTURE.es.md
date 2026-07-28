@@ -1,12 +1,12 @@
 # Arquitectura de Foreshock
 
-Foreshock es un **radar temprano de vulnerabilidades**: un backend de carga de
-datos (sin UI) que capta señales de que una vulnerabilidad existe **antes** de
+Foreshock es un **radar temprano de vulnerabilidades**: una plataforma de carga
+y consulta que capta señales de que una vulnerabilidad existe **antes** de
 que su CVE esté publicado y analizado en NVD, y mide cuántos días de ventaja
 obtiene cada fuente.
 
 Todo el código vive en el paquete `app/` y se ejecuta como procesos Python
-sobre Postgres 16 + Redis. No hay servidor web ni frontend.
+sobre Postgres 16. FastAPI sirve una API de solo lectura y dos dashboards.
 
 ---
 
@@ -88,12 +88,10 @@ flowchart LR
     CAND --- VIEW
 
     %% ---------------- Infra / operación ----------------
-    REDIS["Redis<br/>cache · rate-limit"]
     VOL["Volumen data:/data<br/>raw_html · clon cvelistV5 · cachés GitHub"]
     MIG["migrate<br/>alembic upgrade head"]
     CLI["CLI foreshock<br/>sources · baseline · emerging · cve · enrich · stats"]
 
-    SW -.-> REDIS
     BW -.-> VOL
     SW -.-> VOL
     MIG --> PG
@@ -114,9 +112,9 @@ infraestructura de apoyo; la punteada etiquetada = reconciliación blanda por
 
 ---
 
-## Los tres procesos de `docker-compose.yml`
+## Procesos de `docker-compose.yml`
 
-`docker-compose.yml` levanta infraestructura (`postgres`, `redis`) y tres
+`docker-compose.yml` levanta Postgres y cuatro
 procesos de aplicación construidos con la misma imagen (`docker/Dockerfile`):
 
 | Servicio | Comando | Rol |
@@ -124,11 +122,12 @@ procesos de aplicación construidos con la misma imagen (`docker/Dockerfile`):
 | `migrate` | `alembic upgrade head` | Aplica las migraciones y termina. El resto espera a que acabe con éxito (`service_completed_successfully`). |
 | `baseline-worker` | `python -m app.baseline` | Sincroniza el estado canónico (cvelistV5 + delta NVD 2.0 + EPSS) en bucle con APScheduler. |
 | `sources-worker` | `python -m app.sources` | Ejecuta los fetchers habilitados en sus cadencias; ingesta menciones y enriquece candidates. |
+| `api` | `uvicorn app.api.main:app` | API JSON de solo lectura y dashboards `/` y `/pending_status`. |
 
 `migrate` es un job efímero de un solo uso; los dos workers son procesos de
-larga duración (`restart: unless-stopped`). Ambos workers y `migrate`
-comparten el volumen `data:/data` (HTML crudo, clon de cvelistV5, cachés de
-GitHub) y apuntan al mismo `DATABASE_URL`.
+larga duración (`restart: unless-stopped`). Ambos workers comparten el volumen
+`data:/data` (HTML crudo, clon de cvelistV5, cachés de GitHub) y todos los
+procesos apuntan al mismo `DATABASE_URL`.
 
 - **`app/baseline/__main__.py`** — `AsyncIOScheduler` con tres jobs
   (`_cvelist_job`, `_nvd_job`, `_epss_job`) a las cadencias de `Settings`
@@ -137,7 +136,13 @@ GitHub) y apuntan al mismo `DATABASE_URL`.
 - **`app/sources/__main__.py`** — al arrancar llama a `sync_registry_to_db()`
   (registra los fetchers del código en la tabla `sources`) y programa cada
   fuente `enabled` con su `cadence_seconds` (con `jitter=30`,
-  `max_instances=1`).
+  `max_instances=1`). Las primeras ejecuciones se reparten durante una hora;
+  el ciclo fetch/parse/ingesta queda limitado globalmente a 4, y Git y fuentes
+  pesadas tienen límites independientes de 1.
+
+Los workers publican cada 30 segundos un heartbeat en `sync_state` con procesos,
+hilos, zombies, memoria y trabajos activos/en cola. `/pending_status` consume
+esa telemetría sin montar el socket privilegiado de Docker.
 
 ---
 

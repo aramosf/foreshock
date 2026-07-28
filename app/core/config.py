@@ -26,8 +26,6 @@ class Settings(BaseSettings):
         default="postgresql+psycopg://foreshock:foreshock@localhost:5432/foreshock",
         validation_alias="DATABASE_URL",
     )
-    redis_url: str = Field(default="redis://localhost:6379/0", validation_alias="REDIS_URL")
-
     # --- Almacenamiento de datos crudos y clon de cvelistV5 ---
     data_dir: str = Field(default="/data")  # raw_html, cache
     raw_html_dir: str = Field(default="/data/raw")
@@ -61,6 +59,19 @@ class Settings(BaseSettings):
     # emiten. Un commit que cita un CVE/GHSA real sí entra por ese código.
     github_synthesize_candidates: bool = Field(default=False)
     github_advisories_max_pages: int = Field(default=30)  # paginación GHSA (100/pág -> ~3000)
+    # Fetcher github_repo_advisories: escanea /security-advisories y /releases de
+    # CADA repo del registro (los ~10k) vía REST, por lotes con marca de escaneo
+    # propia (adv_last_scanned_at). per_run controla el rate limit (2 llamadas/repo
+    # -> per_run*2 req/ejecución; con token el límite es 5000/h). window_days acota
+    # qué se emite en el PRIMER escaneo de un repo (sin adv_watermark aún).
+    # per_run: repos por ejecución. La contención de locks que antes obligaba a
+    # lotes pequeños se resolvió en el runner con COMMIT PERIÓDICO
+    # (_COMMIT_CHUNK en _persist_mentions): la transacción ya no retiene los locks
+    # de affected_products durante todo el lote, así que un lote grande es seguro.
+    # 500 repos (~5-6k menciones) cubren los ~10k del registro en ~1 día.
+    github_repo_scan_per_run: int = Field(default=500)
+    github_repo_scan_window_days: int = Field(default=365)
+    github_repo_scan_releases_per_repo: int = Field(default=30)   # releases recientes por repo
 
     # --- Watchlist de repos (estrategias de relevancia más allá de las estrellas) ---
     # 1+2 (referencias de advisories / CVE previo) y 3 (distros vía refs) se derivan
@@ -93,6 +104,18 @@ class Settings(BaseSettings):
     respect_robots: bool = Field(default=True)
     browser_max_concurrent: int = Field(default=3)
     browser_recycle_after: int = Field(default=50)
+
+    # --- Concurrencia de sources-worker ---
+    # Límite de punta para el ciclo COMPLETO de una fuente (fetch + parse +
+    # persistencia), no solo para la escritura en BD.
+    sources_max_concurrent: int = Field(default=4, ge=1)
+    # Los fetchers git crean procesos externos y compiten por disco/red.
+    sources_git_max_concurrent: int = Field(default=1, ge=1)
+    # Fuentes que construyen/ingieren lotes grandes (OSV, Wordfence, repos...).
+    sources_heavy_max_concurrent: int = Field(default=1, ge=1)
+    # Reparte la primera ejecución de las fuentes al arrancar el worker. Las
+    # habilitadas en caliente siguen ejecutándose de inmediato.
+    sources_startup_spread_seconds: int = Field(default=3600, ge=0)
 
     # --- Enriquecimiento LLM ---
     llm_provider: Literal["mock", "openai", "anthropic", "ollama"] = Field(default="mock")
