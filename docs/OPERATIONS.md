@@ -68,6 +68,7 @@ secret is ever hardcoded.
 | `FORESHOCK_NVD_API_BASE` | `https://services.nvd.nist.gov/rest/json/cves/2.0` | NVD 2.0 endpoint. |
 | `FORESHOCK_NVD_API_KEY` | `None` | NVD API key. Without it, the module pauses 6 s between pages (public rate limit). |
 | `FORESHOCK_EPSS_SYNC_SECONDS` | `86400` | EPSS job cadence (daily). |
+| `FORESHOCK_ENRICH_SYNC_SECONDS` | `7200` | Incremental enrichment cadence (2 h). Only touches dirty rows, so it is cheap to run at mirror pace. |
 | `FORESHOCK_EPSS_API_BASE` | `https://api.first.org/data/v1/epss` | FIRST.org EPSS endpoint. |
 
 ### GitHub commits source
@@ -177,6 +178,12 @@ operator-overridable:
 
 Do not raise a limit as a substitute for fixing an unbounded fetch. The admin
 dashboard reports both the configured limit and current cgroup usage.
+
+PostgreSQL also sets `shm_size` (`FORESHOCK_POSTGRES_SHM_SIZE`, default `1gb`).
+Docker's 64 MiB default for `/dev/shm` is too small for parallel workers: a
+`VACUUM (ANALYZE)` over a table with several indexes fails with `could not
+resize shared memory segment ... No space left on device`, and parallel queries
+degrade silently for the same reason.
 
 ### Operational API window
 

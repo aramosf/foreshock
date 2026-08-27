@@ -13,6 +13,12 @@ services:
     image: postgres:16
     mem_limit: ${FORESHOCK_POSTGRES_MEM_LIMIT:-8g}
     pids_limit: ${FORESHOCK_POSTGRES_PIDS_LIMIT:-256}
+    # /dev/shm es donde PostgreSQL pone la memoria dinámica compartida de los
+    # workers paralelos. El default de Docker (64 MiB) se queda corto: un
+    # `VACUUM (ANALYZE) published_cves` (9 índices, 2 workers de mantenimiento)
+    # falla con «could not resize shared memory segment ... No space left on
+    # device», y las consultas paralelas degradan por lo mismo.
+    shm_size: ${FORESHOCK_POSTGRES_SHM_SIZE:-1gb}
     environment:
       POSTGRES_USER: foreshock
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-foreshock}

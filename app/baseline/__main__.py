@@ -19,7 +19,6 @@ Notas de diseño:
 from __future__ import annotations
 
 import asyncio
-import os
 import signal
 from datetime import UTC, datetime
 
@@ -35,8 +34,6 @@ from app.core.runtime import publish_runtime_metrics
 
 log = get_logger("baseline.worker")
 
-# Cadencia del enriquecimiento incremental (diario por defecto).
-_ENRICH_SYNC_SECONDS = int(os.environ.get("ENRICH_SYNC_SECONDS", "86400"))
 _HEARTBEAT_SECONDS = 30
 _ACTIVE_JOBS: set[str] = set()
 
@@ -120,7 +117,7 @@ async def main() -> None:
                       id="nvd", max_instances=1, next_run_time=now)
     scheduler.add_job(_epss_job, "interval", seconds=settings.epss_sync_seconds,
                       id="epss", max_instances=1, next_run_time=now)
-    scheduler.add_job(_enrich_job, "interval", seconds=_ENRICH_SYNC_SECONDS,
+    scheduler.add_job(_enrich_job, "interval", seconds=settings.enrich_sync_seconds,
                       id="enrich-nvd", max_instances=1, next_run_time=now)
     scheduler.add_job(
         _runtime_job,

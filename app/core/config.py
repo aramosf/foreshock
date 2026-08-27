@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     nvd_api_base: str = Field(default="https://services.nvd.nist.gov/rest/json/cves/2.0")
     nvd_api_key: str | None = Field(default=None)
     epss_sync_seconds: int = Field(default=86400)  # diario
+    # Enriquecimiento incremental: solo toca filas sucias (sin sellar o
+    # re-tocadas por cvelist), así que es barato encadenarlo al ritmo del
+    # espejo en vez de dejar los campos derivados un día por detrás.
+    enrich_sync_seconds: int = Field(default=7200)  # 2 h
     epss_api_base: str = Field(default="https://api.first.org/data/v1/epss")
 
     # --- Fuente GitHub commits (top-N repos, changelog últimos N meses) ---
