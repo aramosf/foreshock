@@ -224,13 +224,17 @@ def baseline_epss_full() -> None:
 @baseline_app.command("enrich-nvd")
 def baseline_enrich_nvd(
     batch: int = typer.Option(2000, help="tamaño de lote (keyset por id)"),
+    full: bool = typer.Option(
+        False, "--full", help="reprocesa TODO el histórico (tras cambiar el parser)"
+    ),
 ) -> None:
     """Enriquece published_cves desde raw_json (CVE 5.0): CVSS/CWE/CPE/refs + SSVC.
 
-    Deriva de datos YA en BD (no descarga). Idempotente: reejecutable sin duplicar."""
+    Deriva de datos YA en BD (no descarga). Idempotente: reejecutable sin duplicar.
+    Por defecto incremental; con --full reprocesa el histórico completo."""
     from app.baseline.enrich import enrich_all
 
-    console.print(enrich_all(batch_size=batch))
+    console.print(enrich_all(batch_size=batch, full=full))
 
 
 @baseline_app.command("reconcile")

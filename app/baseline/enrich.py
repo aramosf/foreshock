@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import bindparam, delete, insert, or_, select, update
+from sqlalchemy import and_, bindparam, delete, insert, or_, select, update
 
 from app.core.db import session_scope
 from app.core.logging import get_logger
@@ -291,10 +291,17 @@ def enrich_all(batch_size: int = 2000, full: bool = False) -> dict[str, int]:
     (``enriched_at IS NULL``) o cuyo registro cvelist cambió después del último
     enriquecimiento (``cvelist_updated_at > enriched_at``). Con ``full=True``
     reprocesa todo el histórico (útil tras cambiar el parser).
+
+    Las filas SIN ``raw_json`` se saltan sin sellar ``enriched_at``: son CVEs
+    creados por el módulo NVD cuyo registro cvelist aún no ha llegado, y no hay
+    nada que derivar. Sellarlas las dejaba fuera del incremental para siempre,
+    porque ``cvelist_updated_at`` es el ``dateUpdated`` del registro (una fecha
+    PASADA) y nunca llega a superar el sello. Se contabilizan en ``skipped``.
     """
-    stats = {"processed": 0, "cvss": 0, "cwe": 0, "cpe": 0, "refs": 0}
+    stats = {"processed": 0, "skipped": 0, "cvss": 0, "cwe": 0, "cpe": 0, "refs": 0}
     col = PublishedCVE.__table__.c
     last_id = ""
+    batches = 0
     while True:
         with session_scope() as session:
             stmt = (
@@ -308,20 +315,37 @@ def enrich_all(batch_size: int = 2000, full: bool = False) -> dict[str, int]:
                 stmt = stmt.where(or_(
                     col.enriched_at.is_(None),
                     col.cvelist_updated_at > col.enriched_at,
+                    # Auto-reparación: sellado sin haber extraído nada pese a
+                    # tener JSON (filas dañadas por versiones anteriores o por
+                    # una ruta futura imprevista). Barato: no destoasta raw_json.
+                    and_(
+                        col.raw_json.isnot(None),
+                        col.state == "PUBLISHED",
+                        col.description_en.is_(None),
+                        col.enriched_at.isnot(None),
+                    ),
                 ))
             rows = session.execute(stmt).all()
             if not rows:
                 break
-            enrichments = [parse_record(cid, raw) for cid, raw in rows]
+            last_id = rows[-1][0]
+            batches += 1
+            # Sin raw_json no hay nada que derivar: ni se parsea ni se sella.
+            parseable = [(cid, raw) for cid, raw in rows if isinstance(raw, dict)]
+            stats["skipped"] += len(rows) - len(parseable)
+            if not parseable:
+                continue
+            enrichments = [parse_record(cid, raw) for cid, raw in parseable]
             _persist_batch(session, enrichments)
             for e in enrichments:
                 stats["cvss"] += len(e.cvss)
                 stats["cwe"] += len(e.cwe)
                 stats["cpe"] += len(e.cpe)
                 stats["refs"] += len(e.references)
-            stats["processed"] += len(rows)
-            last_id = rows[-1][0]
-        if stats["processed"] % (batch_size * 10) == 0:
+            stats["processed"] += len(parseable)
+        # Cada 10 lotes (no por múltiplo de `processed`: con filas saltadas el
+        # contador ya no cae en múltiplos exactos del tamaño de lote).
+        if batches % 10 == 0:
             log.info("enrich.progress", **stats)
     log.info("enrich.done", full=full, **stats)
     return stats

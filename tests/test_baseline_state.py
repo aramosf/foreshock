@@ -91,7 +91,11 @@ def test_enrich_all_incremental_only_touches_pending(db):
     }}}
     with session_scope() as s:
         # Ya enriquecido y sin cambios posteriores -> NO debe reprocesarse.
+        # `description_en` poblado: es lo que deja un enriquecimiento real, y
+        # sin él la fila cumpliría la firma de "sellada sin extraer nada" que
+        # la red de seguridad del incremental repara.
         s.add(PublishedCVE(id="CVE-2026-1000", state="PUBLISHED", raw_json=raw,
+                           description_en="desc",
                            cvelist_updated_at=now - timedelta(days=2),
                            enriched_at=now - timedelta(days=1)))
         # Nunca enriquecido -> debe procesarse.
@@ -115,6 +119,73 @@ def test_enrich_all_incremental_only_touches_pending(db):
     # full=True reprocesa también el ya enriquecido.
     stats_full = enrich_all(full=True)
     assert stats_full["processed"] == 3
+
+
+def test_enrich_all_no_sella_filas_sin_raw_json(db):
+    """Una fila creada por el módulo NVD (sin raw_json) NO debe sellarse: si se
+    sella, al llegar su registro cvelist con un `dateUpdated` pasado ya nunca
+    entra en el incremental y se queda sin enriquecer para siempre."""
+    from sqlalchemy import select
+
+    from app.baseline.enrich import enrich_all
+    from app.core.db import session_scope
+    from app.core.models import PublishedCVE
+
+    with session_scope() as s:
+        s.add(PublishedCVE(id="CVE-2026-2000", state="PUBLISHED", raw_json=None))
+
+    stats = enrich_all()
+    assert stats["processed"] == 0
+    assert stats["skipped"] == 1
+
+    with session_scope() as s:
+        row = s.get(PublishedCVE, "CVE-2026-2000")
+        assert row.enriched_at is None  # sin sellar -> sigue en la cola
+
+        # Llega el registro cvelist con dateUpdated PASADO (caso real).
+        row.raw_json = {"containers": {"cna": {
+            "providerMetadata": {"shortName": "acme"},
+            "descriptions": [{"lang": "en", "value": "desc"}],
+        }}}
+        row.cvelist_updated_at = datetime.now(UTC) - timedelta(days=30)
+
+    assert enrich_all()["processed"] == 1
+    with session_scope() as s:
+        assert s.execute(
+            select(PublishedCVE.description_en).where(PublishedCVE.id == "CVE-2026-2000")
+        ).scalar_one() == "desc"
+
+
+def test_enrich_all_repara_filas_selladas_sin_extraer(db):
+    """Red de seguridad: una fila con raw_json, ya sellada y sin nada extraído
+    (dañada por versiones anteriores) vuelve a entrar en el incremental."""
+    from sqlalchemy import select
+
+    from app.baseline.enrich import enrich_all
+    from app.core.db import session_scope
+    from app.core.models import PublishedCVE
+
+    now = datetime.now(UTC)
+    with session_scope() as s:
+        s.add(PublishedCVE(
+            id="CVE-2026-2001", state="PUBLISHED",
+            raw_json={"containers": {"cna": {
+                "providerMetadata": {"shortName": "acme"},
+                "descriptions": [{"lang": "en", "value": "recuperada"}],
+            }}},
+            cvelist_updated_at=now - timedelta(days=30),  # anterior al sello
+            enriched_at=now - timedelta(days=1),
+            description_en=None,
+        ))
+
+    assert enrich_all()["processed"] == 1
+    with session_scope() as s:
+        assert s.execute(
+            select(PublishedCVE.description_en).where(PublishedCVE.id == "CVE-2026-2001")
+        ).scalar_one() == "recuperada"
+
+    # Ya reparada: el siguiente incremental no la vuelve a tocar.
+    assert enrich_all()["processed"] == 0
 
 
 def test_mirror_has_mitre_data_detecta_vaciado(db) -> None:
