@@ -16,7 +16,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.api import queries as q
+from app.api import admin, queries as q
 
 NOW = dt.datetime.now(dt.UTC)
 
@@ -146,34 +146,73 @@ def test_emerging_pending_only(pending_dataset, session: Session) -> None:
     assert out["total"] == 3
 
 
-def test_pending_pre2016_fuera_del_dashboard_y_de_kev(
+def test_pending_pre2026_y_cve_antiguo_fuera_del_dashboard_y_de_kev(
     pending_dataset, session: Session,
 ) -> None:
-    """El archivo histórico pre-2016 se conserva, pero no contamina pending ni
-    el KPI/tarjeta KEV del dashboard."""
+    """El histórico y los CVE de años anteriores se conservan sin contaminar
+    pending ni el KPI/tarjeta KEV del dashboard."""
     old = _mk_candidate(
         session,
-        cve="CVE-2015-9999",
+        cve=None,
         product="legacy-inconsistency",
-        first_seen=dt.datetime(2015, 12, 31, tzinfo=dt.UTC),
+        first_seen=dt.datetime(2025, 12, 31, tzinfo=dt.UTC),
+    )
+    stale_cve = _mk_candidate(
+        session,
+        cve="CVE-2019-9999",
+        product="stale-cve-inconsistency",
+        first_seen=NOW,
     )
     session.execute(
-        text("UPDATE candidates SET in_kev=true, has_public_poc=true WHERE id=:id"),
-        {"id": old},
+        text("UPDATE candidates SET in_kev=true, has_public_poc=true "
+             "WHERE id IN (:old, :stale)"),
+        {"old": old, "stale": stale_cve},
     )
     session.commit()
 
     pending = q.pending_top(session, kind="all", top=20)
     assert pending["total"] == 3
-    assert all(r["software"] != "legacy-inconsistency" for r in pending["top"])
+    assert not {"legacy-inconsistency", "stale-cve-inconsistency"} & {
+        r["software"] for r in pending["top"]
+    }
 
     kev = q.emerging_list(
         session, pending_only=True, in_kev=True, page_size=50,
     )
-    assert all(r["cve_id"] != "CVE-2015-9999" for r in kev["rows"])
+    assert all(r["cve_id"] != "CVE-2019-9999" for r in kev["rows"])
 
     critical = q.pending_critical(session, top=50)
-    assert all(r["cve_id"] != "CVE-2015-9999" for r in critical["rows"])
+    assert all(r["cve_id"] != "CVE-2019-9999" for r in critical["rows"])
+
+    # Las API genéricas también aplican 2026 por defecto, pero permiten una
+    # consulta histórica explícita para administración/auditoría.
+    default_rows = q.emerging_list(session, page_size=100)
+    assert str(old) not in {str(r["id"]) for r in default_rows["rows"]}
+    assert str(stale_cve) not in {str(r["id"]) for r in default_rows["rows"]}
+    historical = q.emerging_list(
+        session, page_size=100, include_historical=True
+    )
+    assert {str(old), str(stale_cve)} <= {
+        str(r["id"]) for r in historical["rows"]
+    }
+    assert q.emerging_list(
+        session, period="2025", granularity="year"
+    )["total"] == 0
+    assert q.emerging_list(
+        session,
+        period="2025",
+        granularity="year",
+        include_historical=True,
+    )["total"] == 1
+    assert q.candidate_detail(session, str(old)) is None
+    assert q.candidate_detail(
+        session, str(old), include_historical=True
+    ) is not None
+    ingestion = admin._ingestion_status(session)
+    assert ingestion["pending_operational"] == 3
+    assert ingestion["historical_pending"] == 1
+    assert ingestion["source_inconsistencies"] == 1
+    assert ingestion["historical_inconsistencies"] == 2
 
 
 def test_candidate_detail_ignora_tombstones(pending_dataset, session: Session) -> None:
@@ -209,6 +248,7 @@ def test_healthz_y_cabeceras_seguridad(db) -> None:
         r = client.get("/healthz")
         assert r.status_code == 200 and r.json() == {"ok": True}
         assert r.headers["X-Content-Type-Options"] == "nosniff"
+        assert r.headers["X-Foreshock-Operational-Since"] == "2026-01-01"
         assert "script-src 'self'" in r.headers["Content-Security-Policy"]
         assert r.headers["Referrer-Policy"] == "no-referrer"
 
@@ -233,7 +273,7 @@ def test_pending_status_dashboard_y_api(sources_seeded) -> None:
         assert {row["role"] for row in data["workers"]} == {
             "api", "baseline-worker", "sources-worker",
         }
-        assert data["ingestion"]["pending_min_date"] == "2016-01-01"
+        assert data["ingestion"]["pending_min_date"] == "2026-01-01"
         assert data["database"]["migration"]
 
 
@@ -415,7 +455,7 @@ def test_queue_age_bins_grupos_y_mediana(db, session: Session) -> None:
     _mk_candidate(session, cve=None, product="a", first_seen=age(200))  # 181-365
     # assigned (cve_id sin datos NVD) -> pending.
     _mk_candidate(session, cve="CVE-2026-3001", product="a", first_seen=age(10))   # 8-30
-    _mk_candidate(session, cve="CVE-2026-3002", product="a", first_seen=age(400))  # >365
+    _mk_candidate(session, cve="CVE-2026-3002", product="a", first_seen=age(190))
     # NO cuenta: CVE ya PUBLICADO en NVD (no es pending).
     _mk_published(session, "CVE-2026-3999", nvd_published=True)
     _mk_candidate(session, cve="CVE-2026-3999", product="a", first_seen=age(5))
@@ -437,8 +477,8 @@ def test_queue_age_bins_grupos_y_mediana(db, session: Session) -> None:
     asg = {b["label"]: b["count"] for b in out["assigned"]["bins"]}
     assert out["assigned"]["total"] == 2            # el publicado NO cuenta
     assert asg == {"0-7": 0, "8-30": 1, "31-90": 0, "91-180": 0,
-                   "181-365": 0, ">365": 1}
-    assert out["assigned"]["median_days"] == pytest.approx(205.0)   # de [10,400]
+                   "181-365": 1, ">365": 0}
+    assert out["assigned"]["median_days"] == pytest.approx(100.0)   # de [10,190]
 
 
 # ---------------------------------------------------------------- granularidad semanal / days
@@ -473,10 +513,10 @@ def test_queue_age_exclude_backfill(sources_seeded, session: Session) -> None:
     # unassigned solo-backfill (osv) NO cuenta con exclude_backfill=True; el que
     # tiene además una fuente no-backfill (github_commits) sí.
     solo_bf = _mk_candidate(session, cve=None, product="a",
-                            first_seen=NOW - dt.timedelta(days=400))
+                            first_seen=NOW - dt.timedelta(days=100))
     _add_mention(session, solo_bf, "osv")
     mixto = _mk_candidate(session, cve=None, product="a",
-                          first_seen=NOW - dt.timedelta(days=400))
+                          first_seen=NOW - dt.timedelta(days=100))
     _add_mention(session, mixto, "osv"); _add_mention(session, mixto, "github_commits")
     session.commit()
     con = q.queue_age(session, exclude_backfill=True)

@@ -13,13 +13,16 @@ advisory extrae TODO lo aprovechable:
 
 from __future__ import annotations
 
-import re
-
+import asyncio
+import heapq
 import json
+import os
+import re
 import zipfile
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
-
+from app.baseline.state import read_cursor, write_cursor
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.ingest.affected import AffectedInput, VersionRangeInput, classify_kind
@@ -30,6 +33,8 @@ from app.sources.cache import cached_download
 log = get_logger(__name__)
 
 BUCKET = "https://osv-vulnerabilities.storage.googleapis.com/{eco}/all.zip"
+_BATCH_SIZE = 500
+_CURSOR_OVERLAP = timedelta(minutes=5)
 
 
 def _cve_alias(aliases: list[str]) -> str | None:
@@ -124,48 +129,133 @@ class OsvSource(BaseSource):
     cadence_seconds = 21600  # 6 h (volcado grande)
 
     async def fetch(self, ctx: FetchContext) -> list[FetchedMention]:
+        """Compatibilidad para llamadas directas; el runner usa fetch_batches."""
+        out: list[FetchedMention] = []
+        async for batch in self.fetch_batches(ctx):
+            out.extend(batch)
+        return out
+
+    async def fetch_batches(
+        self, ctx: FetchContext
+    ) -> AsyncIterator[list[FetchedMention]]:
         settings = get_settings()
-        # osv_months <= 0 -> sin ventana (histórico COMPLETO del ecosistema).
+        # La ventana solo se usa para inicializar un ecosistema sin watermark.
+        # Después, `modified` de OSV gobierna el delta e incluye correcciones de
+        # advisories antiguos sin reingerir el catálogo completo.
         cutoff = (datetime.now(UTC) - timedelta(days=30 * settings.osv_months)
                   if settings.osv_months > 0 else None)
         ecosystems = [e.strip() for e in settings.osv_ecosystems.split(",") if e.strip()]
-        out: list[FetchedMention] = []
+        self._pending_cursors: dict[str, str] = {}
         for eco in ecosystems:
             try:
-                out.extend(await self._scan_eco(ctx, eco, cutoff, settings.osv_max_per_ecosystem))
+                async for batch in self._scan_eco_batches(
+                    ctx, eco, cutoff, settings.osv_max_per_ecosystem
+                ):
+                    yield batch
             except Exception as exc:  # noqa: BLE001 - un ecosistema no tumba la fuente
                 log.warning("osv.eco_error", ecosystem=eco, error=str(exc))
-        return out
 
-    async def _scan_eco(self, ctx: FetchContext, eco: str, cutoff: datetime | None,
-                        cap: int) -> list[FetchedMention]:
+    async def _scan_eco_batches(
+        self,
+        ctx: FetchContext,
+        eco: str,
+        cutoff: datetime | None,
+        cap: int,
+    ) -> AsyncIterator[list[FetchedMention]]:
         # Descarga cacheada a disco (reusa el zip si es reciente; lo conserva para
-        # recreaciones). ZipFile lee las entradas de forma perezosa -> sin OOM.
-        # El cap NO se aplica en orden del zip (alfabético: descartaría los
-        # advisories más recientes): primero se recolecta TODO lo que cae en la
-        # ventana, se ordena por `modified` DESC y se corta después.
-        collected: list[tuple[datetime, FetchedMention]] = []
-        epoch = datetime.min.replace(tzinfo=UTC)  # sin fecha -> al final
+        # recreaciones). ZipFile lee cada entrada de forma perezosa. Con cap se
+        # mantiene un heap ACOTADO de los N más recientes; sin cap se emiten
+        # lotes de _BATCH_SIZE en lugar de acumular todo el ecosistema.
+        if not hasattr(self, "_pending_cursors"):
+            self._pending_cursors = {}
+        cursor_id = f"source:osv:{eco}"
         key = f"osv_{eco.replace('/', '_').replace(' ', '_')}.zip"
         zip_path = await cached_download(ctx.http, BUCKET.format(eco=eco), key=key)
+        archive_cursor_id = f"source:osv-archive:{eco}"
+        stat = os.stat(zip_path)
+        archive_signature = f"{stat.st_size}:{stat.st_mtime_ns}"
+        previous_archive, cursor_value = await asyncio.gather(
+            asyncio.to_thread(read_cursor, archive_cursor_id),
+            asyncio.to_thread(read_cursor, cursor_id),
+        )
+        if previous_archive == archive_signature:
+            log.info("osv.eco_unchanged", ecosystem=eco, key=key)
+            return
+
+        cursor = parse_advisory_date(cursor_value)
+        incremental_cutoff = cursor - _CURSOR_OVERLAP if cursor else None
+        selected: list[tuple[datetime, int, FetchedMention]] = []
+        batch: list[FetchedMention] = []
+        epoch = datetime.min.replace(tzinfo=UTC)  # sin fecha -> al final
+        max_modified = cursor
+        emitted = scanned = skipped_cursor = 0
+        sequence = 0
         with zipfile.ZipFile(zip_path) as zf:
-            for name in zf.namelist():
-                if not name.endswith(".json"):
+            for info in zf.infolist():
+                if not info.filename.endswith(".json"):
                     continue
+                scanned += 1
                 try:
-                    rec = json.loads(zf.read(name))
+                    rec = json.loads(zf.read(info))
                 except (json.JSONDecodeError, KeyError):
                     continue
-                m = self._to_mention(rec, cutoff)
+                modified = self._modified_at(rec)
+                if modified is not None and (
+                    max_modified is None or modified > max_modified
+                ):
+                    max_modified = modified
+                if cursor is not None and (
+                    modified is None or modified < incremental_cutoff
+                ):
+                    skipped_cursor += 1
+                    continue
+                # En el primer run se aplica la ventana de bootstrap. Con
+                # watermark se aceptan también updates recientes de advisories
+                # antiguos.
+                m = self._to_mention(rec, cutoff if cursor is None else None)
                 if m is not None:
-                    collected.append((self._modified_at(rec) or epoch, m))
-        collected.sort(key=lambda t: t[0], reverse=True)
-        out = [m for _, m in (collected[:cap] if cap > 0 else collected)]
-        if cap > 0 and len(collected) > cap:
+                    sequence += 1
+                    if cap > 0:
+                        item = (modified or epoch, sequence, m)
+                        if len(selected) < cap:
+                            heapq.heappush(selected, item)
+                        else:
+                            heapq.heappushpop(selected, item)
+                    else:
+                        batch.append(m)
+                        if len(batch) >= _BATCH_SIZE:
+                            emitted += len(batch)
+                            yield batch
+                            batch = []
+        if cap > 0:
+            ordered = [item[2] for item in sorted(selected, reverse=True)]
+            for pos in range(0, len(ordered), _BATCH_SIZE):
+                current = ordered[pos:pos + _BATCH_SIZE]
+                emitted += len(current)
+                yield current
+        elif batch:
+            emitted += len(batch)
+            yield batch
+
+        if cap > 0 and sequence > cap:
             log.warning("osv.eco_capped", ecosystem=eco, cap=cap,
-                        discarded=len(collected) - cap)
-        log.info("osv.eco_done", ecosystem=eco, mentions=len(out))
-        return out
+                        discarded=sequence - cap)
+        if max_modified is not None:
+            self._pending_cursors[cursor_id] = max_modified.isoformat()
+        self._pending_cursors[archive_cursor_id] = archive_signature
+        log.info(
+            "osv.eco_done",
+            ecosystem=eco,
+            scanned=scanned,
+            skipped_cursor=skipped_cursor,
+            mentions=emitted,
+            incremental=cursor is not None,
+        )
+
+    def finalize(self) -> None:
+        """Confirma watermarks solo después de persistir todos los lotes."""
+        for cursor_id, value in getattr(self, "_pending_cursors", {}).items():
+            write_cursor(cursor_id, value)
 
     @staticmethod
     def _modified_at(rec: dict) -> datetime | None:

@@ -5,6 +5,8 @@ un fetcher de forma aislada y persiste sus menciones vía el pipeline de ingesta
 from __future__ import annotations
 
 import asyncio
+import ctypes
+import gc
 import random
 import time
 from contextlib import AsyncExitStack
@@ -157,7 +159,14 @@ async def _run_source_bounded(name: str, inst: BaseSource) -> dict[str, int]:
     async with make_client() as client:
         ctx = FetchContext(http=client)
         try:
-            mentions = await inst.fetch(ctx)
+            async for mentions in inst.fetch_batches(ctx):
+                if mentions:
+                    # Persistir antes de pedir el siguiente lote impide que
+                    # fuentes masivas (OSV) materialicen cientos de miles de
+                    # objetos FetchedMention simultáneamente.
+                    await asyncio.to_thread(
+                        _persist_mentions_batch, name, mentions, stats
+                    )
         except Exception as exc:  # noqa: BLE001 - aislamiento: un fetcher no tumba el worker
             log.error("source.fetch_error", source=name, error=str(exc))
             with session_scope() as session:
@@ -167,19 +176,21 @@ async def _run_source_bounded(name: str, inst: BaseSource) -> dict[str, int]:
                     row.last_error_at = datetime.now(UTC)
             return stats
 
-    # La ingesta usa una sesión SÍNCRONA (psycopg) y puede procesar decenas de
-    # miles de menciones (OSV). Ejecutarla en el event loop del AsyncIOScheduler
-    # lo CONGELA. Se despacha a un hilo; el límite global ya acota cuántas
-    # sesiones/hilos pueden coexistir.
-    await asyncio.to_thread(_persist_mentions, name, inst, mentions, stats)
+    # El éxito y los watermarks solo se confirman cuando TODOS los lotes han
+    # terminado. Un fallo intermedio deja el cursor anterior y el próximo run
+    # reescanea de forma idempotente.
+    await asyncio.to_thread(_complete_source_run, name, inst, stats)
+    if name in _HEAVY_SOURCES:
+        await asyncio.to_thread(_release_unused_memory)
 
     log.info("source.run", source=name, **stats)
     return stats
 
 
-def _persist_mentions(name: str, inst: BaseSource, mentions: list,
-                      stats: dict[str, int]) -> None:
-    """Parte SÍNCRONA de run_source (BD): aislada en un hilo por to_thread."""
+def _persist_mentions_batch(
+    name: str, mentions: list, stats: dict[str, int]
+) -> None:
+    """Persiste un lote acotado; se ejecuta fuera del event loop."""
     with session_scope() as session:
         row = _get_source_row(session, name)
         if row is None or row.id is None:
@@ -211,6 +222,16 @@ def _persist_mentions(name: str, inst: BaseSource, mentions: list,
             if since_commit >= _COMMIT_CHUNK:
                 session.commit()
                 since_commit = 0
+
+
+def _complete_source_run(
+    name: str, inst: BaseSource, stats: dict[str, int]
+) -> None:
+    """Marca éxito y avanza watermarks tras persistir todos los lotes."""
+    with session_scope() as session:
+        row = _get_source_row(session, name)
+        if row is None:
+            raise RuntimeError(f"fuente '{name}' no está en la tabla sources")
         row.last_success_at = datetime.now(UTC)
         if stats["errors"]:
             row.last_error = f"{stats['errors']} menciones con error"
@@ -226,6 +247,20 @@ def _persist_mentions(name: str, inst: BaseSource, mentions: list,
             inst.finalize()
         except Exception as exc:  # noqa: BLE001
             log.error("source.finalize_error", source=name, error=str(exc))
+
+
+def _release_unused_memory() -> None:
+    """Devuelve al SO arenas libres tras un fetch pesado (best effort)."""
+    gc.collect()
+    try:
+        libc = ctypes.CDLL(None)
+        malloc_trim = libc.malloc_trim
+        malloc_trim.argtypes = [ctypes.c_size_t]
+        malloc_trim.restype = ctypes.c_int
+        malloc_trim(0)
+    except (AttributeError, OSError):
+        # musl/no glibc: gc.collect sigue siendo útil y no se considera error.
+        pass
 
 
 def ingest_prefetched(name: str, mentions: list) -> dict[str, int]:

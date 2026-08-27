@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 from app.api import admin
 from app.api import queries as q
 from app.core.db import get_session
+from app.core.operational import OPERATIONAL_MIN_DATE_ISO
 
 app = FastAPI(title="Foreshock API", version="0.1.0")
 
@@ -51,6 +52,9 @@ async def security_headers(request: Request, call_next) -> Response:
     response = await call_next(request)
     for k, v in _SEC_HEADERS.items():
         response.headers.setdefault(k, v)
+    response.headers.setdefault(
+        "X-Foreshock-Operational-Since", OPERATIONAL_MIN_DATE_ISO
+    )
     return response
 
 
@@ -69,10 +73,14 @@ def api_trend(
     days: int | None = Query(None, ge=1, le=3660),
     kind: str | None = Query("all"),
     tech: str | None = None,
+    include_historical: bool = Query(False),
     s: Session = Depends(db),
 ) -> dict:
     out = {"granularity": granularity, "months": months,
-           "series": q.trend_series(s, granularity, months, kind, tech, days)}
+           "operational_since": OPERATIONAL_MIN_DATE_ISO,
+           "series": q.trend_series(
+               s, granularity, months, kind, tech, days, include_historical
+           )}
     # `days` presente en la respuesta = capacidad de ventana por días (el
     # frontend sonda esta clave para mostrar los botones "Semana"/"1 sem").
     if days is not None:
@@ -100,10 +108,12 @@ def api_lag_histogram(
     exclude_backfill: bool = Query(True),
     metric: str = Query("present", pattern="^(present|published)$"),
     source: str | None = None,
+    include_historical: bool = Query(False),
     s: Session = Depends(db),
 ) -> dict:
     return q.lag_histogram(s, months=months, exclude_backfill=exclude_backfill,
-                           metric=metric, source=source)
+                           metric=metric, source=source,
+                           include_historical=include_historical)
 
 
 @app.get("/api/queue/age")
@@ -130,6 +140,7 @@ def api_emerging(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=500),
     format: str = Query("json", pattern="^(json|csv)$"),
+    include_historical: bool = Query(False),
     s: Session = Depends(db),
 ):
     # CSV: exporta el conjunto filtrado en un lote grande (hasta 5000 filas) para
@@ -138,7 +149,8 @@ def api_emerging(
     data = q.emerging_list(s, since_days=since_days, source=source, tier=tier, kind=kind,
                            in_kev=in_kev, tech=tech, pending_only=pending_only,
                            maturity=maturity, period=period, granularity=granularity,
-                           page=page, page_size=eff_size)
+                           page=page, page_size=eff_size,
+                           include_historical=include_historical)
     if format == "json":
         return data
     cols = ["cve_id", "maturity", "in_kev", "cvss", "severity_hint", "vuln_type",
@@ -171,8 +183,12 @@ def api_pending_breakdown(s: Session = Depends(db)) -> dict:
 
 
 @app.get("/api/candidate/{key}")
-def api_candidate(key: str, s: Session = Depends(db)) -> dict:
-    detail = q.candidate_detail(s, key)
+def api_candidate(
+    key: str,
+    include_historical: bool = Query(False),
+    s: Session = Depends(db),
+) -> dict:
+    detail = q.candidate_detail(s, key, include_historical=include_historical)
     if detail is None:
         raise HTTPException(status_code=404, detail="not found")
     return detail
@@ -184,14 +200,23 @@ def api_software(
     ecosystem: str = "",
     granularity: str = Query("month", pattern="^(month|year)$"),
     months: int = Query(24, ge=1, le=600),
+    include_historical: bool = Query(False),
     s: Session = Depends(db),
 ) -> dict:
-    return q.software_detail(s, ecosystem, name, granularity, months)
+    return q.software_detail(
+        s, ecosystem, name, granularity, months, include_historical
+    )
 
 
 @app.get("/api/stats")
-def api_stats(s: Session = Depends(db)) -> dict:
-    return {"sources": q.source_stats(s)}
+def api_stats(
+    include_historical: bool = Query(False),
+    s: Session = Depends(db),
+) -> dict:
+    return {
+        "operational_since": OPERATIONAL_MIN_DATE_ISO,
+        "sources": q.source_stats(s, include_historical=include_historical),
+    }
 
 
 @app.get("/api/admin/status")

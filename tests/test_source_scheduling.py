@@ -61,6 +61,36 @@ async def test_run_source_limita_el_ciclo_completo(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_runner_persiste_lotes_antes_de_confirmar(monkeypatch) -> None:
+    events: list[tuple[str, int] | tuple[str]] = []
+
+    class BatchedSource(BaseSource):
+        name = "batched"
+
+        async def fetch(self, ctx):
+            return []
+
+        async def fetch_batches(self, ctx):
+            yield [1, 2]
+            yield [3]
+
+    def persist(name, mentions, stats):
+        events.append(("persist", len(mentions)))
+        stats["fetched"] += len(mentions)
+
+    def complete(name, inst, stats):
+        events.append(("complete", stats["fetched"]))
+
+    monkeypatch.setattr(runner, "_persist_mentions_batch", persist)
+    monkeypatch.setattr(runner, "_complete_source_run", complete)
+
+    out = await runner._run_source_bounded("batched", BatchedSource())
+
+    assert out["fetched"] == 3
+    assert events == [("persist", 2), ("persist", 1), ("complete", 3)]
+
+
+@pytest.mark.asyncio
 async def test_git_timeout_mata_grupo_y_espera_al_hijo(monkeypatch) -> None:
     killed: list[tuple[int, int]] = []
 

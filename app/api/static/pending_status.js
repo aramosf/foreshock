@@ -170,6 +170,8 @@ function renderIngestion(ing) {
   metric(root, number(ing.mentions), "menciones");
   metric(root, number(ing.affected_products), "productos afectados");
   metric(root, number(ing.rejected_cves), "CVEs rechazados");
+  metric(root, number(ing.historical_pending), "pendientes históricas excluidas");
+  metric(root, number(ing.source_inconsistencies), "inconsistencias de identificador");
   metric(root, number(ing.github_repos.commits_scanned), `repos commits escaneados de ${number(ing.github_repos.total)}`);
   metric(root, number(ing.github_repos.commits_pending), "repos pendientes de commits", ing.github_repos.commits_pending ? "warning" : "ok");
   metric(root, number(ing.github_repos.advisories_scanned), `repos advisories escaneados de ${number(ing.github_repos.total)}`);

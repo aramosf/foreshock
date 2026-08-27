@@ -16,6 +16,13 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.core.operational import (
+    OPERATIONAL_MIN_DATE_ISO,
+    old_cve_identifier_sql,
+    operational_candidate_sql,
+    operational_published_sql,
+)
+
 # Allowlist de granularidad -> (unidad date_trunc, formato to_char).
 # granularidad -> (unidad date_trunc, formato to_char). 'week' usa semana ISO
 # (IYYY = año-ISO, IW = semana-ISO) -> etiquetas tipo "2026-W29".
@@ -33,12 +40,14 @@ _GRAN = {"week": ("week", 'IYYY-"W"IW'),
 # Siempre con tecnología asociada NO-malware: los advisories de paquetes
 # maliciosos (OSV MAL-*, kind='malware') son señal de otra naturaleza y se
 # cuentan aparte, no aquí. Excluye tombstones fusionados y rejected.
-# El dashboard operativo empieza en 2016: registros anteriores proceden de
+# El dashboard operativo empieza en 2026: registros anteriores proceden de
 # backfills/catálogos históricos heterogéneos y no representan la ventana de
 # detección que se pretende explicar. Se conservan en BD, pero no se mezclan con
-# pending ni con sus KPIs (incluido KEV).
+# pending ni con sus KPIs (incluido KEV). Además, un CVE de un año anterior que
+# continúa ausente del espejo oficial es una inconsistencia de fuente, no una
+# señal pre-reservada actual.
 # La CLI (app/cli.py) reutiliza estas funciones: NO dupliques este fragmento.
-_PENDING_MIN_DATE = "2016-01-01"
+_PENDING_MIN_DATE = OPERATIONAL_MIN_DATE_ISO
 _NVD_SILENT_SQL = (
     "( c.cve_id IS NULL OR NOT EXISTS (SELECT 1 FROM published_cves p"
     " WHERE p.id = c.cve_id"
@@ -60,7 +69,10 @@ PENDING_BASE_WHERE_SQL = (
 )
 PENDING_WHERE_SQL = (
     PENDING_BASE_WHERE_SQL
-    + f" AND c.first_seen_at >= '{_PENDING_MIN_DATE}'::timestamptz"
+    + " AND " + operational_candidate_sql("c")
+)
+SOURCE_INCONSISTENCY_WHERE_SQL = (
+    PENDING_BASE_WHERE_SQL + " AND " + old_cve_identifier_sql("c")
 )
 
 # Desglose de `pending` por MADUREZ del identificador. cvelistV5 (MITRE) solo
@@ -82,7 +94,7 @@ MATURITY_SQL = {
 }
 
 # Variante booleana para etiquetar filas, p.ej. en software_detail. Reutiliza la
-# definición completa para no reintroducir retirados, malware o pre-2016.
+# definición completa para no reintroducir retirados, malware o históricos.
 PENDING_EXPR_SQL = "( " + PENDING_WHERE_SQL + " )"
 
 # Fuentes de BACKFILL histórico: en el arranque inicial ingirieron catálogos
@@ -196,7 +208,8 @@ def _pending_filter(kind: str | None, tech: str | None) -> tuple[str, dict[str, 
 
 def trend_series(session: Session, granularity: str = "month", months: int = 12,
                  kind: str | None = None, tech: str | None = None,
-                 days: int | None = None) -> list[dict[str, Any]]:
+                 days: int | None = None,
+                 include_historical: bool = False) -> list[dict[str, Any]]:
     """Serie temporal: publicados vs pendientes (pre-publicados) por periodo.
 
     El cutoff se alinea al inicio del periodo (date_trunc) para que el bucket
@@ -215,12 +228,17 @@ def trend_series(session: Session, granularity: str = "month", months: int = 12,
         window_params = {"months": months}
     cutoff_sql = f"date_trunc('{unit}', now()) - {window_sql}"
 
+    pub_scope = "" if include_historical else " AND " + operational_published_sql(
+        "published_cves"
+    )
+    pending_scope = PENDING_BASE_WHERE_SQL if include_historical else PENDING_WHERE_SQL
     pub = session.execute(text(f"""
         SELECT to_char(date_trunc('{unit}', cvelist_published_at), '{fmt}') AS period,
                count(*) AS n
         FROM published_cves
         WHERE state='PUBLISHED'
           AND cvelist_published_at >= {cutoff_sql}
+          {pub_scope}
         GROUP BY 1
     """), window_params).all()
 
@@ -241,7 +259,7 @@ def trend_series(session: Session, granularity: str = "month", months: int = 12,
                count(DISTINCT c.id) FILTER (WHERE {MATURITY_SQL['cve_reserved']})
                    AS cve_reserved
         FROM candidates c
-        WHERE {PENDING_WHERE_SQL}
+        WHERE {pending_scope}
           {and_frag}
           AND c.first_seen_at >= {cutoff_sql}
         GROUP BY 1
@@ -371,7 +389,8 @@ def _exclude_backfill_sql(params: dict[str, Any]) -> str:
 
 
 def lag_histogram(session: Session, months: int = 12, exclude_backfill: bool = True,
-                  metric: str = "present", source: str | None = None) -> dict[str, Any]:
+                  metric: str = "present", source: str | None = None,
+                  include_historical: bool = False) -> dict[str, Any]:
     """Distribución de la ventaja/atraso de Foreshock frente a NVD.
 
     `metric`:
@@ -401,9 +420,12 @@ def lag_histogram(session: Session, months: int = 12, exclude_backfill: bool = T
 
     where = [
         "c.merged_into IS NULL",
-        f"c.first_seen_at >= '{_LAG_MIN_DATE}'::timestamptz",
         "c.first_seen_at >= date_trunc('month', now()) - make_interval(months => :months)",
     ]
+    if include_historical:
+        where.append(f"c.first_seen_at >= '{_LAG_MIN_DATE}'::timestamptz")
+    else:
+        where.append(operational_candidate_sql("c"))
     if exclude_backfill:
         where.append(_exclude_backfill_sql(params))
     where_sql = " AND ".join(where) + _lag_source_filter(source, params)
@@ -517,11 +539,14 @@ def emerging_list(session: Session, *, since_days: int | None = None, source: st
                   tech: str | None = None, pending_only: bool = False,
                   maturity: str | None = None,
                   period: str | None = None, granularity: str = "month",
-                  page: int = 1, page_size: int = 50) -> dict[str, Any]:
+                  page: int = 1, page_size: int = 50,
+                  include_historical: bool = False) -> dict[str, Any]:
     """Tabla de candidates con filtros y paginación. Cada fila incluye `maturity`
     (null si no es pendiente) y `first_seen_at`."""
     where = ["c.merged_into IS NULL"]
     params: dict[str, Any] = {}
+    if not include_historical:
+        where.append(operational_candidate_sql("c"))
     if maturity is not None:
         if maturity not in MATURITY_SQL:
             raise ValueError(f"maturity inválida: {maturity!r}")
@@ -581,18 +606,23 @@ def emerging_list(session: Session, *, since_days: int | None = None, source: st
             "rows": [dict(r) for r in rows]}
 
 
-def candidate_detail(session: Session, key: str) -> dict[str, Any] | None:
+def candidate_detail(
+    session: Session, key: str, *, include_historical: bool = False
+) -> dict[str, Any] | None:
     """Deepdive de una nota/candidate: ids, cvss, epss, afectados, refs, timeline."""
+    scope = "" if include_historical else " AND " + operational_candidate_sql("c")
     cid = session.execute(
-        text("SELECT id FROM candidates WHERE cve_id=:k AND merged_into IS NULL "
-             "ORDER BY first_seen_at LIMIT 1"),
+        text("SELECT c.id FROM candidates c WHERE c.cve_id=:k "
+             "AND c.merged_into IS NULL" + scope +
+             " ORDER BY c.first_seen_at LIMIT 1"),
         {"k": key.upper()}).scalar_one_or_none()
     if cid is None:
         try:
             cid = uuid.UUID(key)
         except ValueError:
             return None
-    c = session.execute(text("SELECT * FROM candidates WHERE id=:id"),
+    c = session.execute(text(
+        "SELECT c.* FROM candidates c WHERE c.id=:id" + scope),
                         {"id": cid}).mappings().first()
     if c is None:
         return None
@@ -633,7 +663,8 @@ def candidate_detail(session: Session, key: str) -> dict[str, Any] | None:
 
 
 def software_detail(session: Session, ecosystem: str, name: str,
-                    granularity: str = "month", months: int = 24) -> dict[str, Any]:
+                    granularity: str = "month", months: int = 24,
+                    include_historical: bool = False) -> dict[str, Any]:
     """Deepdive por tecnología: publicados vs pendientes de un paquete + su serie."""
     unit, fmt = _GRAN.get(granularity, _GRAN["month"])
     params = {
@@ -642,6 +673,9 @@ def software_detail(session: Session, ecosystem: str, name: str,
         "name": _like_pattern(name, contains=False),
         "months": max(1, months),
     }
+    operational_scope = (
+        "" if include_historical else " AND " + operational_candidate_sql("c")
+    )
     cands = session.execute(text(f"""
         SELECT DISTINCT c.id, c.cve_id, c.first_seen_at, c.in_kev,
                {PENDING_EXPR_SQL} AS pending
@@ -649,6 +683,7 @@ def software_detail(session: Session, ecosystem: str, name: str,
         WHERE c.merged_into IS NULL AND a.product ILIKE :name ESCAPE '\\'
           AND ( :eco='' OR a.ecosystem ILIKE :eco ESCAPE '\\' )
           AND c.first_seen_at >= date_trunc('{unit}', now()) - make_interval(months => :months)
+          {operational_scope}
         ORDER BY c.first_seen_at DESC NULLS LAST
     """), params).mappings().all()
     series: dict[str, dict[str, int]] = {}
@@ -671,12 +706,17 @@ def software_detail(session: Session, ecosystem: str, name: str,
     }
 
 
-def source_stats(session: Session) -> list[dict[str, Any]]:
+def source_stats(
+    session: Session, *, include_historical: bool = False
+) -> list[dict[str, Any]]:
     """Media de días de ventaja por fuente (deduplicada, sin fusionados).
 
     Guarda defensiva: ignora days_ahead > 3650 o first_seen_at < 1990 — fechas
     corruptas residuales (ver AGENT_CHANGELOG) no deben volver a inflar medias.
     """
+    operational_scope = (
+        "" if include_historical else " AND " + operational_candidate_sql("c")
+    )
     rows = session.execute(text(f"""
         SELECT source, round(avg(days_ahead)::numeric, 1) AS avg_days, count(*) AS candidates
         FROM (
@@ -686,6 +726,7 @@ def source_stats(session: Session) -> list[dict[str, Any]]:
           WHERE c.days_ahead_vs_nvd_present IS NOT NULL AND c.merged_into IS NULL
             AND c.days_ahead_vs_nvd_present <= 3650
             AND c.first_seen_at >= '{_LAG_MIN_DATE}'::timestamptz
+            {operational_scope}
         ) t GROUP BY source ORDER BY avg_days DESC
     """)).mappings().all()
     return [dict(r) for r in rows]

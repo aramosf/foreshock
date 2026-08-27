@@ -6,16 +6,25 @@ hay. Alta señal y formato estructurado: el CVSS aquí es AUTORITATIVO.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 from dateutil.parser import isoparse
 
+from app.baseline.state import read_cursor, write_cursor
 from app.core.config import get_settings
-from app.sources.base import BaseSource, FetchContext, register
+from app.sources.base import (
+    BaseSource,
+    FetchContext,
+    parse_advisory_date,
+    register,
+)
 from app.sources.http import get
 from app.ingest.service import FetchedMention
 
 API = "https://access.redhat.com/hydra/rest/securitydata/cve.json"
+_CURSOR_ID = "source:redhat_csaf"
+_CURSOR_OVERLAP = timedelta(days=1)
 
 
 @register
@@ -31,7 +40,16 @@ class RedHatCSAFSource(BaseSource):
 
     async def fetch(self, ctx: FetchContext) -> list[FetchedMention]:
         lookback = get_settings().redhat_lookback_days
-        after = (datetime.now(UTC) - timedelta(days=lookback)).strftime("%Y-%m-%d")
+        started_at = datetime.now(UTC)
+        cursor = parse_advisory_date(
+            await asyncio.to_thread(read_cursor, _CURSOR_ID)
+        )
+        start = (
+            cursor - _CURSOR_OVERLAP
+            if cursor is not None
+            else started_at - timedelta(days=lookback)
+        )
+        after = start.strftime("%Y-%m-%d")
         out: list[FetchedMention] = []
         for page in range(1, self.max_pages + 1):
             # API JSON oficial -> robots.txt no aplica (ver docstring de get()).
@@ -43,7 +61,13 @@ class RedHatCSAFSource(BaseSource):
             out.extend(self._parse(data))
             if len(data) < self.per_page:
                 break  # última página
+        self._next_cursor = started_at.isoformat()
         return out
+
+    def finalize(self) -> None:
+        cursor = getattr(self, "_next_cursor", None)
+        if cursor:
+            write_cursor(_CURSOR_ID, cursor)
 
     @staticmethod
     def _parse(data: list[dict]) -> list[FetchedMention]:

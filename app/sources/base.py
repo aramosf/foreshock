@@ -1,9 +1,10 @@
 """Framework de fuentes: contrato BaseSource + registro + contexto de fetch.
 
 Cada fetcher vive en app/sources/<nombre>.py y declara una subclase de
-BaseSource decorada con @register. Devuelve list[FetchedMention]; NO escribe
-en BD (de eso se encarga el pipeline de ingesta). Un fetcher que falla se
-aísla: el worker captura la excepción, la loguea y sigue con el resto.
+BaseSource decorada con @register. Devuelve list[FetchedMention] o lotes
+incrementales mediante ``fetch_batches``; NO escribe en BD (de eso se encarga
+el pipeline de ingesta). Un fetcher que falla se aísla: el worker captura la
+excepción, la loguea y sigue con el resto.
 
 Métodos declarados en `method`:
   api      -> httpx contra una API JSON/XML
@@ -16,6 +17,7 @@ Métodos declarados en `method`:
 from __future__ import annotations
 
 import abc
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -94,6 +96,17 @@ class BaseSource(abc.ABC):
     async def fetch(self, ctx: FetchContext) -> list[FetchedMention]:
         """Obtiene menciones nuevas. Idempotencia la garantiza la ingesta."""
         raise NotImplementedError
+
+    async def fetch_batches(
+        self, ctx: FetchContext
+    ) -> AsyncIterator[list[FetchedMention]]:
+        """Iterador opcional para fuentes voluminosas.
+
+        El comportamiento por defecto conserva el contrato histórico de una
+        sola lista. Las fuentes grandes pueden sobrescribirlo para que el runner
+        persista y libere cada lote antes de producir el siguiente.
+        """
+        yield await self.fetch(ctx)
 
     def finalize(self) -> None:
         """Hook opcional que el runner invoca SOLO tras persistir con éxito el

@@ -12,12 +12,19 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.api.queries import PENDING_BASE_WHERE_SQL
+from app.api.queries import (
+    PENDING_BASE_WHERE_SQL,
+    PENDING_WHERE_SQL,
+    SOURCE_INCONSISTENCY_WHERE_SQL,
+)
+from app.core.operational import (
+    OPERATIONAL_MIN_DATE_ISO,
+    old_cve_identifier_sql,
+)
 from app.core.runtime import collect_runtime_metrics
 
 _WORKER_ROLES = ("baseline-worker", "sources-worker")
 _HEARTBEAT_STALE_SECONDS = 90
-_PENDING_MIN_DATE = "2016-01-01"
 _KEY_TABLES = (
     "published_cves",
     "candidates",
@@ -202,11 +209,6 @@ def _table_inventory(session: Session) -> list[dict[str, Any]]:
 
 def _ingestion_status(session: Session) -> dict[str, Any]:
     counts = session.execute(text(f"""
-        WITH pending_archive AS MATERIALIZED (
-          SELECT c.first_seen_at
-          FROM candidates c
-          WHERE {PENDING_BASE_WHERE_SQL}
-        )
         SELECT
           (SELECT count(*) FROM candidates WHERE merged_into IS NULL)::bigint
             AS candidates,
@@ -217,11 +219,25 @@ def _ingestion_status(session: Session) -> dict[str, Any]:
              WHERE nvd_published_at IS NOT NULL)::bigint AS nvd_published,
           (SELECT count(*) FROM published_cves
              WHERE state = 'REJECTED')::bigint AS rejected_cves,
-          (SELECT count(*) FROM pending_archive
-             WHERE first_seen_at >= '{_PENDING_MIN_DATE}'::timestamptz)::bigint
+          (SELECT count(*) FROM candidates c
+             WHERE {PENDING_WHERE_SQL})::bigint
             AS pending_operational,
-          (SELECT count(*) FROM pending_archive
-             WHERE first_seen_at < '{_PENDING_MIN_DATE}'::timestamptz)::bigint
+          (SELECT count(*) FROM candidates c
+             WHERE {PENDING_BASE_WHERE_SQL}
+               AND (c.first_seen_at IS NULL OR
+                    c.first_seen_at < '{OPERATIONAL_MIN_DATE_ISO}'::timestamptz)
+               AND NOT ({old_cve_identifier_sql('c')}))::bigint
+            AS historical_pending,
+          (SELECT count(*) FROM candidates c
+             WHERE {SOURCE_INCONSISTENCY_WHERE_SQL})::bigint
+            AS source_inconsistencies,
+          (SELECT count(*) FROM candidates c
+             WHERE {PENDING_BASE_WHERE_SQL}
+               AND (
+                 c.first_seen_at IS NULL OR
+                 c.first_seen_at < '{OPERATIONAL_MIN_DATE_ISO}'::timestamptz OR
+                 {old_cve_identifier_sql('c')}
+               ))::bigint
             AS historical_inconsistencies
     """)).mappings().one()
     repos = session.execute(text("""
@@ -239,7 +255,7 @@ def _ingestion_status(session: Session) -> dict[str, Any]:
     """)).mappings().one()
     return {
         **{key: int(value) for key, value in counts.items()},
-        "pending_min_date": _PENDING_MIN_DATE,
+        "pending_min_date": OPERATIONAL_MIN_DATE_ISO,
         "github_repos": {key: int(value) for key, value in repos.items()},
         "tables": _table_inventory(session),
     }

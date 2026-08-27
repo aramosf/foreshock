@@ -108,8 +108,18 @@ references), the `github_repos` registry supports two opt-in discovery strategie
 | Variable | Default | Purpose |
 |---|---|---|
 | `FORESHOCK_OSV_ECOSYSTEMS` | `PyPI,Go,crates.io,RubyGems,Packagist` | Comma-separated OSV ecosystems whose `all.zip` dump is scanned. |
-| `FORESHOCK_OSV_MONTHS` | `5` | Only advisories with `published` within this window are kept. |
-| `FORESHOCK_OSV_MAX_PER_ECOSYSTEM` | `3000` | Cap of mentions per ecosystem per run. **`0` = no cap** (full ingest). |
+| `FORESHOCK_OSV_MONTHS` | `5` | Initial-bootstrap publication window. Later runs follow the persisted OSV `modified` watermark. |
+| `FORESHOCK_OSV_MAX_PER_ECOSYSTEM` | `3000` | Bounded bootstrap cap per ecosystem. **`0` = no cap**; persistence still streams in batches. |
+
+Each ecosystem has persistent archive and `modified` watermarks in `sync_state`.
+An unchanged cached ZIP is skipped completely. A changed ZIP is scanned, but
+only the watermark overlap is emitted, in batches of 500; cursors advance only
+after every emitted batch has been persisted.
+
+### Red Hat Security Data
+| Variable | Default | Purpose |
+|---|---|---|
+| `FORESHOCK_REDHAT_LOOKBACK_DAYS` | `3` | Bootstrap window before the first successful run. Later runs use a persistent cursor with one day of overlap. |
 
 ### Fetchers / polite scraping
 | Variable | Default | Purpose |
@@ -149,7 +159,31 @@ interpolation (typically via a `.env` file): `FORESHOCK_NVD_API_KEY`,
 `FORESHOCK_GITHUB_TOKEN`, `FORESHOCK_GITHUB_TOP_N`, `FORESHOCK_GITHUB_REPOS_PER_RUN`
 (compose default `500`), `FORESHOCK_VULNCHECK_TOKEN`,
 `FORESHOCK_VULNCHECK_MAX_PAGES`, `FORESHOCK_OSV_ECOSYSTEMS`,
-`FORESHOCK_OSV_MAX_PER_ECOSYSTEM`.
+`FORESHOCK_OSV_MAX_PER_ECOSYSTEM`, `FORESHOCK_OSV_MONTHS` and
+`FORESHOCK_REDHAT_LOOKBACK_DAYS`.
+
+### Container resource limits
+
+Compose applies finite memory and PID limits by default. They remain
+operator-overridable:
+
+| Service | Memory default | PID default |
+|---|---:|---:|
+| PostgreSQL | `FORESHOCK_POSTGRES_MEM_LIMIT=8g` | `FORESHOCK_POSTGRES_PIDS_LIMIT=256` |
+| sources-worker | `FORESHOCK_SOURCES_MEM_LIMIT=4g` | `FORESHOCK_SOURCES_PIDS_LIMIT=128` |
+| baseline-worker | `FORESHOCK_BASELINE_MEM_LIMIT=3g` | `FORESHOCK_BASELINE_PIDS_LIMIT=96` |
+| API | `FORESHOCK_API_MEM_LIMIT=1g` | `FORESHOCK_API_PIDS_LIMIT=64` |
+| migrations | `FORESHOCK_MIGRATE_MEM_LIMIT=1g` | `FORESHOCK_MIGRATE_PIDS_LIMIT=64` |
+
+Do not raise a limit as a substitute for fixing an unbounded fetch. The admin
+dashboard reports both the configured limit and current cgroup usage.
+
+### Operational API window
+
+All dashboard-facing API reads default to the canonical operational window
+starting at `2026-01-01`. Historical rows remain stored. Generic inspection
+endpoints accept `include_historical=true` for explicit audit use; the response
+header `X-Foreshock-Operational-Since` exposes the active boundary.
 
 ---
 
@@ -274,10 +308,10 @@ docker compose run --rm baseline-worker foreshock backfill-products --batch 2000
   100k, raise `FORESHOCK_GITHUB_TOP_N`, run `foreshock sources harvest-repos`, and
   raise `FORESHOCK_GITHUB_REPOS_PER_RUN` and/or shorten the source cadence; a PAT
   (`FORESHOCK_GITHUB_TOKEN`) still helps clone throughput and the harvest Search API.
-- **OSV without a cap.** OSV streams each ecosystem's `all.zip` to a temp file
-  (avoids OOM on large dumps like npm/Debian) and reads entries lazily. Set
-  `FORESHOCK_OSV_MAX_PER_ECOSYSTEM=0` for full ingest and widen
-  `FORESHOCK_OSV_ECOSYSTEMS` as needed; the 6 h cadence keeps bandwidth bounded.
+- **OSV without a cap.** Full ingest is a bootstrap operation, not the normal
+  long-running profile. Even with `FORESHOCK_OSV_MAX_PER_ECOSYSTEM=0`, mentions
+  are persisted in bounded batches; subsequent runs use archive/`modified`
+  watermarks. Restore the normal cap/window after a deliberate backfill.
 - **NVD.** With a key, NVD paginates 2000/page without the 6 s pause; widen
   `--nvd-hours` (or shorten `FORESHOCK_NVD_DELTA_SECONDS`) to reduce the chance of
   missing a busy delta window.
