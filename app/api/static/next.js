@@ -47,14 +47,17 @@ function renderImm(filter) {
   const rows = IMM.filter(r => !q || (r.product || "").toLowerCase().includes(q) || (r.cve_id || "").toLowerCase().includes(q));
   if (!rows.length) { $("#imm").innerHTML = '<div class="empty">sin resultados para «' + esc(q) + '»</div>'; return; }
   $("#imm").innerHTML = rows.slice(0, 40).map(r => {
+    const isCvss10 = r.cvss != null && r.cvss >= 10;
     const chips = [];
     if (r.in_kev) chips.push('<span class="chip kev">KEV</span>');
     if (r.has_public_poc) chips.push('<span class="chip poc">PoC público</span>');
-    if (r.cvss != null) chips.push('<span class="chip cvss">CVSS ' + esc(r.cvss) + '</span>');
+    if (r.cvss != null) chips.push('<span class="chip ' + (isCvss10 ? "cvss10" : "cvss") + '">CVSS ' + esc(r.cvss) + '</span>');
     if (r.min_tier != null) chips.push('<span class="chip">tier ' + esc(r.min_tier) + '</span>');
     const mat = MAT[r.maturity] || r.maturity || "";
     const age = daysAgo(r.first_seen_at);
-    return `<div class="imm" data-id="${esc(r.id)}">
+    // Rojo: KEV (acento fuerte) o CVSS 10 (un escalón por debajo).
+    const rowcls = r.in_kev ? "imm kev" : (isCvss10 ? "imm red" : "imm");
+    return `<div class="${rowcls}" data-id="${esc(r.id)}">
       ${dial(r.score)}
       <div class="body">
         <div class="prod">${esc(r.product || r.cve_id || "—")}</div>
@@ -96,6 +99,33 @@ function renderTrend(el, series) {
       <span class="chip" style="border-color:var(--m1)">pre-CVE</span>
       <span class="chip" style="border-color:var(--m2)">prereservado</span>
       <span class="chip" style="border-color:var(--ctx)">publicado</span></div>`;
+}
+
+// "Evolución": detecciones de las PENDIENTES actuales por mes, apiladas por madurez
+// (solo los tres estados pendientes; el publicado no es pendiente). Fuente: /api/trend.
+function renderEvolution(el, series) {
+  if (!series || !series.length) { el.innerHTML = '<div class="empty">sin datos</div>'; return; }
+  const keys = [["pre_cve", "var(--m1)", "pre-CVE"], ["cve_prereserved", "var(--m2)", "prereservado"], ["cve_reserved", "var(--m3)", "reservado"]];
+  const W = 940, H = 240, padL = 34, padB = 22, padT = 8;
+  const tot = series.map(s => keys.reduce((a, [k]) => a + (s[k] || 0), 0));
+  const max = Math.max(1, ...tot), n = series.length, bw = (W - padL - 6) / n;
+  const ticks = 4; let gl = "";
+  for (let t = 0; t <= ticks; t++) {
+    const v = Math.round(max * t / ticks), y = padT + (H - padT - padB) * (1 - t / ticks);
+    gl += `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W}" y2="${y.toFixed(1)}" stroke="var(--grid)" stroke-width="1"/>`;
+    gl += `<text x="${padL - 5}" y="${(y + 3).toFixed(1)}" font-size="9" text-anchor="end">${v}</text>`;
+  }
+  let bars = "";
+  series.forEach((s, i) => {
+    let y = H - padB; const x = padL + i * bw;
+    keys.forEach(([k, c]) => {
+      const h = (s[k] || 0) / max * (H - padT - padB); y -= h;
+      if (h > 0) bars += `<rect x="${(x + 2).toFixed(1)}" y="${y.toFixed(1)}" width="${(bw - 4).toFixed(1)}" height="${h.toFixed(1)}" fill="${c}"><title>${esc(s.period)}: ${tot[i]} pendientes</title></rect>`;
+    });
+  });
+  const labs = series.map((s, i) => `<text x="${(padL + i * bw + bw / 2).toFixed(1)}" y="${H - 7}" font-size="9" text-anchor="middle">${esc(String(s.period).slice(2))}</text>`).join("");
+  el.innerHTML = `<svg class="evo-svg" viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Detecciones de pendientes por mes y madurez">${gl}${bars}${labs}</svg>
+    <div class="chips" style="margin-top:8px">${keys.map(([, c, lab]) => `<span class="chip" style="border-color:${c}">${lab}</span>`).join("")}</div>`;
 }
 
 async function openDrawer(id) {
@@ -150,7 +180,7 @@ $("#surface").oninput = e => renderImm(e.target.value);
 // Carga por secciones (allSettled): si un endpoint falla, el resto se pinta igual.
 async function load() {
   const eps = ["/api/pending/critical?limit=60", "/api/lag/histogram", "/api/stats",
-    "/api/trend?months=6", "/api/pending?kind=product", "/api/emerging?limit=100"];
+    "/api/trend?months=12", "/api/pending?kind=product", "/api/emerging?limit=100"];
   const res = await Promise.allSettled(eps.map(jget));
   const val = i => res[i].status === "fulfilled" ? res[i].value : null;
   const [crit, lag, stats, trend, pending, emerging] = [val(0), val(1), val(2), val(3), val(4), val(5)];
@@ -173,6 +203,9 @@ async function load() {
     const ss = (stats.sources || []).slice().sort((a, b) => parseFloat(b.avg_days) - parseFloat(a.avg_days)).slice(0, 12);
     barChart($("#srcs"), ss.map(s => ({ label: s.source, v: parseFloat(s.avg_days), color: "var(--m2)" })), { fmt: v => v.toFixed(1) + "d" });
   } else $("#srcs").innerHTML = fail();
-  if (trend) renderTrend($("#trend"), trend.series || []); else $("#trend").innerHTML = fail();
+  if (trend) {
+    renderTrend($("#trend"), (trend.series || []).slice(-6));
+    renderEvolution($("#evo"), trend.series || []);
+  } else { $("#trend").innerHTML = fail(); $("#evo").innerHTML = fail(); }
 }
 load();

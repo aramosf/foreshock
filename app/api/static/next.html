@@ -87,6 +87,10 @@ header{border-bottom:1px solid var(--hair);background:var(--surface);position:st
 .chip.kev{color:#fff;background:var(--crit);border-color:var(--crit)}
 .chip.poc{color:#fff;background:var(--warn);border-color:var(--warn)}
 .chip.cvss{color:var(--m3);border-color:var(--m2)}
+/* CVSS 10: rojo pero un escalón por debajo de KEV (contorno, no relleno) */
+.chip.cvss10{color:var(--crit);background:transparent;border-color:var(--crit);font-weight:700}
+.imm.red{box-shadow:inset 3px 0 0 var(--crit)}       /* KEV o CVSS 10: acento rojo en la fila */
+.imm.kev{box-shadow:inset 4px 0 0 var(--crit)}        /* KEV: acento más marcado */
 .badge-mat{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:1px 6px;border-radius:4px}
 .mat-pre_cve{background:var(--m1);color:#06233f}
 .mat-cve_prereserved{background:var(--m2);color:#fff}
@@ -127,7 +131,27 @@ header{border-bottom:1px solid var(--hair);background:var(--surface);position:st
 .lead b{font-size:16px}
 .empty{color:var(--muted);font-size:13px;padding:20px 0;text-align:center}
 .foot{color:var(--muted);font-size:11.5px;margin-top:28px;border-top:1px solid var(--hair);padding-top:14px}
+
+/* cuadro "Qué mide este panel" */
+details.explain{background:var(--surface);border:1px solid var(--hair);border-radius:12px;padding:16px 20px;margin:24px 0}
+details.explain summary{cursor:pointer;font-size:13px;text-transform:uppercase;letter-spacing:.08em;
+  color:var(--ink2);font-weight:700;list-style:none;outline:none}
+details.explain summary::-webkit-details-marker{display:none}
+details.explain summary::before{content:"▸";color:var(--muted);display:inline-block;width:16px}
+details.explain[open] summary::before{content:"▾"}
+.explain .lede{font-size:13.5px;color:var(--ink2);margin:12px 0 16px;max-width:80ch}
+.subsets{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
+.subbox{border:1px solid var(--hair);border-top:3px solid var(--hair);border-radius:8px;padding:10px 12px}
+.subbox.m1{border-top-color:var(--m1)} .subbox.m2{border-top-color:var(--m2)}
+.subbox.m3{border-top-color:var(--m3)} .subbox.pub{border-top-color:var(--ctx)}
+.subbox b{font-size:12.5px} .subbox p{font-size:12px;color:var(--muted);margin:4px 0 0}
+.gloss{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px 18px;font-size:12px;
+  color:var(--ink2);border-top:1px solid var(--hair);padding-top:12px}
+.gloss b{color:var(--ink)}
+.gloss .rd{color:var(--crit);font-weight:700}
+.evo-svg text{fill:var(--muted)}
 @media (max-width:900px){.grid{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(2,1fr)}}
+@media (max-width:760px){.subsets{grid-template-columns:1fr 1fr}}
 </style>
 </head>
 <body>
@@ -143,6 +167,35 @@ header{border-bottom:1px solid var(--hair);background:var(--surface);position:st
 </div></header>
 
 <div class="wrap">
+  <details class="explain" open>
+    <summary>Qué mide este panel</summary>
+    <p class="lede">Foreshock rastrea fuentes públicas — avisos de GitHub y OSV, commits, boletines de
+      fabricante, ZDI, MSRC, listas de exploits — buscando vulnerabilidades que <b>todavía no aparecen en
+      NVD</b>, la base de datos oficial. Ese hueco temporal es la <b>ventaja</b> que mide todo lo que ves
+      aquí. Cada pendiente está en uno de tres estados azules (de claro a oscuro) hasta que NVD publica y
+      pasa a la fase final, en gris.</p>
+    <div class="subsets">
+      <div class="subbox m1"><b>pre-CVE</b><p>Solo tiene el código nativo de su fuente (GHSA-, RUSTSEC-,
+        ZDI-CAN-, VU#…). Nadie le ha asignado aún un número CVE.</p></div>
+      <div class="subbox m2"><b>CVE pre-reservado</b><p>Ya circula un número CVE (citado en un commit o
+        aviso) pero sin ficha pública en MITRE ni NVD. La señal más temprana con número: la más valiosa.</p></div>
+      <div class="subbox m3"><b>CVE reservado</b><p>MITRE ya tiene ficha del CVE, pero NVD aún no ha
+        publicado su análisis. Último paso antes de hacerse oficial.</p></div>
+      <div class="subbox pub"><b>CVE público</b><p>NVD publica su análisis: deja de estar pendiente y
+        cierra el ciclo (línea de meta de «la carrera»).</p></div>
+    </div>
+    <div class="gloss">
+      <div><b>Foreshock Score (0–100)</b> — criticidad para actuar ya: explotación activa (KEV, +50),
+        PoC público (+20), gravedad CVSS/severidad (0–40) y lo pronto que avisa la fuente (tier, 1–15).</div>
+      <div><b>Ventaja / días de adelanto</b> — días entre la primera detección en Foreshock y la
+        publicación en NVD (<span class="mono">present</span>, sobre nuestra propia observación).</div>
+      <div><span class="rd">Rojo</span> — <b>KEV</b> (explotación activa confirmada por CISA) marca la
+        fila con acento rojo intenso; <b>CVSS 10</b> también en rojo, un escalón por debajo.</div>
+      <div><b>CVSS · EPSS</b> — gravedad (0–10) y probabilidad de explotación a 30 días (0–1).
+        <b>tier</b> — cómo de temprana es la fuente (1 = la que más se adelanta).</div>
+    </div>
+  </details>
+
   <div class="kpis" id="kpis"></div>
 
   <div class="grid">
@@ -173,6 +226,14 @@ header{border-bottom:1px solid var(--hair);background:var(--surface);position:st
       </div>
     </div>
   </div>
+
+  <div class="card" id="evo-card">
+    <h2>Evolución: cuándo se detectaron las pendientes actuales</h2>
+    <p class="sub">Cuántas de las pendientes actuales se detectaron por primera vez en cada mes, por madurez.
+      Columna alta y reciente = mucha señal nueva; columnas antiguas = NVD lleva meses sin publicarlas.</p>
+    <div id="evo"><div class="empty">cargando…</div></div>
+  </div>
+
   <div class="foot" id="foot">Prototipo servido en <span class="mono">/next</span>. Consume los endpoints
     reales de la API; no altera el dashboard actual. El <b>Foreshock Score</b> y la madurez ya los calcula el
     servidor (<span class="mono">/api/pending/critical</span>).</div>
