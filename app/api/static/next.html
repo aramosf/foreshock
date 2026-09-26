@@ -129,6 +129,15 @@ header{border-bottom:1px solid var(--hair);background:var(--surface);position:st
 .race .ev .t .src{color:var(--accent);font-weight:600}
 .lead{background:var(--accent-wash);border:1px solid var(--m2);border-radius:8px;padding:10px 12px;font-size:13px;margin:6px 0 2px}
 .lead b{font-size:16px}
+/* desglose del score en el drawer */
+.sb-total{font-size:13px;color:var(--ink2);margin:2px 0 8px}
+.sb-total b{font-size:22px;color:var(--ink);font-weight:700}
+.sbrk{display:flex;flex-direction:column;gap:4px;margin:2px 0}
+.sb-row{display:flex;justify-content:space-between;gap:10px;font-size:12.5px;padding:6px 10px;
+  background:var(--surface2);border-radius:6px}
+.sb-row b{color:var(--accent);font-variant-numeric:tabular-nums;white-space:nowrap}
+.sb-row.off{opacity:.42} .sb-row.off b{color:var(--muted)}
+.sbnote{font-size:11.5px;color:var(--muted);margin:8px 0 0}
 .empty{color:var(--muted);font-size:13px;padding:20px 0;text-align:center}
 .foot{color:var(--muted);font-size:11.5px;margin-top:28px;border-top:1px solid var(--hair);padding-top:14px}
 
@@ -211,7 +220,10 @@ details.explain[open] summary::before{content:"▾"}
     <div>
       <div class="card">
         <h2>Ventaja sobre NVD</h2>
-        <p class="sub">Días de adelanto (<span class="mono">present</span>) sobre la publicación de NVD.</p>
+        <p class="sub">De las pendientes que <b>ya se publicaron</b> en NVD: con cuántos días de antelación las
+          vio Foreshock. Cada barra = <b>nº de vulnerabilidades</b> en ese rango de adelanto; la suma = total
+          medido (n). Últimos 12 meses.</p>
+        <div id="lag-head"></div>
         <div id="lag"><div class="empty">cargando…</div></div>
       </div>
       <div class="card">
@@ -245,6 +257,6 @@ details.explain[open] summary::before{content:"▾"}
   <div class="dc" id="dbody"></div>
 </aside>
 
-<script src="/static/next.js" defer></script>
+<script src="/static/next.js?v=7" defer></script>
 </body>
 </html>

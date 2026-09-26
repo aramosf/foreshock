@@ -267,8 +267,11 @@ def pending_status() -> FileResponse:
 @app.get("/next")
 def next_dashboard() -> FileResponse:
     """Prototipo del dashboard "inminente" (propuesta). Coexiste con `/`; consume
-    los mismos endpoints /api/* de solo lectura, no altera el dashboard actual."""
-    return FileResponse(os.path.join(_STATIC, "next.html"))
+    los mismos endpoints /api/* de solo lectura, no altera el dashboard actual.
+    no-store: es un prototipo en iteración; evita que el navegador sirva HTML viejo
+    (el JS se versiona con ?v= en el propio HTML)."""
+    return FileResponse(os.path.join(_STATIC, "next.html"),
+                        headers={"Cache-Control": "no-store"})
 
 
 app.mount("/static", StaticFiles(directory=_STATIC), name="static")

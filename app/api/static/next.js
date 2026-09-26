@@ -41,12 +41,44 @@ function dial(v) {
 }
 const MAT = { pre_cve: "pre-CVE", cve_prereserved: "prereservado", cve_reserved: "reservado" };
 
+// Desglose del Foreshock Score (misma fórmula que el servidor, _CRIT_SCORE_SQL):
+// KEV +50 · PoC +20 · gravedad = CVSS×4 (0–40) o severity_hint · tier 1→15…4→3.
+function sevPoints(row) {
+  if (row.cvss != null) return Math.round(row.cvss * 4 * 10) / 10;
+  const m = { critical: 40, high: 28, medium: 14, low: 4 };
+  return m[(row.severity_hint || "").toLowerCase()] || 0;
+}
+function tierPoints(t) { return ({ 1: 15, 2: 10, 3: 6, 4: 3 })[t] != null ? ({ 1: 15, 2: 10, 3: 6, 4: 3 })[t] : 1; }
+function scoreBreakdown(row) {
+  if (!row) return "";
+  const sev = sevPoints(row);
+  const parts = [
+    { l: "Explotación activa (KEV)", v: row.in_kev ? 50 : 0, on: !!row.in_kev },
+    { l: "PoC público", v: row.has_public_poc ? 20 : 0, on: !!row.has_public_poc },
+    { l: row.cvss != null ? ("Gravedad · CVSS " + esc(row.cvss) + " × 4") : ("Gravedad · " + esc(row.severity_hint || "sin dato")), v: sev, on: sev > 0 },
+    { l: "Prontitud de la fuente (tier " + esc(row.min_tier != null ? row.min_tier : "?") + ")", v: tierPoints(row.min_tier), on: true },
+  ];
+  const items = parts.map(p => `<div class="sb-row ${p.on ? "" : "off"}"><span>${p.l}</span><b>+${p.v}</b></div>`).join("");
+  return `<h3>De dónde sale el score</h3>
+    <div class="sb-total">Foreshock Score <b>${esc(row.score)}</b> / 100</div>
+    <div class="sbrk">${items}</div>
+    <p class="sbnote">Suma de: KEV (+50) · PoC público (+20) · gravedad CVSS×4 o severidad (0–40) ·
+      prontitud de la fuente por tier (1→15, 2→10, 3→6, 4→3). Más alto = más urgente actuar.</p>`;
+}
+
+function renderLag(el, headEl, lag) {
+  headEl.innerHTML = `<div class="lead" style="margin:0 0 12px">La mitad se detectaron
+    <b>≥ ${esc(lag.median)} día(s)</b> antes que NVD (mediana); el 10% más adelantado,
+    <b>≥ ${esc(lag.p90)} días</b>. Sobre <b>${(lag.count || 0).toLocaleString()}</b> vulnerabilidades medidas.</div>`;
+  barChart(el, (lag.bins || []).map(b => ({ label: b.label + " d", v: b.count })), {});
+}
+
 let IMM = [];
 function renderImm(filter) {
   const q = (filter || "").trim().toLowerCase();
   const rows = IMM.filter(r => !q || (r.product || "").toLowerCase().includes(q) || (r.cve_id || "").toLowerCase().includes(q));
   if (!rows.length) { $("#imm").innerHTML = '<div class="empty">sin resultados para «' + esc(q) + '»</div>'; return; }
-  $("#imm").innerHTML = rows.slice(0, 40).map(r => {
+  $("#imm").innerHTML = rows.slice(0, 60).map(r => {
     const isCvss10 = r.cvss != null && r.cvss >= 10;
     const chips = [];
     if (r.in_kev) chips.push('<span class="chip kev">KEV</span>');
@@ -131,6 +163,7 @@ function renderEvolution(el, series) {
 async function openDrawer(id) {
   $("#scrim").classList.add("on"); $("#drawer").classList.add("on"); $("#drawer").setAttribute("aria-hidden", "false");
   $("#dbody").innerHTML = '<div class="empty">cargando…</div>';
+  const row = IMM.find(x => String(x.id) === String(id));  // trae score + factores del listado
   try {
     const c = await jget("/api/candidate/" + encodeURIComponent(id));
     $("#dtitle").textContent = c.cve_id || ("cand " + String(id).slice(0, 8));
@@ -164,6 +197,7 @@ async function openDrawer(id) {
     $("#dbody").innerHTML = `
       ${leadHtml}
       <div class="chips" style="margin:8px 0">${chips.join("")}</div>
+      ${scoreBreakdown(row)}
       <h3>La carrera — señales por orden de llegada</h3>
       <div class="race">${race || '<div class="empty">sin señales</div>'}</div>
       <h3>Software afectado</h3><div class="kv">${aff}</div>
@@ -198,7 +232,7 @@ async function load() {
     { n: pending && pending.total != null ? pending.total.toLocaleString() : "—", c: "", l: "Pendientes de NVD", s: "pre-CVE " + (pending ? (pending.by_maturity || {}).pre_cve || 0 : "—") },
   ].map(k => `<div class="kpi"><div class="n ${k.c}">${k.n}</div><div class="l">${k.l}</div><div class="s">${k.s}</div></div>`).join("");
 
-  if (lag) barChart($("#lag"), (lag.bins || []).map(b => ({ label: b.label + " d", v: b.count })), {}); else $("#lag").innerHTML = fail();
+  if (lag) renderLag($("#lag"), $("#lag-head"), lag); else $("#lag").innerHTML = fail();
   if (stats) {
     const ss = (stats.sources || []).slice().sort((a, b) => parseFloat(b.avg_days) - parseFloat(a.avg_days)).slice(0, 12);
     barChart($("#srcs"), ss.map(s => ({ label: s.source, v: parseFloat(s.avg_days), color: "var(--m2)" })), { fmt: v => v.toFixed(1) + "d" });
