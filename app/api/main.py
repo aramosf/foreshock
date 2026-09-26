@@ -25,9 +25,11 @@ from sqlalchemy.orm import Session
 from app.api import admin
 from app.api import queries as q
 from app.core.db import get_session
+from app.core.logging import get_logger
 from app.core.operational import OPERATIONAL_MIN_DATE_ISO
 
 app = FastAPI(title="Foreshock API", version="0.1.0")
+log = get_logger(__name__)
 
 _STATIC = os.path.join(os.path.dirname(__file__), "static")
 
@@ -99,7 +101,11 @@ def api_pending(
         pattern="^(all|pre_cve|cve_prereserved|cve_reserved)$"),
     s: Session = Depends(db),
 ) -> dict:
-    return q.pending_top(s, kind, top, tech, period, granularity, maturity)
+    try:
+        return q.pending_top(s, kind, top, tech, period, granularity, maturity)
+    except ValueError as exc:
+        # period inválido/mismatch de granularidad -> 400 (no all-time silencioso).
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/lag/histogram")
@@ -126,7 +132,7 @@ def api_queue_age(
 
 @app.get("/api/emerging")
 def api_emerging(
-    since_days: int | None = None,
+    since_days: int | None = Query(None, ge=0, le=3660),
     source: str | None = None,
     tier: int | None = None,
     kind: str | None = None,
@@ -137,7 +143,7 @@ def api_emerging(
         pattern="^(pre_cve|cve_prereserved|cve_reserved)$"),
     period: str | None = None,
     granularity: str = Query("month", pattern="^(week|month|year)$"),
-    page: int = Query(1, ge=1),
+    page: int = Query(1, ge=1, le=100000),
     page_size: int = Query(50, ge=1, le=500),
     format: str = Query("json", pattern="^(json|csv)$"),
     include_historical: bool = Query(False),
@@ -146,13 +152,23 @@ def api_emerging(
     # CSV: exporta el conjunto filtrado en un lote grande (hasta 5000 filas) para
     # el tablero de triage; JSON mantiene la paginación normal.
     eff_size = 5000 if format == "csv" else page_size
-    data = q.emerging_list(s, since_days=since_days, source=source, tier=tier, kind=kind,
-                           in_kev=in_kev, tech=tech, pending_only=pending_only,
-                           maturity=maturity, period=period, granularity=granularity,
-                           page=page, page_size=eff_size,
-                           include_historical=include_historical)
+    try:
+        data = q.emerging_list(s, since_days=since_days, source=source, tier=tier, kind=kind,
+                               in_kev=in_kev, tech=tech, pending_only=pending_only,
+                               maturity=maturity, period=period, granularity=granularity,
+                               page=page, page_size=eff_size,
+                               include_historical=include_historical)
+    except ValueError as exc:
+        # period inválido/mismatch de granularidad -> 400 (no all-time silencioso).
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if format == "json":
         return data
+    # El CSV está topado a `eff_size` filas (una página grande). Si el conjunto
+    # filtrado lo excede, se trunca: avisar para que no sea silencioso (el
+    # consumidor puede paginar por JSON o afinar filtros).
+    if data["total"] > len(data["rows"]):
+        log.warning("csv_export_truncated", total=data["total"],
+                    returned=len(data["rows"]), cap=eff_size)
     cols = ["cve_id", "maturity", "in_kev", "cvss", "severity_hint", "vuln_type",
             "days_ahead_vs_nvd_present", "source_count", "mention_count",
             "sources", "first_seen_at", "last_seen_at"]

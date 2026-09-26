@@ -164,18 +164,63 @@ def get_provider(settings: Settings | None = None) -> LLMProvider:
             return MockProvider()
 
 
+def _first_json_object(text: str) -> str | None:
+    """Devuelve el PRIMER objeto ``{...}`` balanceado del texto (respetando
+    strings y escapes), o None si no hay ninguno.
+
+    Evita el problema del greedy ``\\{.*\\}`` que abarcaba de la primera ``{`` a
+    la última ``}`` y se rompía con varios objetos o prosa final.
+    """
+    start = text.find("{")
+    while start != -1:
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+            elif ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1]
+        start = text.find("{", start + 1)
+    return None
+
+
 def _extract_json(text: str) -> dict:
-    """Extrae el primer objeto JSON del texto (tolera envoltorios de markdown)."""
+    """Extrae el primer objeto JSON del texto (tolera envoltorios de markdown).
+
+    Estrategia por robustez: 1) json.loads directo (caso normal); 2) primer
+    objeto ``{...}`` balanceado (tolera prosa/objetos extra alrededor); 3) último
+    recurso greedy. Lo no parseable se propaga como json.JSONDecodeError.
+    """
     text = text.strip()
     if text.startswith("```"):
         text = re.sub(r"^```[a-z]*\n?|\n?```$", "", text).strip()
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        m = re.search(r"\{.*\}", text, re.DOTALL)
-        if m:
-            return json.loads(m.group(0))
-        raise
+        pass
+    candidate = _first_json_object(text)
+    if candidate is not None:
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if m:
+        return json.loads(m.group(0))
+    raise json.JSONDecodeError("no se encontró ningún objeto JSON", text, 0)
 
 
 async def enrich(cve_id: str | None, snippets: list[str],

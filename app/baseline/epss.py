@@ -17,6 +17,7 @@ from typing import Any
 from dateutil.parser import isoparse
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -96,11 +97,15 @@ def _ingest_payload(data: dict[str, Any]) -> tuple[str | None, int, int]:
                 if not record.get("cve_id"):
                     skipped += 1
                     continue
-                upsert_epss(session, record, model_version)
+                # Savepoint por fila (como nvd.py/cvelist.py): una fila mala
+                # (error de parseo O de BD: constraint, DataError...) se revierte
+                # sola y NO tumba el payload entero.
+                with session.begin_nested():
+                    upsert_epss(session, record, model_version)
                 ingested += 1
-            except (KeyError, ValueError, TypeError) as exc:
+            except (KeyError, ValueError, TypeError, SQLAlchemyError) as exc:
                 skipped += 1
-                log.warning("epss.parse_error", row=row.get("cve"), error=str(exc))
+                log.warning("epss.row_error", row=row.get("cve"), error=str(exc))
     return model_version, ingested, skipped
 
 
@@ -145,7 +150,9 @@ async def sync_epss(cve_ids: list[str] | None = None) -> dict[str, int]:
                 params: dict[str, Any] = {"order": "!epss", "limit": _TOP_LIMIT}
             else:
                 params = {"cve": ",".join(batch)}
-            resp = await get(client, settings.epss_api_base, params=params)
+            # respect_robots=False: API de primera parte de FIRST.org (no scraping).
+            resp = await get(client, settings.epss_api_base, params=params,
+                             respect_robots=False)
             data = resp.json()
             stats["requests"] += 1
             version, ingested, skipped = _ingest_payload(data)
@@ -174,7 +181,15 @@ async def sync_epss_full() -> dict[str, int]:
             return
         with session_scope() as session:
             for rec in rows:
-                upsert_epss(session, rec, model_version)
+                # Savepoint por fila: una fila mala (constraint/DataError) se
+                # descarta sin abortar el lote ni el sync de ~270k filas.
+                try:
+                    with session.begin_nested():
+                        upsert_epss(session, rec, model_version)
+                except SQLAlchemyError as exc:
+                    stats["ingested"] -= 1  # se contó al encolar; corregir
+                    stats["skipped"] += 1
+                    log.warning("epss.row_error", cve=rec.get("cve_id"), error=str(exc))
 
     with gzip.open(path, "rt", encoding="utf-8") as fh:
         for line in fh:
@@ -196,6 +211,15 @@ async def sync_epss_full() -> dict[str, int]:
                 continue
             if not header_seen:      # primera línea no-comentario = cabecera cve,epss,percentile
                 header_seen = True
+                # scored_date forma parte de la PK (cve_id, scored_date): si no se
+                # pudo determinar de la cabecera, ABORTAR. Escribir el snapshot con
+                # datetime.now() lo mis-fecharía y duplicaría todo el volcado.
+                if scored_date is None:
+                    raise RuntimeError(
+                        "EPSS full sync abortado: no se pudo determinar score_date "
+                        "de la cabecera del volcado; no se escribe snapshot para no "
+                        "corromper la PK (cve_id, scored_date)."
+                    )
                 continue
             cols = line.split(",")
             if len(cols) < 3:
@@ -206,7 +230,7 @@ async def sync_epss_full() -> dict[str, int]:
                 batch.append({
                     "cve_id": cols[0], "score": float(cols[1]),
                     "percentile": float(cols[2]),
-                    "scored_date": scored_date or datetime.now(UTC).date(),
+                    "scored_date": scored_date,  # garantizado no-None (abortamos si no)
                 })
                 stats["ingested"] += 1
             except (ValueError, IndexError):

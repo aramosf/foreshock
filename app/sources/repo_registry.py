@@ -30,6 +30,7 @@ from app.core.db import session_scope
 from app.core.logging import get_logger
 from app.core.models import Candidate, CveReference, GithubRepo
 from app.core.models import Mention as MentionRow
+from app.sources.http import get as http_get
 
 log = get_logger(__name__)
 
@@ -162,15 +163,20 @@ async def harvest_top_n(client: httpx.AsyncClient, settings: Settings) -> dict[s
         q = f"stars:>={floor}" if upper is None else f"stars:{floor}..{upper}"
         page_min: int | None = None
         for page in range(1, 11):
-            resp = await client.get(
-                f"{base}/search/repositories", headers=_headers(settings),
-                params={"q": q, "sort": "stars", "order": "desc", "per_page": 100, "page": page},
-            )
-            if resp.status_code != 200:
-                # Típicamente 403 por rate limit de la Search API sin token:
-                # visible en logs (antes se cortaba en silencio con menos repos).
-                log.warning("registry.top_n_http_error", status=resp.status_code,
-                            query=q, page=page, body=resp.text[:200])
+            try:
+                # http.get: retries con backoff para 429/5xx/errores de transporte
+                # (un 5xx transitorio ya no aborta la cosecha). Solo devuelve 2xx;
+                # un 403 (rate limit de la Search API sin token) llega como
+                # excepción -> se loguea y se corta el bucle sin reventar el resto.
+                resp = await http_get(
+                    client, f"{base}/search/repositories", respect_robots=False,
+                    headers=_headers(settings),
+                    params={"q": q, "sort": "stars", "order": "desc",
+                            "per_page": 100, "page": page},
+                )
+            except httpx.HTTPError as exc:
+                log.warning("registry.top_n_http_error", error=str(exc),
+                            query=q, page=page)
                 break
             items = resp.json().get("items", [])
             if not items:
@@ -225,8 +231,9 @@ async def harvest_pypi_downloads(client: httpx.AsyncClient, settings: Settings) 
     top_n = settings.pypi_downloads_top_n
     if top_n <= 0:
         return {"downloads": 0}
-    resp = await client.get(_PYPI_TOP, follow_redirects=True, timeout=60)
-    resp.raise_for_status()
+    # http.get: retries con backoff (429/5xx/transporte) + raise_for_status.
+    resp = await http_get(client, _PYPI_TOP, respect_robots=False,
+                          follow_redirects=True, timeout=60)
     rows = (resp.json().get("rows") or [])[:top_n]
     repos: dict[str, dict] = {}
     for row in rows:
@@ -234,9 +241,10 @@ async def harvest_pypi_downloads(client: httpx.AsyncClient, settings: Settings) 
         if not pkg:
             continue
         try:
-            r = await client.get(f"https://pypi.org/pypi/{pkg}/json", timeout=30)
-            if r.status_code != 200:
-                continue
+            # Mismo wrapper con retries; un 404 (paquete sin ficha JSON) llega como
+            # excepción y lo absorbe el except de abajo (un paquete no tumba la cosecha).
+            r = await http_get(client, f"https://pypi.org/pypi/{pkg}/json",
+                               respect_robots=False, timeout=30)
             urls = (r.json().get("info") or {}).get("project_urls") or {}
             for val in urls.values():
                 repo = _extract_repo(val)
@@ -340,10 +348,15 @@ def get_watermark(session, full_name: str) -> str | None:
 
 
 def update_scan(session, full_name: str, watermark: str | None) -> None:
+    """Avanza last_scanned_at (siempre) y watermark (solo si hay uno más nuevo).
+    El watermark SOLO sube (max ISO, igual que update_adv_scan): metasploit y
+    nuclei escanean con ventanas distintas y un lote antiguo NO debe retroceder el
+    cursor de commits (re-emitiría/re-escanearía commits ya vistos)."""
     from datetime import UTC, datetime
-    values = {"last_scanned_at": datetime.now(UTC)}
+    values: dict = {"last_scanned_at": datetime.now(UTC)}
     if watermark:
-        values["watermark"] = watermark
+        values["watermark"] = func.greatest(
+            func.coalesce(GithubRepo.__table__.c.watermark, watermark), watermark)
     session.execute(
         GithubRepo.__table__.update()
         .where(GithubRepo.__table__.c.full_name == full_name)

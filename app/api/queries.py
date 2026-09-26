@@ -169,7 +169,12 @@ def _like_pattern(term: str, *, contains: bool = True) -> str:
 
 
 def _period_bounds(period: str, granularity: str) -> tuple[_dt.datetime, _dt.datetime] | None:
-    """Convierte 'YYYY-Www'/'YYYY-MM'/'YYYY' en [inicio, fin) para filtrar."""
+    """Convierte 'YYYY-Www'/'YYYY-MM'/'YYYY' en [inicio, fin) para filtrar.
+
+    Devuelve None si `period` no parsea o no casa con `granularity`. OJO: los
+    llamadores deben distinguir "sin period" (all-time) de "period presente pero
+    inválido" (-> ValueError -> 400 en la ruta); nunca tratar None como "sin
+    filtro" o se colaría todo el histórico en silencio."""
     try:
         if granularity == "week":
             # 'YYYY-Www' (semana ISO) -> [lunes ISO, lunes+7d).
@@ -297,11 +302,28 @@ def pending_top(session: Session, kind: str = "product", top: int = 20,
             raise ValueError(f"maturity inválida: {maturity!r}")
         extra += " AND " + MATURITY_SQL[maturity]
     if period:
+        # period presente pero inválido/mismatch de granularidad -> ValueError
+        # (la ruta lo mapea a 400); NO caer en silencio a "todo el histórico".
         bounds = _period_bounds(period, granularity)
-        if bounds:
-            # += : un period NO debe descartar el filtro de madurez ya acumulado
-            extra += " AND c.first_seen_at >= :pstart AND c.first_seen_at < :pend"
-            params["pstart"], params["pend"] = bounds
+        if bounds is None:
+            raise ValueError(
+                f"period {period!r} no válido para granularidad {granularity!r}"
+            )
+        # += : un period NO debe descartar el filtro de madurez ya acumulado
+        extra += " AND c.first_seen_at >= :pstart AND c.first_seen_at < :pend"
+        params["pstart"], params["pend"] = bounds
+
+    # CONSISTENCIA cabecera/ranking (fix): `tech` es un filtro genuino del universo
+    # pending, así que debe reflejarse también en total/by_kind/by_maturity y no
+    # solo en el ranking `top` (antes GET ?tech=foo daba totales globales con un
+    # top de foo). Se añade al CTE `pend`, que comparten ambas queries. `kind` se
+    # mantiene SOLO en el ranking: by_kind es una DISTRIBUCIÓN por tipo (kind por
+    # defecto 'product') y filtrarla por kind la reduciría a un único bucket.
+    if tech:
+        tech_frag, tech_params = _pending_filter(None, tech)
+        if tech_frag:
+            extra += " AND " + tech_frag
+            params.update(tech_params)
 
     # RENDIMIENTO: antes se evaluaba PENDING_WHERE_SQL 6 veces (total + by_kind +
     # 3× madurez + top), y cada una fuerza el escaneo caro de affected_products.
@@ -314,6 +336,9 @@ def pending_top(session: Session, kind: str = "product", top: int = 20,
         )
         SELECT 'total' AS dim, '' AS key, count(*) AS n FROM pend
         UNION ALL
+        -- OJO: un candidate con affected_products de VARIOS kind se cuenta en
+        -- cada bucket (count DISTINCT p.id agrupado por kind), así que los
+        -- buckets SE SOLAPAN por diseño y sum(by_kind) puede ser > `total`.
         SELECT 'kind', COALESCE(a.kind, ''), count(DISTINCT p.id)
           FROM pend p JOIN affected_products a ON a.candidate_id = p.id
           GROUP BY a.kind
@@ -555,16 +580,24 @@ def emerging_list(session: Session, *, since_days: int | None = None, source: st
         # 'cve_reserved'). Por eso el filtro implica pending, igual que el CASE
         # de `maturity` y que /api/pending.
         where.append(PENDING_WHERE_SQL + " AND " + MATURITY_SQL[maturity])
-    if since_days:
+    if since_days is not None:
+        # is not None: since_days=0 (solo "hoy") es un filtro válido, no "sin
+        # filtro" — con `if since_days:` se descartaba en silencio.
         where.append("c.last_seen_at >= :since_cutoff")
         params["since_cutoff"] = _dt.datetime.now(_dt.UTC) - _dt.timedelta(days=since_days)
     if period:
+        # period presente pero inválido/mismatch de granularidad -> ValueError
+        # (la ruta lo mapea a 400); NO caer en silencio a "todo el histórico".
         bounds = _period_bounds(period, granularity)
-        if bounds:
-            where.append("c.first_seen_at >= :pstart AND c.first_seen_at < :pend")
-            params["pstart"], params["pend"] = bounds
-    if in_kev:
-        where.append("c.in_kev IS TRUE")
+        if bounds is None:
+            raise ValueError(
+                f"period {period!r} no válido para granularidad {granularity!r}"
+            )
+        where.append("c.first_seen_at >= :pstart AND c.first_seen_at < :pend")
+        params["pstart"], params["pend"] = bounds
+    if in_kev is not None:
+        # is not None: in_kev=false debe poder filtrar los que NO están en KEV.
+        where.append("c.in_kev IS TRUE" if in_kev else "c.in_kev IS NOT TRUE")
     if pending_only:
         # Definición canónica completa: además de la fecha, excluye rejected,
         # withdrawn y tombstones exactamente igual que el resto del dashboard.
@@ -636,10 +669,16 @@ def candidate_detail(
     affected = session.execute(text(
         "SELECT vendor, product, ecosystem, purl, kind FROM affected_products "
         "WHERE candidate_id=:id"), {"id": cid}).mappings().all()
+    # LIMIT defensivo: un candidate patológico podría acumular una timeline
+    # enorme. Se conservan las 500 menciones MÁS RECIENTES (ORDER BY DESC LIMIT)
+    # pero se devuelven en orden ASCENDENTE, que es lo que espera la ficha del
+    # dashboard (timeline[0] = primera detección, para calcular "días en cola").
     timeline = session.execute(text(
-        "SELECT m.seen_at, s.name AS source, m.title, m.url "
-        "FROM mentions m JOIN sources s ON s.id=m.source_id "
-        "WHERE m.candidate_id=:id ORDER BY m.seen_at"), {"id": cid}).mappings().all()
+        "SELECT seen_at, source, title, url FROM ("
+        "  SELECT m.seen_at, s.name AS source, m.title, m.url "
+        "  FROM mentions m JOIN sources s ON s.id=m.source_id "
+        "  WHERE m.candidate_id=:id ORDER BY m.seen_at DESC LIMIT 500"
+        ") t ORDER BY seen_at"), {"id": cid}).mappings().all()
     epss = None
     if c["cve_id"]:
         epss = session.execute(text(
@@ -676,33 +715,49 @@ def software_detail(session: Session, ecosystem: str, name: str,
     operational_scope = (
         "" if include_historical else " AND " + operational_candidate_sql("c")
     )
-    cands = session.execute(text(f"""
-        SELECT DISTINCT c.id, c.cve_id, c.first_seen_at, c.in_kev,
-               {PENDING_EXPR_SQL} AS pending
-        FROM candidates c JOIN affected_products a ON a.candidate_id=c.id
-        WHERE c.merged_into IS NULL AND a.product ILIKE :name ESCAPE '\\'
-          AND ( :eco='' OR a.ecosystem ILIKE :eco ESCAPE '\\' )
-          AND c.first_seen_at >= date_trunc('{unit}', now()) - make_interval(months => :months)
-          {operational_scope}
-        ORDER BY c.first_seen_at DESC NULLS LAST
+    # CTE que deduplica candidates (un candidate casa por VARIOS affected_products)
+    # y adjunta el flag `pending` a nivel de candidate. Lo comparten la query de
+    # agregados y la de detalle.
+    cand_cte = f"""
+        WITH cand AS (
+          SELECT DISTINCT c.id, c.cve_id, c.first_seen_at, c.in_kev,
+                 {PENDING_EXPR_SQL} AS pending
+          FROM candidates c JOIN affected_products a ON a.candidate_id=c.id
+          WHERE c.merged_into IS NULL AND a.product ILIKE :name ESCAPE '\\'
+            AND ( :eco='' OR a.ecosystem ILIKE :eco ESCAPE '\\' )
+            AND c.first_seen_at >= date_trunc('{unit}', now()) - make_interval(months => :months)
+            {operational_scope}
+        )
+    """
+    # ACOTADO: antes se traían TODAS las filas y se agregaban en Python (un
+    # producto popular escaneaba miles de filas evaluando PENDING_EXPR_SQL por
+    # cada una). Ahora la serie y los totales salen de agregados SQL, y solo se
+    # materializan las <=200 filas de detalle que se devuelven. `first_seen_at`
+    # nunca es NULL aquí (lo garantiza el filtro >=), así que total == suma de la
+    # serie: se computa sumando en vez de con una segunda pasada al CTE.
+    series_rows = session.execute(text(cand_cte + f"""
+        SELECT to_char(first_seen_at, '{fmt}') AS period,
+               count(*) AS identified,
+               count(*) FILTER (WHERE pending) AS pending
+        FROM cand GROUP BY 1 ORDER BY 1
     """), params).mappings().all()
-    series: dict[str, dict[str, int]] = {}
-    for r in cands:
-        if r["first_seen_at"] is None:
-            continue
-        period = r["first_seen_at"].strftime("%Y-%m" if granularity == "month" else "%Y")
-        s = series.setdefault(period, {"period": period, "pending": 0, "identified": 0})
-        s["identified"] += 1
-        if r["pending"]:
-            s["pending"] += 1
+    total = sum(int(r["identified"]) for r in series_rows)
+    pending = sum(int(r["pending"]) for r in series_rows)
+
+    params["detail_limit"] = 200
+    cands = session.execute(text(cand_cte + """
+        SELECT id, cve_id, in_kev, pending, first_seen_at
+        FROM cand ORDER BY first_seen_at DESC NULLS LAST LIMIT :detail_limit
+    """), params).mappings().all()
     return {
         "ecosystem": ecosystem, "product": name,
-        "total": len(cands),
-        "pending": sum(1 for r in cands if r["pending"]),
-        "series": [series[p] for p in sorted(series)],
+        "total": total,
+        "pending": pending,
+        "series": [{"period": r["period"], "pending": int(r["pending"]),
+                    "identified": int(r["identified"])} for r in series_rows],
         "candidates": [{"id": str(r["id"]), "cve_id": r["cve_id"],
                         "pending": r["pending"], "in_kev": r["in_kev"],
-                        "first_seen": r["first_seen_at"]} for r in cands[:200]],
+                        "first_seen": r["first_seen_at"]} for r in cands],
     }
 
 
@@ -839,6 +894,9 @@ def pending_breakdown(session: Session) -> dict[str, Any]:
         WITH pend AS MATERIALIZED (
           SELECT c.id, c.cve_id FROM candidates c WHERE {PENDING_WHERE_SQL}
         )
+        -- OJO: un candidate con productos en VARIOS ecosistemas se cuenta en cada
+        -- uno (count DISTINCT p.id agrupado por ecosystem); los buckets SE SOLAPAN
+        -- por diseño, así que sum(by_ecosystem) puede ser > total del pending.
         SELECT 'eco' AS dim, COALESCE(a.ecosystem, '(sin ecosistema)') AS key,
                count(DISTINCT p.id) AS n
         FROM pend p JOIN affected_products a ON a.candidate_id=p.id

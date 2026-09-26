@@ -68,7 +68,8 @@ def _container_source(container: dict[str, Any]) -> str:
     return meta.get("shortName") or meta.get("orgId") or "unknown"
 
 
-def _parse_metrics(container: dict[str, Any], source: str, out: Enrichment) -> None:
+def _parse_metrics(container: dict[str, Any], source: str, out: Enrichment,
+                   from_cna: bool = False) -> None:
     for metric in container.get("metrics") or []:
         if not isinstance(metric, dict):
             continue
@@ -95,6 +96,11 @@ def _parse_metrics(container: dict[str, Any], source: str, out: Enrichment) -> N
             out.cvss.append({
                 "version": block.get("version") or version,
                 "source": source,
+                # from_cna: la métrica viene del contenedor CNA (propietario) y
+                # no de un ADP. Se decide por el TIPO de contenedor, no por el
+                # shortName (que en ADP no siempre es "CISA-ADP"). Se usa solo
+                # para elegir la primaria; no se persiste.
+                "from_cna": from_cna,
                 "type": metric.get("type"),
                 "vector": block.get("vectorString"),
                 "base_score": block.get("baseScore"),
@@ -160,11 +166,20 @@ def _parse_references(container: dict[str, Any], source: str, out: Enrichment,
 
 
 def _pick_primary_cvss(out: Enrichment) -> None:
-    """Elige la métrica primaria: CNA-Primary > CNA > ADP; a igualdad, mayor versión."""
+    """Elige la métrica primaria: MAYOR versión CVSS primero; a igualdad de
+    versión, contenedor CNA (propietario) sobre ADP y, a igualdad, tipo primary.
+
+    El orden antiguo (fuente > versión) hacía que un CVSS v2.0 del CNA ganara a
+    un v4.0 de CISA-ADP: v4.0 es estrictamente más informativo y no debe perder
+    frente a v2.0. Por eso la versión pasa a dominar el ranking. La detección de
+    ADP es por TIPO de contenedor (``from_cna``), tolerante a shortNames de ADP
+    distintos de "CISA-ADP".
+    """
     def rank(c: dict[str, Any]) -> tuple[int, int, int]:
-        is_cna = 0 if c["source"] in ("CVE", "cisa-adp") else 1  # CNA propietaria gana
+        version = _VERSION_RANK.get(c["version"], 0)
+        from_cna = 1 if c.get("from_cna") else 0     # CNA propietaria > ADP
         is_primary = 1 if (c.get("type") or "").lower() == "primary" else 0
-        return (is_cna, is_primary, _VERSION_RANK.get(c["version"], 0))
+        return (version, from_cna, is_primary)
 
     scored = [c for c in out.cvss if c.get("base_score") is not None]
     if not scored:
@@ -189,7 +204,7 @@ def parse_record(cve_id: str, raw: dict[str, Any] | None) -> Enrichment:
     # CNA primero (fuente propietaria), luego ADP (CISA enriquece).
     if cna:
         src = _container_source(cna)
-        _parse_metrics(cna, src, out)
+        _parse_metrics(cna, src, out, from_cna=True)
         _parse_problem_types(cna, src, out)
         _parse_affected(cna, src, out)
         _parse_references(cna, src, out, seen_ref)
@@ -315,14 +330,21 @@ def enrich_all(batch_size: int = 2000, full: bool = False) -> dict[str, int]:
                 stmt = stmt.where(or_(
                     col.enriched_at.is_(None),
                     col.cvelist_updated_at > col.enriched_at,
-                    # Auto-reparación: sellado sin haber extraído nada pese a
-                    # tener JSON (filas dañadas por versiones anteriores o por
-                    # una ruta futura imprevista). Barato: no destoasta raw_json.
+                    # Auto-reparación ACOTADA: sellado pese a tener JSON pero sin
+                    # haber extraído NADA (firma de un parser antiguo defectuoso:
+                    # ni descripción, ni CVSS, ni CWE). NO reseleccionamos filas
+                    # ya enriquecidas que solo carecen de descripción inglesa
+                    # (CNA no anglófono) pero sí tienen CVSS/CWE: esas están
+                    # hechas y reprocesarlas en cada pasada era amplificación de
+                    # escritura permanente. Barato: no destoasta raw_json. Una
+                    # reparación tras un fix real del parser se hace con full=True.
                     and_(
                         col.raw_json.isnot(None),
                         col.state == "PUBLISHED",
                         col.description_en.is_(None),
                         col.enriched_at.isnot(None),
+                        col.primary_cvss_score.is_(None),
+                        col.primary_cwe.is_(None),
                     ),
                 ))
             rows = session.execute(stmt).all()

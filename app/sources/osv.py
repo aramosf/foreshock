@@ -163,9 +163,13 @@ class OsvSource(BaseSource):
         cap: int,
     ) -> AsyncIterator[list[FetchedMention]]:
         # Descarga cacheada a disco (reusa el zip si es reciente; lo conserva para
-        # recreaciones). ZipFile lee cada entrada de forma perezosa. Con cap se
-        # mantiene un heap ACOTADO de los N más recientes; sin cap se emiten
-        # lotes de _BATCH_SIZE en lugar de acumular todo el ecosistema.
+        # recreaciones). El PARSEO del zip (zf.read + json.loads de TODO el volcado
+        # del ecosistema) es CPU/IO-bound y SÍNCRONO: se ejecuta en un hilo
+        # (asyncio.to_thread) para NO bloquear el event loop -bloquearlo colapsa la
+        # concurrencia global y mata el heartbeat/SIGTERM del worker-. Con cap se
+        # mantiene un heap ACOTADO de los N más recientes (memoria acotada); sin cap
+        # se acumula el ecosistema completo (opt-in "histórico"). Los lotes se emiten
+        # DESPUÉS, ya en el loop.
         if not hasattr(self, "_pending_cursors"):
             self._pending_cursors = {}
         cursor_id = f"source:osv:{eco}"
@@ -184,11 +188,52 @@ class OsvSource(BaseSource):
 
         cursor = parse_advisory_date(cursor_value)
         incremental_cutoff = cursor - _CURSOR_OVERLAP if cursor else None
+        ordered, max_modified, scanned, skipped_cursor, sequence = (
+            await asyncio.to_thread(
+                self._parse_eco_zip, zip_path, cursor, incremental_cutoff, cutoff, cap
+            )
+        )
+        emitted = 0
+        for pos in range(0, len(ordered), _BATCH_SIZE):
+            current = ordered[pos:pos + _BATCH_SIZE]
+            emitted += len(current)
+            yield current
+
+        if cap > 0 and sequence > cap:
+            log.warning("osv.eco_capped", ecosystem=eco, cap=cap,
+                        discarded=sequence - cap)
+        if max_modified is not None:
+            self._pending_cursors[cursor_id] = max_modified.isoformat()
+        self._pending_cursors[archive_cursor_id] = archive_signature
+        log.info(
+            "osv.eco_done",
+            ecosystem=eco,
+            scanned=scanned,
+            skipped_cursor=skipped_cursor,
+            mentions=emitted,
+            incremental=cursor is not None,
+        )
+
+    def _parse_eco_zip(
+        self,
+        zip_path: str,
+        cursor: datetime | None,
+        incremental_cutoff: datetime | None,
+        cutoff: datetime | None,
+        cap: int,
+    ) -> tuple[list[FetchedMention], datetime | None, int, int, int]:
+        """Parseo BLOQUEANTE del zip de un ecosistema; corre en un hilo aparte.
+
+        Recorre las entradas .json (zf.read + json.loads), filtra por cursor/
+        ventana y construye las FetchedMention. Con cap>0 mantiene un heap ACOTADO
+        de los `cap` más recientes (por `modified`); sin cap las acumula todas.
+        Devuelve (menciones ordenadas por recencia, max_modified, scanned,
+        skipped_cursor, sequence)."""
         selected: list[tuple[datetime, int, FetchedMention]] = []
-        batch: list[FetchedMention] = []
+        collected: list[FetchedMention] = []
         epoch = datetime.min.replace(tzinfo=UTC)  # sin fecha -> al final
         max_modified = cursor
-        emitted = scanned = skipped_cursor = 0
+        scanned = skipped_cursor = 0
         sequence = 0
         with zipfile.ZipFile(zip_path) as zf:
             for info in zf.infolist():
@@ -222,35 +267,12 @@ class OsvSource(BaseSource):
                         else:
                             heapq.heappushpop(selected, item)
                     else:
-                        batch.append(m)
-                        if len(batch) >= _BATCH_SIZE:
-                            emitted += len(batch)
-                            yield batch
-                            batch = []
+                        collected.append(m)
         if cap > 0:
             ordered = [item[2] for item in sorted(selected, reverse=True)]
-            for pos in range(0, len(ordered), _BATCH_SIZE):
-                current = ordered[pos:pos + _BATCH_SIZE]
-                emitted += len(current)
-                yield current
-        elif batch:
-            emitted += len(batch)
-            yield batch
-
-        if cap > 0 and sequence > cap:
-            log.warning("osv.eco_capped", ecosystem=eco, cap=cap,
-                        discarded=sequence - cap)
-        if max_modified is not None:
-            self._pending_cursors[cursor_id] = max_modified.isoformat()
-        self._pending_cursors[archive_cursor_id] = archive_signature
-        log.info(
-            "osv.eco_done",
-            ecosystem=eco,
-            scanned=scanned,
-            skipped_cursor=skipped_cursor,
-            mentions=emitted,
-            incremental=cursor is not None,
-        )
+        else:
+            ordered = collected
+        return ordered, max_modified, scanned, skipped_cursor, sequence
 
     def finalize(self) -> None:
         """Confirma watermarks solo después de persistir todos los lotes."""

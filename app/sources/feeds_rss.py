@@ -13,6 +13,7 @@ del resto del pipeline:
 
 from __future__ import annotations
 
+import asyncio
 import calendar
 from datetime import UTC, datetime
 
@@ -100,7 +101,9 @@ async def _fetch_feed(ctx: FetchContext, url: str, browser_ua: bool = False,
     # robots.txt aplica a crawlers, no a esto (ver docstring de get()).
     headers = {"User-Agent": _BROWSER_UA} if browser_ua else None
     resp = await get(ctx.http, url, respect_robots=False, headers=headers, timeout=30.0)
-    parsed = feedparser.parse(resp.content)
+    # feedparser.parse es síncrono (parseo XML del feed completo): a un hilo para
+    # no bloquear el event loop del worker.
+    parsed = await asyncio.to_thread(feedparser.parse, resp.content)
     out: list[FetchedMention] = []
     for entry in parsed.entries:
         out.extend(_mentions_for_entry(

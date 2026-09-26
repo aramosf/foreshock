@@ -6,6 +6,7 @@ La API permanece de solo lectura. Los workers publican un heartbeat mínimo en
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -39,6 +40,27 @@ _KEY_TABLES = (
 
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
+
+
+# Identificador inicial tipo clase de excepción ("socket.gaierror",
+# "TimeoutError", "HTTPSConnectionPool"), tope 40 chars: la clase Regex se corta
+# en el primer separador (':', '(', espacio, '/', '\\'...), así que NUNCA arrastra
+# rutas, hosts, URLs ni texto de traza detrás del token inicial.
+_ERR_CLASS_RE = re.compile(r"[A-Za-z_][\w.]{0,39}")
+
+
+def _coarse_error(message: str | None) -> str | None:
+    """Etiqueta GRUESA del último error de un fetcher: solo la clase/primer token.
+    La API es no autenticada (fix info-disclosure), así que NO se devuelve la
+    cadena cruda de ``sources.last_error`` (evita filtrar rutas internas, hosts,
+    URLs o texto de stack)."""
+    if not message:
+        return None
+    first = message.strip().splitlines()[0].strip()
+    m = _ERR_CLASS_RE.match(first)
+    # Mensajes que no empiezan por identificador (números, corchetes, rutas...):
+    # etiqueta genérica para no filtrar texto arbitrario.
+    return m.group(0) if m else "error"
 
 
 def _age_seconds(value: datetime | None, now: datetime) -> int | None:
@@ -114,6 +136,9 @@ def _source_rows(
     for db_row in db_rows:
         row = dict(db_row)
         name = row["name"]
+        # No exponer la cadena cruda del error (rutas/trazas): se sustituye por un
+        # booleano + una etiqueta gruesa más abajo.
+        raw_error = row.pop("last_error", None)
         success_age = _age_seconds(row["last_success_at"], now)
         error_is_current = (
             row["last_error_at"] is not None
@@ -143,6 +168,9 @@ def _source_rows(
             "last_error_at": _iso(row["last_error_at"]),
             "success_age_seconds": success_age,
             "stale_after_seconds": stale_after,
+            # Solo booleano + etiqueta gruesa del error, no la cadena cruda.
+            "has_error": bool(raw_error),
+            "error_class": _coarse_error(raw_error),
         })
         rows.append(row)
         summary["total"] += 1
@@ -184,7 +212,10 @@ def _database_status(session: Session) -> dict[str, Any]:
     return {
         **dict(activity),
         "size_bytes": int(database_size),
-        "migration": migration,
+        # No exponer la revisión Alembic EXACTA en la API no autenticada (fix
+        # info-disclosure): se reduce a un booleano "hay migraciones aplicadas".
+        # Se conserva la clave `migration` (ahora bool) para no romper consumidores.
+        "migration": migration is not None,
     }
 
 

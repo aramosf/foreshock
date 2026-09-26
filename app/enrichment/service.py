@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from json import JSONDecodeError
 
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
@@ -151,7 +153,26 @@ async def enrich_candidate(session: Session, candidate_id: uuid.UUID) -> bool:
     #    CVSS autoritativos (independientes del LLM) y salimos sin tocar el resto.
     try:
         out, method = await enrich(cve_id, snippets)
-    except Exception as exc:  # noqa: BLE001 - el fallo LLM no invalida lo autoritativo
+    except (ValidationError, JSONDecodeError) as exc:
+        # Salida del LLM malformada / no parseable: es una condición PERSISTENTE
+        # (los mismos snippets producen la misma salida mala). Persistimos los
+        # CVSS autoritativos y SELLAMOS el intento (enrichment_updated_at), para
+        # que should_reenrich no reencole este candidate en cada ciclo: si no,
+        # al quedar enrichment_updated_at=None se reintentaba sin fin (coste
+        # infinito, nunca enriquecido). Con el sello, el reintento se espacia a
+        # reenrich_hours (backoff). El método/confianza de fallo solo se fijan si
+        # no había un enriquecimiento previo bueno (no degradar datos buenos).
+        log.warning("enrich.llm_malformed", candidate=str(candidate_id), error=str(exc))
+        _persist_authoritative(session, candidate, blob)
+        if candidate.enrichment_method is None:
+            candidate.enrichment_method = "llm-failed"
+            candidate.enrichment_confidence = 0.0
+        candidate.enrichment_updated_at = datetime.now(UTC)
+        session.flush()
+        return False
+    except Exception as exc:  # noqa: BLE001 - fallo transitorio (red/timeout): reintentar
+        # A diferencia de la salida malformada, un fallo de red/timeout SÍ debe
+        # reintentarse en el siguiente ciclo: no sellamos enrichment_updated_at.
         log.warning("enrich.llm_error", candidate=str(candidate_id), error=str(exc))
         _persist_authoritative(session, candidate, blob)
         session.flush()

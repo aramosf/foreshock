@@ -8,15 +8,18 @@ Diseño clave (ver docs/ENRICHMENT.md):
   - Toda salida lleva `confidence` explícito.
 
 Robustez frente a LLMs reales: `extra="ignore"` (una clave inesperada no debe
-abortar el enriquecimiento entero) y los Literal se normalizan a minúsculas
-antes de validar (un "Network" capitalizado es salida habitual de un modelo).
+abortar el enriquecimiento entero), los Literal se normalizan a minúsculas y los
+valores fuera de vocabulario se descartan a None (un "Network" capitalizado es
+salida habitual de un modelo; un "web" inventado no debe reventar la validación),
+y los productos afectados malformados se descartan individualmente.
 """
 
 from __future__ import annotations
 
 from typing import Literal
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 AttackVector = Literal["network", "adjacent", "local", "physical"]
 
@@ -25,12 +28,36 @@ _LITERAL_FIELDS = (
     "user_interaction", "scope", "confidentiality", "integrity", "availability",
 )
 
+# Vocabulario válido por campo Literal: un valor fuera de vocabulario del LLM
+# NO debe invalidar todo el objeto -> se descarta (-> None) en vez de reventar.
+_ALLOWED: dict[str, set[str]] = {
+    "attack_vector": {"network", "adjacent", "local", "physical"},
+    "attack_complexity": {"low", "high"},
+    "privileges_required": {"none", "low", "high"},
+    "user_interaction": {"none", "required"},
+    "scope": {"unchanged", "changed"},
+    "confidentiality": {"none", "low", "high"},
+    "integrity": {"none", "low", "high"},
+    "availability": {"none", "low", "high"},
+}
 
-def _lower(value: object) -> object:
-    """Normaliza a minúsculas los valores de campos Literal ('' -> None)."""
+# Tope de poc_urls que persistimos: el texto de las fuentes no es de fiar y no
+# queremos acumular listas arbitrariamente largas de URLs.
+_MAX_POC_URLS = 20
+
+
+def _lower(value: object, info: ValidationInfo) -> object:
+    """Normaliza a minúsculas los valores de campos Literal ('' -> None) y
+    DESCARTA (-> None) los valores fuera de vocabulario, para que un Literal
+    inesperado del LLM no aborte la validación del objeto entero."""
     if isinstance(value, str):
         v = value.strip().lower()
-        return v or None
+        if not v:
+            return None
+        allowed = _ALLOWED.get(info.field_name)
+        if allowed is not None and v not in allowed:
+            return None
+        return v
     return value
 
 
@@ -78,3 +105,42 @@ class EnrichmentOut(BaseModel):
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
     _norm = field_validator("attack_vector", mode="before")(_lower)
+
+    @field_validator("affected_products", mode="before")
+    @classmethod
+    def _drop_bad_products(cls, value: object) -> object:
+        """Valida cada producto por separado y DESCARTA los malformados (p.ej.
+        sin `product`), en lugar de dejar que una entrada mala invalide toda la
+        salida del LLM (que provocaba un bucle de re-enriquecimiento infinito)."""
+        if not isinstance(value, list):
+            return value
+        out: list[AffectedProductOut] = []
+        for item in value:
+            try:
+                out.append(AffectedProductOut.model_validate(item))
+            except Exception:  # noqa: BLE001 - entrada malformada: se descarta
+                continue
+        return out
+
+    @field_validator("poc_urls", mode="before")
+    @classmethod
+    def _clean_poc_urls(cls, value: object) -> list[str]:
+        """Sanea las poc_urls (endurecimiento anti-inyección): solo http(s) bien
+        formadas, deduplicadas y acotadas. El texto de las fuentes NO es de fiar,
+        así que no persistimos esquemas raros (javascript:, data:, file:...) ni
+        listas ilimitadas."""
+        if not isinstance(value, list):
+            return []
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            u = item.strip()
+            parts = urlsplit(u)
+            if parts.scheme in ("http", "https") and parts.netloc and u not in seen:
+                seen.add(u)
+                cleaned.append(u)
+            if len(cleaned) >= _MAX_POC_URLS:
+                break
+        return cleaned

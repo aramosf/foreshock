@@ -41,10 +41,17 @@ _robots_cache: dict[str, tuple[float, urllib.robotparser.RobotFileParser]] = {}
 
 def make_client() -> httpx.AsyncClient:
     settings = get_settings()
+    # follow_redirects=True sin allowlist de host = SSRF latente (una fuente podría
+    # redirigirnos a un host interno). Riesgo ACEPTADO: las URLs las fija el código
+    # (fuentes oficiales), no entrada de usuario. Mitigación ligera: se acota el nº
+    # de saltos (max_redirects, por defecto 20 en httpx) para no seguir cadenas de
+    # redirección abusivas. Este límite se hereda en client.get/stream (es de
+    # cliente, no por-petición).
     return httpx.AsyncClient(
         headers={"User-Agent": settings.user_agent},
         timeout=settings.http_timeout_seconds,
         follow_redirects=True,
+        max_redirects=5,
     )
 
 

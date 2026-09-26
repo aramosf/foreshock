@@ -1,10 +1,17 @@
 """Ejecución segura de procesos Git dentro de los workers.
 
 Los workers son procesos de larga vida. Un ``git`` cancelado o que supera su
-timeout puede dejar helpers (remote-http, index-pack...) huérfanos; si además el
-contenedor no tiene un init/reaper, esos hijos se acumulan como zombies. Este
-helper crea un grupo de proceso por invocación, mata el grupo completo en
-timeout/cancelación y siempre espera al hijo directo.
+timeout puede dejar helpers (git-remote-https, index-pack...) huérfanos. Este
+helper crea un grupo de proceso por invocación (``start_new_session=True``), mata
+el grupo completo con ``killpg`` en timeout/cancelación y SIEMPRE recoge
+(``wait``) al hijo DIRECTO (el ``git``).
+
+Los NIETOS (helpers que lanza el propio git) NO son hijos del worker: al morir
+git se reparientan a PID 1, así que el worker NO puede recogerlos con ``waitpid``.
+Su reaping depende del init/reaper del contenedor (``init: true`` en Compose, que
+inyecta ``tini`` como PID 1). Por eso NO se hace aquí un ``waitpid(-1)`` manual: en
+un proceso asyncio competiría con el child-watcher del event loop (podría robarle
+la notificación SIGCHLD del hijo que ``proc.wait()`` espera y colgarlo).
 """
 
 from __future__ import annotations
@@ -15,7 +22,9 @@ import signal
 
 
 async def _stop_process_group(proc: asyncio.subprocess.Process) -> None:
-    """Termina el grupo de ``proc`` y recoge siempre el proceso directo."""
+    """Termina el grupo de ``proc`` y recoge SIEMPRE el proceso DIRECTO. Los
+    nietos, reparentados a PID 1 al morir git, los recoge el init del contenedor
+    (``init: true``/tini); ver el docstring del módulo."""
     if proc.returncode is None:
         try:
             os.killpg(proc.pid, signal.SIGKILL)

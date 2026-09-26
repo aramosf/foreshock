@@ -13,9 +13,12 @@ from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from app.core.logging import get_logger
 from app.core.models import AffectedProduct, Candidate, CveSoftReference, CVSSScore, Identifier
 from app.core.models import Mention as MentionRow
 from app.ingest.identifiers import ExtractedId, primary_cve
+
+log = get_logger(__name__)
 
 
 def find_root(session: Session, candidate_id: uuid.UUID) -> Candidate:
@@ -108,8 +111,19 @@ def merge_candidates(session: Session, winner: Candidate, loser: Candidate) -> N
             merged_into=winner.id, status="merged"
         )
     )
-    if winner.cve_id is None and loser.cve_id is not None:
-        winner.cve_id = loser.cve_id
+    if loser.cve_id is not None and loser.cve_id != winner.cve_id:
+        if winner.cve_id is None:
+            winner.cve_id = loser.cve_id
+        else:
+            # Sobre-fusión cross-CVE: dos candidates con CVEs DISTINTOS acabaron
+            # unidos por un identifier compartido (p.ej. un alias declarado por
+            # error en una fuente). Conservamos el CVE del ganador pero NO
+            # perdemos el otro en silencio: queda registrado para inspección.
+            log.warning(
+                "reconcile.merge_distinct_cve",
+                winner=str(winner.id), winner_cve=winner.cve_id,
+                loser=str(loser.id), loser_cve=loser.cve_id,
+            )
     _absorb_scalar_state(winner, loser)
     session.flush()
 
@@ -185,11 +199,29 @@ def resolve_candidate(session: Session, ids: list[ExtractedId]) -> Candidate:
         if (eid.scheme, eid.value) not in existing
     ]
     if new_rows:
-        session.execute(
+        inserted = session.execute(
             pg_insert(Identifier.__table__)
             .values(new_rows)
             .on_conflict_do_nothing(constraint="uq_identifiers_scheme_value")
-        )
+            .returning(Identifier.__table__.c.scheme, Identifier.__table__.c.value)
+        ).all()
+        # Cierre de carrera: si algún identifier NO se insertó (conflicto), otra
+        # transacción concurrente pudo crearlo apuntando a un candidate DISTINTO
+        # del nuestro. Sin esto, un candidate recién creado quedaría huérfano (sin
+        # identifier) con su mención varada. Re-resolvemos los dueños reales tras
+        # el INSERT y fusionamos si aparece más de una raíz viva.
+        if len(inserted) != len(new_rows):
+            owners: dict[uuid.UUID, Candidate] = {candidate.id: candidate}
+            for eid in ids:
+                o = _candidate_for_identifier(session, eid)
+                if o is not None:
+                    owners[o.id] = o
+            if len(owners) > 1:
+                winner = _pick_winner(list(owners.values()))
+                for other in list(owners.values()):
+                    if other.id != winner.id:
+                        merge_candidates(session, winner, other)
+                candidate = winner
     cve = primary_cve(ids)
     if cve and candidate.cve_id is None:
         candidate.cve_id = cve

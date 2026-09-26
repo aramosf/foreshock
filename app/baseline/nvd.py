@@ -169,7 +169,10 @@ async def _fetch_window(client, headers: dict[str, str], start: datetime,
             "resultsPerPage": _PAGE_SIZE,
             "startIndex": start_index,
         }
-        resp = await get(client, settings.nvd_api_base, params=params, headers=headers)
+        # respect_robots=False: endpoint de API de primera parte (no scraping);
+        # el robots.txt de nist.gov no aplica y bloquearía todo el sync.
+        resp = await get(client, settings.nvd_api_base, params=params,
+                         headers=headers, respect_robots=False)
         data = resp.json()
         vulns = data.get("vulnerabilities") or []
         total_results = data.get("totalResults", total_results)
@@ -235,7 +238,13 @@ async def sync_nvd_delta(hours: int = 3) -> dict[str, int]:
     chunks = _window_chunks(start, end)
 
     async with make_client() as client:
-        for chunk_start, chunk_end in chunks:
+        for i, (chunk_start, chunk_end) in enumerate(chunks):
+            # Rate limit público también ENTRE tramos: sin api key, la primera
+            # petición de un tramo nuevo no debe dispararse inmediatamente tras
+            # la última página del tramo anterior (_fetch_window solo pausa entre
+            # páginas de un mismo tramo).
+            if i > 0 and not settings.nvd_api_key:
+                await asyncio.sleep(_RATE_LIMIT_SLEEP)
             await _fetch_window(client, headers, chunk_start, chunk_end,
                                 observed_at, stats)
             # Tramo completado con éxito: confirmar el watermark. Si un tramo
@@ -265,7 +274,9 @@ async def sync_nvd_full() -> dict[str, int]:
     async with make_client() as client:
         while True:
             params = {"resultsPerPage": _PAGE_SIZE, "startIndex": start_index}
-            resp = await get(client, settings.nvd_api_base, params=params, headers=headers)
+            # respect_robots=False: endpoint de API de primera parte (no scraping).
+            resp = await get(client, settings.nvd_api_base, params=params,
+                             headers=headers, respect_robots=False)
             data = resp.json()
             vulns = data.get("vulnerabilities") or []
             total_results = data.get("totalResults", total_results)

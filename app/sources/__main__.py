@@ -20,6 +20,7 @@ from app.core.db import get_session
 from app.core.logging import configure_logging, get_logger
 from app.core.models import Source
 from app.core.runtime import publish_runtime_metrics
+from app.sources.cache import sweep_stale_temp
 from app.sources.runner import (
     run_source,
     runtime_source_state,
@@ -118,6 +119,12 @@ async def _runtime_job(scheduler: AsyncIOScheduler) -> None:
 
 async def main() -> None:
     configure_logging()
+    # Barrido best-effort de temporales/clones huérfanos que dejó un kill duro
+    # anterior (nunca debe impedir el arranque).
+    try:
+        sweep_stale_temp()
+    except Exception as exc:  # noqa: BLE001 - la limpieza nunca tumba el arranque
+        log.warning("sources.sweep_error", error=str(exc))
     sync_registry_to_db()
     # misfire_grace_time=None: una ejecución que llega tarde (worker parado,
     # fetch largo) se lanza igualmente en vez de descartarse en silencio.

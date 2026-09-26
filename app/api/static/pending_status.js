@@ -136,7 +136,7 @@ function renderSources() {
     tr.append(node("td", source.tier, "num"));
     tr.append(node("td", duration(source.cadence_seconds)));
     tr.append(node("td", source.last_success_at ? `${date(source.last_success_at)} · hace ${duration(source.success_age_seconds)}` : "nunca"));
-    tr.append(node("td", source.last_error || "—", "wrap"));
+    tr.append(node("td", source.has_error ? (source.error_class || "error") : "—", "wrap"));
     body.append(tr);
   });
   const s = snapshot.fetchers.summary;
@@ -151,7 +151,7 @@ function metric(root, value, label, className = "") {
 }
 
 function renderDatabase(db) {
-  $("db-version").textContent = `migración ${db.migration || "desconocida"} · ${bytes(db.size_bytes)}`;
+  $("db-version").textContent = `${db.migration ? "migraciones aplicadas" : "sin migraciones"} · ${bytes(db.size_bytes)}`;
   const root = $("db-metrics"); root.replaceChildren();
   metric(root, number(db.total), "conexiones");
   metric(root, number(db.active), "activas", db.active > 8 ? "warning" : "");

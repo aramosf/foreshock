@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     cache_dir: str = Field(default="/data/cache")
     cache_raw: bool = Field(default=True)          # archiva cada respuesta HTTP (write-through)
     cache_reuse_ttl_seconds: int = Field(default=43200)  # reusar binarios grandes (OSV) si < 12h
+    # Tope del archivo crudo (cache/raw): las fuentes con cursor/paginación crean un
+    # fichero nuevo cada run, así que crecería sin límite. Al superarlo se podan los
+    # más antiguos (por mtime). <=0 => sin poda. Env FORESHOCK_CACHE_RAW_MAX_BYTES.
+    cache_raw_max_bytes: int = Field(default=2 * 1024 * 1024 * 1024)  # 2 GiB
 
     # --- Baseline ---
     cvelist_repo_url: str = Field(default="https://github.com/CVEProject/cvelistV5.git")

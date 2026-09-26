@@ -27,7 +27,7 @@ from app.baseline.state import read_cursor, write_cursor
 from app.core.config import get_settings
 from app.core.db import session_scope
 from app.core.logging import get_logger
-from app.core.models import PublishedCVE
+from app.core.models import PublishedCVE, SyncState
 
 log = get_logger(__name__)
 
@@ -215,6 +215,28 @@ def _process_files(repo_dir: str, rel_paths: list[str]) -> dict[str, int]:
 
 
 
+def _read_extra() -> dict[str, Any] | None:
+    """Lee el dict `extra` de la fila sync_state de cvelist (o None)."""
+    with session_scope() as session:
+        row = session.get(SyncState, _SYNC_ID)
+        return dict(row.extra) if row and row.extra else None
+
+
+def _full_import_complete() -> bool:
+    """¿La última importación COMPLETA terminó de principio a fin?
+
+    El marcador vive en ``sync_state.extra['full_import_complete']`` y SOLO se
+    sella tras una pasada full 100% exitosa. Un full inicial se procesa por
+    lotes (commit cada 2000 ficheros) pero el cursor SHA se escribe al final:
+    si el proceso muere a mitad, quedan filas parciales, el clon presente y el
+    HEAD sin cambios -> ``mirror_has_mitre_data()`` devolvería True y el delta
+    nunca procesaría el resto (baseline incompleto en silencio). Este marcador
+    detecta ese caso: si falta, hay que rehacer el full (idempotente vía upsert).
+    """
+    extra = _read_extra()
+    return bool(extra and extra.get("full_import_complete"))
+
+
 def mirror_has_mitre_data() -> bool:
     """¿El espejo local (published_cves) contiene datos de MITRE/cvelist?
 
@@ -271,6 +293,13 @@ def sync_cvelist(force_full: bool = False) -> dict[str, int]:
             # baseline incompleto en silencio.
             log.warning("cvelist.mirror_empty_forcing_full")
             force_full = True
+        elif not force_full and not _full_import_complete():
+            # Full previo nunca completado (o interrumpido a media asta): rehacer
+            # full. Sin esto, un crash durante el import inicial deja filas
+            # parciales con el HEAD sin cambios y el delta jamás procesa el resto.
+            # Idempotente (upsert): reejecutar no duplica.
+            log.warning("cvelist.full_import_incomplete_forcing_full")
+            force_full = True
         if force_full:
             rel_paths = _all_json_files(repo_dir)
         else:
@@ -292,8 +321,16 @@ def sync_cvelist(force_full: bool = False) -> dict[str, int]:
                     rel_paths = _all_json_files(repo_dir)
 
     stats = _process_files(repo_dir, rel_paths)
-    # Procesado completado: confirmar el HEAD como último punto procesado.
-    write_cursor(_SYNC_ID, _head_sha(repo_dir))
+    # Procesado completado con éxito: confirmar el HEAD como último punto
+    # procesado. En un full (clon nuevo o force_full) se sella además el marcador
+    # de completitud; solo se llega aquí si _process_files no lanzó, así que un
+    # full interrumpido NO deja el marcador y se rehará. En incremental se
+    # preserva el marcador previo (write_cursor con extra=None lo borraría).
+    did_full = fresh_clone or force_full
+    if did_full:
+        write_cursor(_SYNC_ID, _head_sha(repo_dir), extra={"full_import_complete": True})
+    else:
+        write_cursor(_SYNC_ID, _head_sha(repo_dir), extra=_read_extra())
     log.info(
         "cvelist.sync",
         fresh_clone=fresh_clone,
