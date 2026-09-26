@@ -149,16 +149,27 @@ details.explain summary::-webkit-details-marker{display:none}
 details.explain summary::before{content:"▸";color:var(--muted);display:inline-block;width:16px}
 details.explain[open] summary::before{content:"▾"}
 .explain .lede{font-size:13.5px;color:var(--ink2);margin:12px 0 16px;max-width:80ch}
-.subsets{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
-.subbox{border:1px solid var(--hair);border-top:3px solid var(--hair);border-radius:8px;padding:10px 12px}
-.subbox.m1{border-top-color:var(--m1)} .subbox.m2{border-top-color:var(--m2)}
-.subbox.m3{border-top-color:var(--m3)} .subbox.pub{border-top-color:var(--ctx)}
-.subbox b{font-size:12.5px} .subbox p{font-size:12px;color:var(--muted);margin:4px 0 0}
-.subbox .subkpi{font-size:26px;font-weight:700;line-height:1;margin:6px 0 0;letter-spacing:-.01em;
-  font-variant-numeric:tabular-nums}
-.subbox.m1 .subkpi{color:var(--m2)} .subbox.m2 .subkpi{color:var(--m2)}
-.subbox.m3 .subkpi{color:var(--m3)} .subbox.pub .subkpi{color:var(--ink2)}
-.subbox .subcap{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:2px 0 4px}
+/* pirámide de madurez: base ancha pre-CVE -> cima reservado; público (la meta) encima */
+.pyr-wrap{display:grid;grid-template-columns:minmax(0,300px) minmax(0,1fr);gap:22px;align-items:center;margin-bottom:16px}
+.pyr{display:flex;flex-direction:column;align-items:center}
+.pyr-goal{width:56%;min-width:172px;text-align:center;background:var(--ctx-wash);
+  border:1px solid var(--baseline);border-radius:8px;padding:7px 12px}
+.pyr-goal .g-l{font-size:11px;font-weight:600;color:var(--ink2)}
+.pyr-goal .g-n{font-size:22px;font-weight:700;line-height:1.05;color:var(--ink);font-variant-numeric:tabular-nums}
+.pyr-goal .g-s{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.pyr-arrow{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.12em;margin:5px 0}
+.pyr-stack{width:100%}
+.pyr-layer{height:50px;display:flex;align-items:center;justify-content:center;gap:8px;font-size:12.5px;font-weight:600}
+.pyr-layer .p-n{font-weight:700;font-variant-numeric:tabular-nums}
+.pyr-layer.L3{background:var(--m3);color:#fff;clip-path:polygon(30% 0,70% 0,81% 100%,19% 100%)}
+.pyr-layer.L2{background:var(--m2);color:#fff;clip-path:polygon(19% 0,81% 0,92% 100%,8% 100%)}
+.pyr-layer.L1{background:var(--m1);color:#06233f;clip-path:polygon(8% 0,92% 0,97% 100%,3% 100%)}
+.pyr-desc{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:9px;font-size:12px;color:var(--ink2)}
+.pyr-desc li{display:flex;gap:8px;line-height:1.4}
+.pyr-desc i{width:11px;height:11px;border-radius:3px;flex:0 0 auto;margin-top:3px}
+.pyr-desc b{color:var(--ink)}
+.pyr-desc .d1{background:var(--m1)} .pyr-desc .d2{background:var(--m2)}
+.pyr-desc .d3{background:var(--m3)} .pyr-desc .dp{background:var(--ctx)}
 .gloss{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px 18px;font-size:12px;
   color:var(--ink2);border-top:1px solid var(--hair);padding-top:12px}
 .gloss b{color:var(--ink)}
@@ -170,7 +181,7 @@ details.explain[open] summary::before{content:"▾"}
 .lgd i{width:12px;height:12px;border-radius:3px;display:inline-block;flex:0 0 auto}
 .scatter text{fill:var(--muted)}
 @media (max-width:900px){.grid{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(2,1fr)}}
-@media (max-width:760px){.subsets{grid-template-columns:1fr 1fr}}
+@media (max-width:760px){.pyr-wrap{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -192,23 +203,32 @@ details.explain[open] summary::before{content:"▾"}
       NVD</b>, la base de datos oficial. Ese hueco temporal es la <b>ventaja</b> que mide todo lo que ves
       aquí. Cada pendiente está en uno de tres estados azules (de claro a oscuro) hasta que NVD publica y
       pasa a la fase final, en gris.</p>
-    <div class="subsets">
-      <div class="subbox m1"><b>pre-CVE</b>
-        <div class="subkpi" id="sk-pre_cve">—</div><div class="subcap">pendientes ahora</div>
-        <p>Solo tiene el código nativo de su fuente (GHSA-, RUSTSEC-, ZDI-CAN-, VU#…). Nadie le ha
-          asignado aún un número CVE.</p></div>
-      <div class="subbox m2"><b>CVE pre-reservado</b>
-        <div class="subkpi" id="sk-cve_prereserved">—</div><div class="subcap">pendientes ahora</div>
-        <p>Ya circula un número CVE (citado en un commit o aviso) pero sin ficha pública en MITRE ni NVD.
-          La señal más temprana con número: la más valiosa.</p></div>
-      <div class="subbox m3"><b>CVE reservado</b>
-        <div class="subkpi" id="sk-cve_reserved">—</div><div class="subcap">pendientes ahora</div>
-        <p>MITRE ya tiene ficha del CVE, pero NVD aún no ha publicado su análisis. Último paso antes de
-          hacerse oficial.</p></div>
-      <div class="subbox pub"><b>CVE público</b>
-        <div class="subkpi" id="sk-published">—</div><div class="subcap">ya medidos · periodo operativo</div>
-        <p>NVD publica su análisis: deja de estar pendiente y cierra el ciclo (línea de meta de «la
-          carrera»). El indicador es cuántos cruzaron esa meta y medimos su ventaja.</p></div>
+    <div class="pyr-wrap">
+      <div class="pyr">
+        <!-- CVE público: la meta, FUERA de la pirámide, arriba -->
+        <div class="pyr-goal">
+          <div class="g-l">CVE público</div>
+          <div class="g-n" id="sk-published">—</div>
+          <div class="g-s">la meta · sale de la pirámide</div>
+        </div>
+        <div class="pyr-arrow">▲ más oficial · madura hacia el CVE público</div>
+        <!-- pirámide de pendientes: cima reservado (menos) … base pre-CVE (más) -->
+        <div class="pyr-stack">
+          <div class="pyr-layer L3">CVE reservado <span class="p-n" id="sk-cve_reserved">—</span></div>
+          <div class="pyr-layer L2">CVE pre-reservado <span class="p-n" id="sk-cve_prereserved">—</span></div>
+          <div class="pyr-layer L1">pre-CVE <span class="p-n" id="sk-pre_cve">—</span></div>
+        </div>
+      </div>
+      <ul class="pyr-desc">
+        <li><i class="d1"></i><span><b>pre-CVE</b> — solo el código nativo de su fuente (GHSA-, RUSTSEC-,
+          ZDI-CAN-, VU#…); nadie le ha asignado aún un número CVE.</span></li>
+        <li><i class="d2"></i><span><b>CVE pre-reservado</b> — ya circula un número CVE (citado en un commit o
+          aviso) pero <b>MITRE aún no tiene ficha</b>. La señal más temprana con número.</span></li>
+        <li><i class="d3"></i><span><b>CVE reservado</b> — <b>MITRE ya tiene ficha</b>, pero NVD aún no ha
+          publicado su análisis. Último paso antes de hacerse oficial.</span></li>
+        <li><i class="dp"></i><span><b>CVE público</b> — NVD publica su análisis: deja de estar pendiente y
+          cierra el ciclo (la meta, fuera de la pirámide).</span></li>
+      </ul>
     </div>
     <div class="gloss">
       <div><b>Foreshock Score (0–100)</b> — criticidad para actuar ya: explotación activa (KEV, +50),
