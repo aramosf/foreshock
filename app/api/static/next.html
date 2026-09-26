@@ -168,15 +168,7 @@ details.explain[open] summary::before{content:"▾"}
 .lgd{display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-size:12px;color:var(--ink)}
 .lgd span{display:inline-flex;align-items:center;gap:6px}
 .lgd i{width:12px;height:12px;border-radius:3px;display:inline-block;flex:0 0 auto}
-/* sección laboratorio */
-.xhead{margin:36px 0 4px;font-size:16px}
-.xhead .xtag{font-weight:400;color:var(--muted);font-size:12.5px;letter-spacing:0;text-transform:none}
-.xnote{color:var(--muted);font-size:12px;margin:0 0 16px}
-.xgrid{display:grid;grid-template-columns:1fr 1fr;gap:20px}
-.xgrid .card{margin:0}
-.xspan{grid-column:1 / -1}
 .scatter text{fill:var(--muted)}
-@media (max-width:760px){.xgrid{grid-template-columns:1fr}}
 @media (max-width:900px){.grid{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(2,1fr)}}
 @media (max-width:760px){.subsets{grid-template-columns:1fr 1fr}}
 </style>
@@ -279,35 +271,11 @@ details.explain[open] summary::before{content:"▾"}
     <div id="queue"><div class="empty">cargando…</div></div>
   </div>
 
-  <h2 class="xhead">Laboratorio de gráficas <span class="xtag">elige las que te sirvan · borra el bloque de las que no</span></h2>
-  <p class="xnote">Se cargan al bajar hasta aquí (no ralentizan el panel de arriba). Cada tarjeta lleva un comentario
-    <span class="mono">&lt;!-- EXTRA n --&gt;</span> en el HTML para borrarla de un vistazo.</p>
-  <div id="extras" class="xgrid">
-    <!-- EXTRA 1: Riesgo EPSS × explotación (borra este div.card para quitarla) -->
-    <div class="card"><h2>Riesgo: EPSS × explotación</h2>
-      <p class="sub">Candidates con EPSS (solo CVEs con ficha). Arriba-derecha = alta probabilidad de
-        explotación y alta gravedad. Rojo = KEV · naranja = PoC público.</p>
-      <div id="x-quad"><div class="empty">…</div></div></div>
-    <!-- EXTRA 2: Pendientes por ecosistema -->
-    <div class="card"><h2>Pendientes por ecosistema</h2>
-      <p class="sub">Dónde se concentra la exposición (npm, go, pypi…).</p>
-      <div id="x-eco"><div class="empty">…</div></div></div>
-    <!-- EXTRA 3: Fuentes volumen × adelanto -->
-    <div class="card"><h2>Fuentes: volumen × adelanto</h2>
-      <p class="sub">Arriba-derecha = fuente que aporta mucha señal y encima temprana. Tamaño = volumen.</p>
-      <div id="x-src2d"><div class="empty">…</div></div></div>
-    <!-- EXTRA 4: Embudo de madurez -->
-    <div class="card"><h2>Embudo de madurez</h2>
-      <p class="sub">Reparto de las pendientes por cercanía a hacerse oficial.</p>
-      <div id="x-funnel"><div class="empty">…</div></div></div>
-    <!-- EXTRA 5: Antelación antes de KEV -->
-    <div class="card"><h2>Antelación antes de KEV</h2>
-      <p class="sub">Días que teníamos la señal antes de que CISA la marcara como explotada (KEV).</p>
-      <div id="x-kev-head"></div><div id="x-kev"><div class="empty">…</div></div></div>
-    <!-- EXTRA 6: Velocidad diaria -->
-    <div class="card xspan"><h2>Velocidad: señales capturadas por día</h2>
-      <p class="sub">Reloj propio de Foreshock (<span class="mono">candidates.created_at</span>), últimos 60 días.</p>
-      <div id="x-vel"><div class="empty">…</div></div></div>
+  <div class="card" id="vel-card">
+    <h2>Velocidad: señales capturadas por día</h2>
+    <p class="sub">Reloj propio de Foreshock (<span class="mono">candidates.created_at</span>), últimos 60 días.
+      Ritmo real de captura, independiente de la fecha del aviso.</p>
+    <div id="x-vel"><div class="empty">cargando…</div></div>
   </div>
 
   <div class="foot" id="foot">Foreshock — radar temprano de vulnerabilidades. El <b>Foreshock Score</b> y la
@@ -321,6 +289,6 @@ details.explain[open] summary::before{content:"▾"}
   <div class="dc" id="dbody"></div>
 </aside>
 
-<script src="/static/next.js?v=11" defer></script>
+<script src="/static/next.js?v=12" defer></script>
 </body>
 </html>

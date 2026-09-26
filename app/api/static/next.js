@@ -201,31 +201,9 @@ function renderEvolution(el, series) {
     <div class="lgd">${keys.map(([, c, lab]) => `<span><i style="background:${c}"></i>${lab}</span>`).join("")}</div>`;
 }
 
-// ---------- Gráficas "laboratorio" (extras al pie, carga diferida) ----------
-const failHtml = '<div class="empty">no disponible</div>';
-
-function scatterChart(el, pts, o) {
-  o = o || {};
-  const W = 460, H = 240, padL = 40, padB = 28, padT = 10, padR = 10;
-  const xmax = o.xmax || Math.max(1, ...pts.map(p => p.x || 0));
-  const ymax = o.ymax || Math.max(1, ...pts.map(p => p.y || 0));
-  const px = x => padL + (x / xmax) * (W - padL - padR);
-  const py = y => H - padB - (y / ymax) * (H - padT - padB);
-  let grid = "";
-  for (let t = 0; t <= 4; t++) {
-    const gy = padT + (H - padT - padB) * t / 4, gv = ymax * (1 - t / 4);
-    grid += `<line x1="${padL}" y1="${gy.toFixed(1)}" x2="${W - padR}" y2="${gy.toFixed(1)}" stroke="var(--grid)"/>`;
-    grid += `<text x="${padL - 5}" y="${(gy + 3).toFixed(1)}" font-size="9" text-anchor="end">${o.yfmt ? o.yfmt(gv) : Math.round(gv)}</text>`;
-  }
-  const dots = pts.map(p => `<circle cx="${px(p.x || 0).toFixed(1)}" cy="${py(p.y || 0).toFixed(1)}" r="${p.r || 3.5}" fill="${p.color || "var(--accent)"}" fill-opacity="0.72"><title>${esc(p.label || "")}</title></circle>`).join("");
-  el.innerHTML = `<svg class="scatter" viewBox="0 0 ${W} ${H}" width="100%">${grid}${dots}
-    <text x="${(W / 2).toFixed(0)}" y="${H - 3}" font-size="10" text-anchor="middle">${esc(o.xlab || "")}</text>
-    <text x="11" y="${(H / 2).toFixed(0)}" font-size="10" text-anchor="middle" transform="rotate(-90 11 ${(H / 2).toFixed(0)})">${esc(o.ylab || "")}</text>
-    </svg>${o.legend || ""}`;
-}
-
+// ---------- Velocidad de captura (gráfica al pie, carga diferida) ----------
 function lineChart(el, series) {
-  if (!series.length) { el.innerHTML = failHtml; return; }
+  if (!series.length) { el.innerHTML = '<div class="empty">sin datos</div>'; return; }
   const W = 940, H = 180, padL = 34, padB = 22, padT = 10;
   const max = Math.max(1, ...series.map(s => s.count)), n = series.length;
   const px = i => padL + (i / Math.max(1, n - 1)) * (W - padL - 6);
@@ -240,56 +218,7 @@ function lineChart(el, series) {
   el.innerHTML = `<svg class="scatter" viewBox="0 0 ${W} ${H}" width="100%"><title>señales/día</title>${grid}<path d="${area}" fill="var(--accent-wash)"/><path d="${path}" fill="none" stroke="var(--accent)" stroke-width="1.5"/>${labs}</svg>`;
 }
 
-function renderQuadrant(el, data) {
-  const pts = (data.points || []).map(p => ({
-    x: p.epss, y: p.cvss != null ? p.cvss : 0,
-    color: p.in_kev ? "var(--crit)" : (p.has_public_poc ? "var(--warn)" : "var(--m2)"),
-    label: `${p.cve_id} ${p.product || ""} · EPSS ${(p.epss * 100).toFixed(0)}%${p.cvss != null ? " · CVSS " + p.cvss : ""}${p.in_kev ? " · KEV" : ""}`,
-  }));
-  const legend = `<div class="lgd"><span><i style="background:var(--crit)"></i>KEV</span><span><i style="background:var(--warn)"></i>PoC público</span><span><i style="background:var(--m2)"></i>otros</span></div>`;
-  scatterChart(el, pts, { xmax: 1, ymax: 10, xlab: "EPSS (prob. explotación)", ylab: "CVSS", legend });
-}
-function renderEcosystem(el, brk) {
-  barChart(el, (brk.by_ecosystem || []).slice(0, 12).map(e => ({ label: e.ecosystem, v: e.pending, color: "var(--m2)" })), {});
-}
-function renderFunnel(el, bm) {
-  barChart(el, [
-    { label: "pre-CVE", v: bm.pre_cve || 0, color: "var(--m1)" },
-    { label: "CVE pre-reservado", v: bm.cve_prereserved || 0, color: "var(--m2)" },
-    { label: "CVE reservado", v: bm.cve_reserved || 0, color: "var(--m3)" },
-  ], {});
-}
-function renderSources2D(el, stats) {
-  const pts = (stats.sources || []).map(s => ({
-    x: s.candidates, y: parseFloat(s.avg_days),
-    r: Math.max(3, Math.min(12, Math.sqrt(s.candidates) / 6)), color: "var(--m2)",
-    label: `${s.source}: ${s.candidates} vulns · ${parseFloat(s.avg_days).toFixed(1)} d`,
-  }));
-  scatterChart(el, pts, { xlab: "volumen (candidates)", ylab: "adelanto medio (d)" });
-}
-function renderKevLead(el, headEl, data) {
-  headEl.innerHTML = `<div class="lead" style="margin:0 0 12px">Mediana <b>${esc(data.median)} d</b> de antelación
-    antes de entrar en KEV, sobre <b>${(data.count || 0).toLocaleString()}</b> en KEV. Positivo = lo teníamos
-    antes de que CISA lo marcara como explotado.</div>`;
-  barChart(el, (data.bins || []).map(b => ({ label: b.label + " d", v: b.count })), {});
-}
 function renderVelocity(el, data) { lineChart(el, data.series || []); }
-
-let _extrasLoaded = false;
-async function loadExtras() {
-  if (_extrasLoaded) return; _extrasLoaded = true;
-  const eps = ["/api/quadrant?limit=400", "/api/pending/breakdown", "/api/stats",
-    "/api/kev/lead", "/api/velocity?days=60"];
-  const res = await Promise.allSettled(eps.map(jget));
-  const v = i => res[i].status === "fulfilled" ? res[i].value : null;
-  const [quad, brk, stats, kev, vel] = [v(0), v(1), v(2), v(3), v(4)];
-  quad ? renderQuadrant($("#x-quad"), quad) : ($("#x-quad").innerHTML = failHtml);
-  if (brk) { renderEcosystem($("#x-eco"), brk); renderFunnel($("#x-funnel"), brk.by_maturity || {}); }
-  else { $("#x-eco").innerHTML = failHtml; $("#x-funnel").innerHTML = failHtml; }
-  stats ? renderSources2D($("#x-src2d"), stats) : ($("#x-src2d").innerHTML = failHtml);
-  kev ? renderKevLead($("#x-kev"), $("#x-kev-head"), kev) : ($("#x-kev").innerHTML = failHtml);
-  vel ? renderVelocity($("#x-vel"), vel) : ($("#x-vel").innerHTML = failHtml);
-}
 
 async function openDrawer(id) {
   $("#scrim").classList.add("on"); $("#drawer").classList.add("on"); $("#drawer").setAttribute("aria-hidden", "false");
@@ -345,10 +274,12 @@ $("#surface").oninput = e => renderImm(e.target.value);
 // Carga por secciones (allSettled): si un endpoint falla, el resto se pinta igual.
 async function load() {
   const eps = ["/api/pending/critical?limit=60", "/api/lag/histogram", "/api/stats",
-    "/api/trend?months=12", "/api/pending?kind=product", "/api/emerging?limit=100", "/api/queue/age"];
+    "/api/trend?months=12", "/api/pending?kind=product", "/api/emerging?limit=100",
+    "/api/queue/age", "/api/velocity?days=60"];
   const res = await Promise.allSettled(eps.map(jget));
   const val = i => res[i].status === "fulfilled" ? res[i].value : null;
-  const [crit, lag, stats, trend, pending, emerging, queue] = [val(0), val(1), val(2), val(3), val(4), val(5), val(6)];
+  const [crit, lag, stats, trend, pending, emerging, queue, vel] =
+    [val(0), val(1), val(2), val(3), val(4), val(5), val(6), val(7)];
   const fail = i => `<div class="empty">no disponible</div>`;
 
   if (crit) { IMM = crit.rows || []; renderImm(""); } else { $("#imm").innerHTML = fail(); }
@@ -381,16 +312,6 @@ async function load() {
     renderEvolution($("#evo"), trend.series || []);
   } else { $("#trend").innerHTML = fail(); $("#evo").innerHTML = fail(); }
   if (queue) renderQueueAge($("#queue"), $("#queue-head"), queue); else $("#queue").innerHTML = fail();
+  if (vel) renderVelocity($("#x-vel"), vel); else $("#x-vel").innerHTML = fail();
 }
 load();
-
-// Extras: se cargan SOLO al acercarse a la sección (no ralentizan el panel).
-const _extrasEl = document.getElementById("extras");
-if (_extrasEl && "IntersectionObserver" in window) {
-  const io = new IntersectionObserver((ents) => {
-    if (ents.some(e => e.isIntersecting)) { io.disconnect(); loadExtras(); }
-  }, { rootMargin: "320px" });
-  io.observe(_extrasEl);
-} else {
-  loadExtras();  // fallback: navegadores sin IntersectionObserver
-}
