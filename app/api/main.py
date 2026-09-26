@@ -264,4 +264,11 @@ def pending_status() -> FileResponse:
     return FileResponse(os.path.join(_STATIC, "pending_status.html"))
 
 
+@app.get("/next")
+def next_dashboard() -> FileResponse:
+    """Prototipo del dashboard "inminente" (propuesta). Coexiste con `/`; consume
+    los mismos endpoints /api/* de solo lectura, no altera el dashboard actual."""
+    return FileResponse(os.path.join(_STATIC, "next.html"))
+
+
 app.mount("/static", StaticFiles(directory=_STATIC), name="static")

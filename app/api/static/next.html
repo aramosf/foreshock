@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Foreshock NEXT — vista inminente (prototipo)</title>
+<style>
+/* Tokens heredados del dashboard actual (app/api/static/index.html) para que el
+   prototipo se sienta nativo. Añade tokens de score/severidad. */
+:root{
+  color-scheme:light;
+  --page:#f9f9f7; --surface:#fcfcfb; --surface2:#f2f1ec; --hair:rgba(11,11,11,.10);
+  --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --baseline:#c3c2b7;
+  --m1:#86b6ef; --m2:#2a78d6; --m3:#104281;
+  --accent:#2a78d6; --accent-wash:rgba(42,120,214,.10);
+  --ctx:#b5b3ab; --ctx-wash:rgba(137,135,129,.12);
+  --crit:#d03b3b; --warn:#c77d00; --good:#1f9d55; --good-txt:#006300;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  color-scheme:dark;
+  --page:#0d0d0d; --surface:#1a1a19; --surface2:#232320; --hair:rgba(255,255,255,.10);
+  --ink:#fff; --ink2:#c3c2b7; --muted:#898781; --grid:#2c2c2a; --baseline:#383835;
+  --m1:#9ec5f4; --m2:#3987e5; --m3:#184f95;
+  --accent:#3987e5; --accent-wash:rgba(57,135,229,.13);
+  --ctx:#6f6e68; --ctx-wash:rgba(137,135,129,.14);
+  --crit:#e05555; --warn:#e0a030; --good:#2bb56a; --good-txt:#0ca30c;
+}}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --page:#0d0d0d; --surface:#1a1a19; --surface2:#232320; --hair:rgba(255,255,255,.10);
+  --ink:#fff; --ink2:#c3c2b7; --muted:#898781; --grid:#2c2c2a; --baseline:#383835;
+  --m1:#9ec5f4; --m2:#3987e5; --m3:#184f95;
+  --accent:#3987e5; --accent-wash:rgba(57,135,229,.13);
+  --ctx:#6f6e68; --ctx-wash:rgba(137,135,129,.14);
+  --crit:#e05555; --warn:#e0a030; --good:#2bb56a; --good-txt:#0ca30c;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--ink);
+  font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+.mono{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+.wrap{max-width:1280px;margin:0 auto;padding:0 24px 100px}
+a{color:var(--accent);text-decoration:none} a:hover{color:var(--m3)}
+::selection{background:var(--accent-wash)}
+
+header{border-bottom:1px solid var(--hair);background:var(--surface);position:sticky;top:0;z-index:30}
+.hd{max-width:1280px;margin:0 auto;padding:14px 24px;display:flex;align-items:center;gap:18px;flex-wrap:wrap}
+.brand{display:flex;align-items:baseline;gap:12px}
+.wordmark{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:18px;font-weight:700;
+  letter-spacing:.18em;text-transform:uppercase}
+.tag{font-size:10.5px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--accent);border:1px solid var(--accent);border-radius:5px;padding:1px 7px}
+.brand small{font-size:11.5px;color:var(--muted)}
+.hd .sp{flex:1}
+.hd a.lnk,.hd button{border:1px solid var(--hair);border-radius:6px;color:var(--ink2);
+  padding:6px 12px;font-size:12.5px;font-family:inherit;background:none;cursor:pointer}
+.hd a.lnk:hover,.hd button:hover{background:var(--accent-wash);color:var(--ink)}
+
+/* KPI row */
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:24px 0}
+.kpi{background:var(--surface);border:1px solid var(--hair);border-radius:12px;padding:16px 18px}
+.kpi .n{font-size:30px;font-weight:700;letter-spacing:-.01em;line-height:1}
+.kpi .n.crit{color:var(--crit)} .kpi .n.good{color:var(--good-txt)}
+.kpi .l{font-size:11.5px;color:var(--muted);margin-top:8px;text-transform:uppercase;letter-spacing:.06em}
+.kpi .s{font-size:12px;color:var(--ink2);margin-top:3px}
+
+.grid{display:grid;grid-template-columns:1.55fr 1fr;gap:20px;align-items:start}
+.card{background:var(--surface);border:1px solid var(--hair);border-radius:12px;padding:18px 20px;margin-bottom:20px}
+.card h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink2);margin:0 0 4px}
+.card .sub{font-size:12px;color:var(--muted);margin:0 0 14px}
+
+/* filtro superficie */
+.surface-in{width:100%;background:var(--surface2);border:1px solid var(--hair);border-radius:8px;
+  color:var(--ink);padding:9px 12px;font:13px/1.4 inherit;margin-bottom:14px}
+.surface-in::placeholder{color:var(--muted)}
+
+/* tarjetas inminente */
+.imm{display:flex;gap:14px;align-items:center;padding:12px 4px;border-top:1px solid var(--hair);cursor:pointer}
+.imm:first-of-type{border-top:none}
+.imm:hover{background:var(--accent-wash);border-radius:8px}
+.dial{flex:0 0 auto;width:52px;height:52px;position:relative}
+.dial .v{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  font-size:14px;font-weight:700}
+.imm .body{flex:1;min-width:0}
+.imm .prod{font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.imm .meta{font-size:12px;color:var(--ink2);margin-top:2px}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.chip{font-size:10.5px;font-weight:600;padding:1.5px 7px;border-radius:20px;border:1px solid var(--hair);color:var(--ink2)}
+.chip.kev{color:#fff;background:var(--crit);border-color:var(--crit)}
+.chip.poc{color:#fff;background:var(--warn);border-color:var(--warn)}
+.chip.cvss{color:var(--m3);border-color:var(--m2)}
+.chip.pre{background:var(--accent-wash);color:var(--m3);border-color:var(--m2)}
+.badge-mat{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;
+  padding:1px 6px;border-radius:4px}
+.mat-pre_cve{background:var(--m1);color:#06233f}
+.mat-cve_prereserved{background:var(--m2);color:#fff}
+.mat-cve_reserved{background:var(--m3);color:#fff}
+
+/* barras genéricas */
+.bar-row{display:grid;grid-template-columns:120px 1fr 42px;gap:8px;align-items:center;font-size:12px;margin:5px 0}
+.bar-row .lab{color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bar-track{background:var(--surface2);border-radius:4px;height:14px;overflow:hidden}
+.bar-fill{height:100%;background:var(--accent);border-radius:4px}
+.bar-row .val{text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
+
+/* drawer */
+.scrim{position:fixed;inset:0;background:rgba(0,0,0,.4);opacity:0;pointer-events:none;transition:.15s;z-index:40}
+.scrim.on{opacity:1;pointer-events:auto}
+.drawer{position:fixed;top:0;right:0;height:100%;width:min(560px,94vw);background:var(--page);
+  border-left:1px solid var(--hair);transform:translateX(100%);transition:.18s;z-index:41;overflow-y:auto}
+.drawer.on{transform:none}
+.drawer .dh{position:sticky;top:0;background:var(--surface);border-bottom:1px solid var(--hair);
+  padding:16px 20px;display:flex;align-items:center;gap:12px}
+.drawer .dh .cx{margin-left:auto;cursor:pointer;border:1px solid var(--hair);border-radius:6px;
+  padding:4px 10px;color:var(--ink2);background:none;font-size:16px;line-height:1}
+.drawer .dc{padding:18px 20px}
+.drawer h3{font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin:20px 0 8px}
+.kv{font-size:13px;margin:3px 0;color:var(--ink2)} .kv b{color:var(--ink);font-weight:600}
+.reflist a{display:block;font-size:12.5px;padding:3px 0;word-break:break-all}
+
+/* timeline de la carrera */
+.race{position:relative;margin:10px 0 4px;padding-left:2px}
+.race .ev{display:flex;gap:12px;position:relative;padding:0 0 16px 22px}
+.race .ev::before{content:"";position:absolute;left:5px;top:3px;width:9px;height:9px;border-radius:50%;
+  background:var(--accent);border:2px solid var(--surface)}
+.race .ev.fin::before{background:var(--ctx);width:11px;height:11px;left:4px}
+.race .ev::after{content:"";position:absolute;left:9px;top:12px;bottom:-3px;width:2px;background:var(--hair)}
+.race .ev:last-child::after{display:none}
+.race .ev .d{font-size:11px;color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums;min-width:78px}
+.race .ev .t{font-size:12.5px;color:var(--ink)}
+.race .ev .t .src{color:var(--accent);font-weight:600}
+.lead{background:var(--accent-wash);border:1px solid var(--m2);border-radius:8px;padding:10px 12px;
+  font-size:13px;margin:6px 0 2px}
+.lead b{font-size:16px}
+.empty{color:var(--muted);font-size:13px;padding:20px 0;text-align:center}
+.foot{color:var(--muted);font-size:11.5px;margin-top:28px;border-top:1px solid var(--hair);padding-top:14px}
+@media (max-width:900px){.grid{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<header><div class="hd">
+  <div class="brand">
+    <span class="wordmark">Foreshock</span>
+    <span class="tag">Next</span>
+    <small>vista inminente · prototipo (propuesta)</small>
+  </div>
+  <span class="sp"></span>
+  <a class="lnk" href="/">← dashboard actual</a>
+  <button id="themebtn" title="tema">◐</button>
+</div></header>
+
+<div class="wrap">
+  <div class="kpis" id="kpis"></div>
+
+  <div class="grid">
+    <div>
+      <div class="card">
+        <h2>Inminente — lo que hay que mirar hoy</h2>
+        <p class="sub">Candidates con señal accionable, ordenados por <b>Foreshock Score</b>. El cruce de oro:
+          exploit/señal mientras el CVE sigue pre-publicado. Pulsa una fila para ver <b>la carrera</b>.</p>
+        <input class="surface-in" id="surface" placeholder="Mi superficie: filtra por producto (p.ej. rabbitmq, ghost, n8n)…">
+        <div id="imm"><div class="empty">cargando…</div></div>
+      </div>
+    </div>
+    <div>
+      <div class="card">
+        <h2>Ventaja sobre NVD</h2>
+        <p class="sub">Días de adelanto (<span class="mono">present</span>) sobre la publicación de NVD.</p>
+        <div id="lag"><div class="empty">cargando…</div></div>
+      </div>
+      <div class="card">
+        <h2>Leaderboard de fuentes</h2>
+        <p class="sub">Adelanto medio por fuente — a quién creer antes.</p>
+        <div id="srcs"><div class="empty">cargando…</div></div>
+      </div>
+      <div class="card">
+        <h2>Tendencia mensual</h2>
+        <p class="sub">Pre-CVE vs prereservado vs publicado (primera detección).</p>
+        <div id="trend"><div class="empty">cargando…</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="foot" id="foot">Prototipo servido en <span class="mono">/next</span>. Consume los endpoints
+    reales de la API; no altera el dashboard actual. El <b>Foreshock Score</b> y la madurez ya los calcula el
+    servidor (<span class="mono">/api/pending/critical</span>).</div>
+</div>
+
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <div class="dh"><b class="mono" id="dtitle">—</b><button class="cx" id="dclose">×</button></div>
+  <div class="dc" id="dbody"></div>
+</aside>
+
+<script>
+const $ = s => document.querySelector(s);
+const fmtDate = s => s ? String(s).slice(0,10) : "—";
+const daysAgo = s => { if(!s) return null; const d=(Date.now()-new Date(s))/86400000; return Math.round(d); };
+const esc = s => (s==null?"":String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+// tema
+const tb=$("#themebtn"); tb.onclick=()=>{const r=document.documentElement;
+  const cur=r.getAttribute("data-theme")|| (matchMedia("(prefers-color-scheme:dark)").matches?"dark":"light");
+  r.setAttribute("data-theme", cur==="dark"?"light":"dark");
+  try{localStorage.setItem("fs-theme",r.getAttribute("data-theme"))}catch(e){}};
+try{const t=localStorage.getItem("fs-theme"); if(t)document.documentElement.setAttribute("data-theme",t)}catch(e){}
+
+async function jget(u){const r=await fetch(u); if(!r.ok) throw new Error(u+" "+r.status); return r.json();}
+
+// color del dial por score
+function scoreColor(v){ return v>=80?"var(--crit)": v>=60?"var(--warn)": v>=40?"var(--m2)":"var(--muted)"; }
+function dial(v){
+  const val=Math.round(v||0), c=scoreColor(val), frac=Math.max(0,Math.min(1,val/100));
+  const r=22, C=2*Math.PI*r, off=C*(1-frac);
+  return `<div class="dial"><svg viewBox="0 0 52 52" width="52" height="52">
+    <circle cx="26" cy="26" r="${r}" fill="none" stroke="var(--surface2)" stroke-width="5"/>
+    <circle cx="26" cy="26" r="${r}" fill="none" stroke="${c}" stroke-width="5" stroke-linecap="round"
+      stroke-dasharray="${C.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}"
+      transform="rotate(-90 26 26)"/></svg><span class="v" style="color:${c}">${val}</span></div>`;
+}
+const MAT={pre_cve:"pre-CVE", cve_prereserved:"prereservado", cve_reserved:"reservado"};
+
+let IMM=[]; // filas inminente cargadas
+function renderImm(filter){
+  const q=(filter||"").trim().toLowerCase();
+  const rows=IMM.filter(r=>!q||(r.product||"").toLowerCase().includes(q)||(r.cve_id||"").toLowerCase().includes(q));
+  if(!rows.length){$("#imm").innerHTML='<div class="empty">sin resultados para «'+esc(q)+'»</div>';return;}
+  $("#imm").innerHTML = rows.slice(0,40).map(r=>{
+    const chips=[];
+    if(r.in_kev) chips.push('<span class="chip kev">KEV</span>');
+    if(r.has_public_poc) chips.push('<span class="chip poc">PoC público</span>');
+    if(r.cvss!=null) chips.push('<span class="chip cvss">CVSS '+r.cvss+'</span>');
+    if(r.min_tier!=null) chips.push('<span class="chip">tier '+r.min_tier+'</span>');
+    const mat=MAT[r.maturity]||r.maturity||"";
+    const age=daysAgo(r.first_seen_at);
+    return `<div class="imm" data-id="${r.id}">
+      ${dial(r.score)}
+      <div class="body">
+        <div class="prod">${esc(r.product||r.cve_id||"—")}</div>
+        <div class="meta"><span class="mono">${esc(r.cve_id||"sin CVE")}</span>
+          · <span class="badge-mat mat-${r.maturity}">${esc(mat)}</span>
+          ${age!=null?" · visto hace "+age+" d":""}</div>
+        <div class="chips">${chips.join("")}</div>
+      </div></div>`;
+  }).join("");
+  document.querySelectorAll(".imm").forEach(el=>el.onclick=()=>openDrawer(el.dataset.id));
+}
+
+function barChart(el, items, opts){
+  const max=Math.max(1,...items.map(i=>i.v));
+  el.innerHTML=items.map(i=>{
+    const w=(i.v/max*100).toFixed(1), col=i.color||"var(--accent)";
+    return `<div class="bar-row"><span class="lab" title="${esc(i.label)}">${esc(i.label)}</span>
+      <div class="bar-track"><div class="bar-fill" style="width:${w}%;background:${col}"></div></div>
+      <span class="val">${esc(opts&&opts.fmt?opts.fmt(i.v):i.v)}</span></div>`;
+  }).join("");
+}
+
+// tendencia: mini área apilada en SVG
+function renderTrend(el, series){
+  if(!series||!series.length){el.innerHTML='<div class="empty">sin datos</div>';return;}
+  const W=340,H=120,pad=4;
+  const keys=[["pre_cve","var(--m1)"],["cve_prereserved","var(--m2)"],["published","var(--ctx)"]];
+  const tot=series.map(s=>keys.reduce((a,[k])=>a+(s[k]||0),0));
+  const max=Math.max(1,...tot), n=series.length, bw=(W-pad*2)/n;
+  let bars="";
+  series.forEach((s,i)=>{
+    let y=H-pad; const x=pad+i*bw;
+    keys.forEach(([k,c])=>{const h=(s[k]||0)/max*(H-pad*2); y-=h;
+      bars+=`<rect x="${x+1}" y="${y.toFixed(1)}" width="${(bw-2).toFixed(1)}" height="${h.toFixed(1)}" fill="${c}"/>`;});
+  });
+  const labs=series.map((s,i)=>`<text x="${(pad+i*bw+bw/2).toFixed(1)}" y="${H-1}" font-size="8"
+    fill="var(--muted)" text-anchor="middle">${esc(String(s.period).slice(5))}</text>`).join("");
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H+12}" width="100%">${bars}${labs}</svg>
+    <div class="chips" style="margin-top:4px">
+      <span class="chip" style="border-color:var(--m1)">pre-CVE</span>
+      <span class="chip" style="border-color:var(--m2)">prereservado</span>
+      <span class="chip" style="border-color:var(--ctx)">publicado</span></div>`;
+}
+
+async function openDrawer(id){
+  $("#scrim").classList.add("on"); $("#drawer").classList.add("on"); $("#drawer").setAttribute("aria-hidden","false");
+  $("#dbody").innerHTML='<div class="empty">cargando…</div>';
+  try{
+    const c=await jget("/api/candidate/"+encodeURIComponent(id));
+    $("#dtitle").textContent=c.cve_id||("cand "+String(id).slice(0,8));
+    const cv=(c.cvss&&c.cvss[0])||null;
+    const aff=(c.affected||[]).map(a=>esc([a.vendor,a.product].filter(Boolean).join(" / ")+(a.ecosystem?" ("+a.ecosystem+")":""))).join("<br>")||"—";
+    // línea de meta NVD
+    const tl=(c.timeline||[]).slice().sort((a,b)=>new Date(a.seen_at)-new Date(b.seen_at));
+    const first=tl.length?tl[0].seen_at:c.first_seen_at;
+    let leadHtml="";
+    if(c.days_ahead_present!=null){
+      leadHtml=`<div class="lead"><b>${c.days_ahead_present} días</b> de ventaja sobre la publicación en NVD
+        (desde la primera señal del radar).</div>`;
+    }else if(c.status!=="published"){
+      const age=daysAgo(first);
+      leadHtml=`<div class="lead">CVE aún <b>${esc(c.status)}</b> — NVD todavía no ha publicado datos.
+        La señal lleva <b>${age!=null?age+" días":"—"}</b> en el radar. Ventana abierta.</div>`;
+    }
+    const race=(tl.length?tl:[]).map(e=>`<div class="ev"><span class="d">${fmtDate(e.seen_at)}</span>
+      <span class="t"><span class="src">${esc(e.source)}</span> — ${esc(e.title||"")}</span></div>`).join("")
+      + (c.status==="published"
+          ? `<div class="ev fin"><span class="d">meta</span><span class="t">NVD publica el CVE (línea de meta)</span></div>` : "");
+    const chips=[];
+    if(c.in_kev) chips.push('<span class="chip kev">KEV '+fmtDate(c.kev_date)+'</span>');
+    if(c.has_public_poc) chips.push('<span class="chip poc">PoC público</span>');
+    if(cv) chips.push('<span class="chip cvss">CVSS '+cv.base_score+' '+esc(cv.base_severity||"")+'</span>');
+    (c.cwe_ids||[]).slice(0,4).forEach(w=>chips.push('<span class="chip">'+esc(w)+'</span>'));
+    $("#dbody").innerHTML=`
+      ${leadHtml}
+      <div class="chips" style="margin:8px 0">${chips.join("")}</div>
+      <h3>La carrera — señales por orden de llegada</h3>
+      <div class="race">${race||'<div class="empty">sin señales</div>'}</div>
+      <h3>Software afectado</h3><div class="kv">${aff}</div>
+      <h3>CVSS</h3><div class="kv">${cv?('<b>'+cv.base_score+'</b> '+esc(cv.base_severity||"")+' · <span class="mono">'+esc(cv.vector||"")+'</span> · '+esc(cv.provenance)+'/'+esc(cv.source)):"—"}</div>
+      <h3>Identificadores</h3><div class="kv mono">${(c.identifiers||[]).map(i=>esc(i.scheme+":"+i.value)).join(" · ")||"—"}</div>
+      <h3>Referencias</h3><div class="reflist">${(c.reference_urls||[]).slice(0,8).map(u=>'<a href="'+esc(u)+'" target="_blank" rel="noopener">'+esc(u)+'</a>').join("")||"—"}</div>`;
+  }catch(e){ $("#dbody").innerHTML='<div class="empty">error cargando el candidate</div>'; }
+}
+function closeDrawer(){$("#scrim").classList.remove("on");$("#drawer").classList.remove("on");$("#drawer").setAttribute("aria-hidden","true");}
+$("#scrim").onclick=closeDrawer; $("#dclose").onclick=closeDrawer;
+addEventListener("keydown",e=>{if(e.key==="Escape")closeDrawer()});
+$("#surface").oninput=e=>renderImm(e.target.value);
+
+// carga
+(async function(){
+  try{
+    const [crit,lag,stats,trend,pending,emerging] = await Promise.all([
+      jget("/api/pending/critical?limit=60"),
+      jget("/api/lag/histogram"),
+      jget("/api/stats"),
+      jget("/api/trend?months=6"),
+      jget("/api/pending?kind=product"),
+      jget("/api/emerging?limit=100"),
+    ]);
+    IMM = crit.rows||[];
+    // KPIs
+    const imminent = IMM.filter(r=>(r.score||0)>=60).length;
+    const today = new Date().toISOString().slice(0,10);
+    const newToday = (emerging.rows||[]).filter(r=>String(r.first_seen_at||"").slice(0,10)===today).length;
+    $("#kpis").innerHTML=[
+      {n:imminent, c:"crit", l:"Inminentes ahora", s:"score ≥ 60 · exploit/KEV/severidad"},
+      {n:(lag.median!=null?lag.median:"—"), c:"good", l:"Ventaja mediana (días)", s:"p90 = "+(lag.p90!=null?lag.p90:"—")+" · n="+(lag.count||0)},
+      {n:newToday, c:"", l:"Nuevos hoy en el radar", s:"primera detección = hoy"},
+      {n:(pending.total!=null?pending.total.toLocaleString():"—"), c:"", l:"Pendientes de NVD", s:"pre-CVE "+((pending.by_maturity||{}).pre_cve||0)},
+    ].map(k=>`<div class="kpi"><div class="n ${k.c}">${k.n}</div><div class="l">${k.l}</div><div class="s">${k.s}</div></div>`).join("");
+    renderImm("");
+    // ventaja: histograma
+    barChart($("#lag"), (lag.bins||[]).map(b=>({label:b.label+" d",v:b.count})), {});
+    // fuentes
+    const ss=(stats.sources||[]).slice().sort((a,b)=>parseFloat(b.avg_days)-parseFloat(a.avg_days)).slice(0,12);
+    barChart($("#srcs"), ss.map(s=>({label:s.source,v:parseFloat(s.avg_days),color:"var(--m2)"})),
+      {fmt:v=>v.toFixed(1)+"d"});
+    // tendencia
+    renderTrend($("#trend"), trend.series||[]);
+  }catch(e){
+    $("#imm").innerHTML='<div class="empty">no se pudo cargar la API ('+esc(e.message)+'). ¿Está el backend en marcha?</div>';
+  }
+})();
+</script>
+</body>
+</html>
