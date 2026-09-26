@@ -5,13 +5,49 @@ picks up signals that a vulnerability exists **before** its CVE is published and
 analyzed in NVD, and measures how many *lead days* each source gains over NVD.
 
 All code lives in the `app/` package and runs as plain Python processes over
-Postgres 16. FastAPI serves a read-only API and two static dashboards.
+Postgres 16. FastAPI serves a read-only JSON API plus two dashboards: the
+official "imminent" dashboard at `/` (and its alias `/next`) and the operational
+`/pending_status` dashboard; `/healthz` is the database health check.
 
 > **Framing.** MITRE (cvelistV5) and OSV are the **finish line** — the authoritative,
 > canonical record of what a vulnerability *is*. Foreshock does not try to replace them;
 > it watches the **race** that happens before they cross that line: the reserved id, the
 > exploit template, the security commit, the KEV entry. See
 > [*What Foreshock answers that MITRE/OSV cannot*](#what-foreshock-answers-that-mitreosv-cannot).
+
+---
+
+## Conceptual process — the race Foreshock watches
+
+Before the component wiring, the idea in one picture: a public signal appears, Foreshock
+captures and correlates it into a **candidate**, enriches and scores it, and it stays
+**pending** until NVD crosses the finish line — the gap between the two is the **lead time**
+Foreshock measures and the window an operator can act in.
+
+```mermaid
+flowchart LR
+    SIG["First public signal<br/>security commit · GHSA/OSV · exploit template · KEV · reserved CVE"]
+    CAP["Capture and correlate<br/>into one candidate<br/>(union-find over identifiers)"]
+    ENR["Enrich and score<br/>LLM metrics · CVSS · EPSS · affected products · Foreshock Score"]
+    PEND(["Pending<br/>NVD has not published yet"])
+    NVD["NVD publishes<br/>= finish line"]
+    LEAD["Lead time recorded<br/>days_ahead_vs_nvd_present"]
+    ACT["Operator acts early<br/>the advantage"]
+
+    SIG --> CAP --> ENR --> PEND
+    PEND ==>|the race window| NVD --> LEAD
+    PEND --> ACT
+
+    classDef sig fill:#eef,stroke:#88a;
+    classDef proc fill:#fee,stroke:#c88;
+    classDef goal fill:#efe,stroke:#7a7;
+    class SIG sig;
+    class CAP,ENR proc;
+    class PEND,NVD,LEAD,ACT goal;
+```
+
+Legend: **blue** = external signal · **red** = Foreshock processing · **green** = outcome
+(the pending state, NVD's publication, the recorded lead, and the operator's early action).
 
 ---
 
@@ -25,11 +61,11 @@ flowchart LR
         CVELIST["cvelistV5<br/>(git shallow clone)"]
         NVD["NVD 2.0<br/>delta feed"]
         EPSSAPI["EPSS<br/>FIRST.org"]
-        T1["Tier1 · CISA KEV · VulnCheck KEV · CERT/CC VU# · ZDI published/upcoming · CERT-EU"]
-        T2["Tier2 · Red Hat CSAF · Siemens · Palo Alto · Spring · FortiGuard · Veeam"]
-        T3["Tier3 · Nessus · nuclei-templates · metasploit · Full Disclosure · oss-security"]
-        T4["Tier4 · GHSA · github_commits (blobless clone) · OSV.dev"]
-        T5["Tier5 · The Hacker News · ZDI blog"]
+        T1["Tier1 (6) · cisa_kev · vulncheck_kev · certcc_vu · zdi_published · zdi_upcoming · certeu"]
+        T2["Tier2 (10) · redhat_csaf · siemens_cert · paloalto · spring_security · fortiguard_psirt · veeam · cisco_psirt · jenkins_security · msrc · github_repo_advisories"]
+        T3["Tier3 (9) · nessus · nuclei_templates · metasploit · fulldisclosure · oss_security · exploitdb · poc_in_github · trickest_cve · wordfence"]
+        T4["Tier4 (5) · github_advisories · github_commits (blobless clone) · osv · gemnasium · kernel_cve"]
+        T5["Tier5 (2) · thehackernews · zdi_blog"]
     end
 
     %% ---------------- baseline-worker ----------------
@@ -46,7 +82,7 @@ flowchart LR
     %% ---------------- sources-worker ----------------
     subgraph SW["sources-worker (AsyncIOScheduler + hot reconcile)"]
         direction TB
-        FETCH["BaseSource.fetch()<br/>22 fetchers, isolated"]
+        FETCH["BaseSource.fetch()<br/>32 fetchers, isolated"]
         INGEST["ingest_mention()<br/>1 extract_identifiers (declared-only identity)<br/>2 drop if no RECOGNIZED_SCHEME<br/>3 resolve_candidate (union-find)<br/>4 content_hash (idempotency)<br/>5 persist raw + mention + soft refs<br/>6 aggregates + days_ahead"]
         ENRICH["enrich_candidate()<br/>LLM metrics · authoritative+derived CVSS<br/>severity_hint · affected products"]
         FETCH --> INGEST --> ENRICH
@@ -96,11 +132,13 @@ flowchart LR
     VOL["Volume data:/data<br/>raw_html · cvelistV5 clone · GitHub caches"]
     MIG["migrate<br/>alembic upgrade head"]
     CLI["CLI foreshock<br/>db · sources · baseline · emerging · cve · enrich · stats · pending · trend · backfill-products"]
+    API["api (uvicorn) · read-only<br/>dashboards: / and /next (imminent) · /pending_status (operational) · /healthz<br/>JSON: /api/pending · pending/critical · pending/breakdown · emerging · trend · lag/histogram · queue/age · velocity · stats · software · candidate/{key} · admin/status"]
 
     BW -.-> VOL
     SW -.-> VOL
     MIG --> PG
     CLI --> PG
+    PG --> API
 
     classDef ext fill:#eef,stroke:#88a;
     classDef store fill:#efe,stroke:#7a7;
@@ -128,7 +166,7 @@ clone):
 | `migrate` | `alembic upgrade head` | Applies the migrations and exits. Both workers wait for it via `depends_on: migrate: {condition: service_completed_successfully}`. |
 | `baseline-worker` | `python -m app.baseline` | Syncs the canonical state (cvelistV5 + NVD 2.0 delta + EPSS) in a loop. |
 | `sources-worker` | `python -m app.sources` | Runs the enabled fetchers on their cadences; ingests mentions and enriches candidates. |
-| `api` | `uvicorn app.api.main:app` | Read-only JSON API plus `/` and `/pending_status`. |
+| `api` | `uvicorn app.api.main:app` | Read-only JSON API plus the official "imminent" dashboard at `/` (and `/next`), the operational `/pending_status` dashboard, and the `/healthz` DB check. |
 
 `migrate` is an ephemeral single-use job; the two workers and API are
 long-running (`restart: unless-stopped`). The workers share `data:/data` (raw
@@ -197,13 +235,16 @@ active/queued jobs and worker liveness without mounting the Docker socket.
                                              ▼
  ┌──────────────────── sources-worker ───────────────────────────────────────┐
  │  BaseSource.fetch(ctx) ──► list[FetchedMention]        (Layer 2: capture)  │
- │  22 fetchers by tier:                                                      │
+ │  32 fetchers by tier:                                                      │
  │   T1 cisa_kev · vulncheck_kev · certcc_vu · zdi_published · zdi_upcoming · │
- │      certeu                                                                 │
+ │      certeu                                                                │
  │   T2 redhat_csaf · siemens_cert · paloalto · spring_security ·             │
- │      fortiguard_psirt · veeam                                              │
- │   T3 nessus · nuclei_templates · metasploit · fulldisclosure · oss_security│
- │   T4 github_advisories · github_commits (blobless clone) · osv             │
+ │      fortiguard_psirt · veeam · cisco_psirt · jenkins_security · msrc ·    │
+ │      github_repo_advisories                                                │
+ │   T3 nessus · nuclei_templates · metasploit · fulldisclosure ·             │
+ │      oss_security · exploitdb · poc_in_github · trickest_cve · wordfence   │
+ │   T4 github_advisories · github_commits (blobless clone) · osv · gemnasium │
+ │      · kernel_cve                                                          │
  │   T5 thehackernews · zdi_blog                                              │
  │        │                                                                   │
  │        ▼  ingest_mention()   (app/ingest/service.py)                       │
@@ -341,6 +382,28 @@ works the same way but is sealed only when the observed status is `Analyzed`). I
 a fact on *our* clock — "at this instant the CVE was already in NVD for us" — so it is
 immune to backfill. That is why `days_ahead_vs_nvd_present` is the robust lead metric and
 the default in the CLI (`emerging`, `stats`) and the `radar` view.
+
+### Two distinct "operational" scopings — don't conflate them
+
+The read-only API applies **two different** operational floors:
+
+- **The lead / "Ventaja" metric** (`/api/lag/histogram`, `metric=present`, default
+  `include_historical=false`) measures lead **only from Foreshock's real operational
+  start** — derived *dynamically* at query time from
+  `min(published_cves.nvd_first_observed_at)` (the day the baseline first observed
+  anything). The `FORESHOCK_OPERATIONAL_START` env var overrides it, and it falls back
+  to the fixed `OPERATIONAL_MIN_DATE` (`2026-01-01`) **only** when nothing has been
+  observed yet. The response echoes the floor it used in an `operational_start` field.
+  `include_historical=true` restores the older rolling-window / all-time behavior (and
+  `operational_start` is then `null`). This keeps signals that carry old advisory dates
+  (e.g. pre-install GitHub advisories) from counting as spurious pre-installation lead.
+- **The `pending` / `trend` operational window** filters use instead the **fixed**
+  `OPERATIONAL_MIN_DATE = 2026-01-01` constant (`app/core/operational.py`) — a static
+  product-window floor, *not* the dynamically derived operational start above. These are
+  two distinct notions.
+
+`/api/velocity` reports the daily count of `candidates.created_at` over the last N days —
+Foreshock's own **capture clock** (the real ingestion rhythm, not the advisory date).
 
 ---
 

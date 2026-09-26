@@ -35,9 +35,13 @@ def upsert_published(session, record) -> None  # ON CONFLICT (id) DO UPDATE
 - `parse_cve_record` es **pura y testeable** (sin red ni BD): extrae `id`,
   `state`, `cvelist_published_at`, `cvelist_updated_at`, `assigner_short_name`,
   `cna`, `raw_json`. **Nunca** toca campos `nvd_*`.
-- `_changed_json_files` usa `git diff --name-only HEAD@{1} HEAD` filtrando
-  `cves/**.json`. Si no hay revisión previa, cae a `_all_json_files` (rglob de
-  `CVE-*.json`).
+- `_changed_json_files` usa `git diff --name-only {cursor} HEAD`, donde `{cursor}`
+  es el último HEAD PROCESADO con éxito (fila `cvelist` de `sync_state`); sin
+  cursor cae al reflog histórico `HEAD@{1}`, y si el diff falla, a
+  `_all_json_files` (rglob de `CVE-*.json`). Se fuerza un full automático si el
+  espejo no tiene datos de cvelist (tabla vaciada) o si falta el marcador
+  `full_import_complete` (en `sync_state.extra`) porque el full previo no llegó a
+  completarse.
 - `upsert_published` actualiza estado/fechas de cvelist/cna/raw_json/ingested_at
   y **no pisa** los `nvd_*`. Un JSON malo no tumba el sync
   (`cvelist.parse_error`).

@@ -61,7 +61,7 @@ foreshock sources run redhat_csaf
 
 ```bash
 foreshock sources harvest-repos
-# {'reference': 812, 'past_cve': 96, 'top_n': 10000, 'criticality': 0, 'downloads': 0}
+# {'reference': 812, 'past_cve': 96, 'top_n': 1000, 'criticality': 0, 'downloads': 0}
 
 foreshock sources reextract-commits
 # menciones re-extraídas de caché: 1843
@@ -80,6 +80,8 @@ foreshock baseline nvd-full                     # backfill completo de NVD 2.0 (
 foreshock baseline epss-full                    # dump completo del CSV de EPSS (todos los scores actuales)
 foreshock baseline enrich-nvd                   # deriva CVSS/CWE/CPE/refs/SSVC desde raw_json
 foreshock baseline enrich-nvd --batch 5000      # tamaño de página keyset (default 2000)
+foreshock baseline enrich-nvd --full            # reprocesa todo el histórico (default incremental)
+foreshock baseline reconcile                    # recalcula days_ahead + promociona CVEs ya publicados en NVD
 ```
 
 - `baseline sync` → `run_baseline_once(nvd_hours=…, force_full_cvelist=…)` e
@@ -95,7 +97,11 @@ foreshock baseline enrich-nvd --batch 5000      # tamaño de página keyset (def
   desnormalizadas de `published_cves` (CVSS/CWE primarios, flags de
   exploit/patch, SSVC). Sin red e **idempotente** (delete-by-cve + insert).
   `--batch` es el tamaño de página keyset sobre `published_cves.id` (default
-  2000).
+  2000); `--full` reprocesa el histórico completo (por defecto es incremental).
+- `baseline reconcile` → `reconcile_pending_days_ahead(session, limit=…)`
+  recalcula el KPI `days_ahead` y promociona los candidates cuyo CVE ya publicó
+  NVD. Crítico tras un sync del baseline (si no, `pending` acumula falsos
+  positivos). `--limit` acota el nº de candidates.
 
 ---
 

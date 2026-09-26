@@ -7,8 +7,8 @@ Complete reference for the operations and query CLI (Typer + Rich), defined in
 
 The app is built with `typer.Typer(no_args_is_help=True)`. It has three
 sub-applications registered with `app.add_typer(...)` — `db`, `sources`,
-`baseline` — plus the top-level query commands `emerging`, `cve`, `enrich`,
-`stats`, `pending`, `trend`, and `backfill-products`.
+`baseline` — plus the top-level commands `emerging`, `cve`, `enrich`,
+`enrich-batch`, `stats`, `pending`, `trend`, and `backfill-products`.
 
 Query commands share two helpers:
 
@@ -118,7 +118,7 @@ consumed by `github_commits`:
   `cve_reference`, `candidates.reference_urls`); those whose citing candidate
   already has a CVE become higher-priority `past_cve`. **Always run** (own data).
 - `top_n` — top-N repos by stars via the GitHub Search API (`github_top_n`,
-  default 10000). **Always run.**
+  default 1000). **Always run.**
 - `criticality` — OpenSSF Criticality Score CSV. **Opt-in** via
   `FORESHOCK_CRITICALITY_CSV_URL`.
 - `downloads` — top PyPI packages by 30-day downloads → their repos. **Opt-in**
@@ -126,7 +126,7 @@ consumed by `github_commits`:
 
 ```bash
 foreshock sources harvest-repos
-# {'reference': 812, 'past_cve': 96, 'top_n': 10000, 'criticality': 0, 'downloads': 0}
+# {'reference': 812, 'past_cve': 96, 'top_n': 1000, 'criticality': 0, 'downloads': 0}
 ```
 
 `github_commits` also bootstraps the registry itself (references + top-N) if it is
@@ -159,6 +159,8 @@ foreshock baseline nvd-full                    # full NVD 2.0 backfill (~270k CV
 foreshock baseline epss-full                   # full EPSS CSV dump (all current scores)
 foreshock baseline enrich-nvd                  # derive CVSS/CWE/CPE/refs/SSVC from raw_json
 foreshock baseline enrich-nvd --batch 5000     # keyset batch size (default 2000)
+foreshock baseline enrich-nvd --full           # reprocess the whole history (default incremental)
+foreshock baseline reconcile                   # recompute days_ahead + promote CVEs NVD now published
 ```
 
 ### `baseline sync`
@@ -198,11 +200,23 @@ so it is safe to re-run after each baseline pull. Prints the counts dict.
 | Option | Type / default | Effect |
 |---|---|---|
 | `--batch` | `int` = `2000` | Keyset page size over `published_cves.id`. |
+| `--full` | `bool` = `False` | Reprocess the **entire** history (use after changing the parser); default is incremental. |
 
 ```bash
 foreshock baseline enrich-nvd
 # {'processed': 271034, 'cvss': 240110, 'cwe': 198221, 'cpe': 512004, 'refs': 903112}
 ```
+
+### `baseline reconcile`
+`reconcile_pending_days_ahead(session, limit=…)` recomputes the `days_ahead` KPI
+and promotes candidates whose CVE NVD has now published. Critical after a baseline
+sync: without it, `pending` accumulates false positives (candidates still in
+`candidate` state whose CVE is already in NVD). Prints
+`reconcile: <n> candidates actualizados`.
+
+| Option | Type / default | Effect |
+|---|---|---|
+| `--limit` | `int \| None` = `None` | Max candidates to process (all if unset). |
 
 ---
 
@@ -295,6 +309,22 @@ exists, and upserts `affected_products`. The LLM backend is chosen by
 
 ---
 
+## `enrich-batch` — enrich pending candidates in bulk
+
+```bash
+foreshock enrich-batch
+foreshock enrich-batch --limit 200
+```
+
+Runs `enrich_pending(limit=…)` under `asyncio.run` (the service manages its own
+sessions) and prints the summary dict `{enriched, skipped, errors}`.
+
+| Option | Type / default | Effect |
+|---|---|---|
+| `--limit` | `int` = `50` | Max candidates to enrich in this run. |
+
+---
+
 ## `stats` — lead metrics per source
 
 ```bash
@@ -350,26 +380,34 @@ foreshock pending --kind all --format json
 
 | Option | Type / default | Effect |
 |---|---|---|
-| `--top` | `int` = `20` | Number of software entries in the ranking (`Counter.most_common(top)`). |
+| `--top` | `int` = `20` | Number of software entries in the ranking (SQL `ORDER BY pending DESC … LIMIT`). |
 | `--kind` | `str` = `product` | `product` / `distro` / `malware` / `all` — which class of affected software to rank. |
+| `--tech` | `str \| None` = `None` | Restrict to affected products whose name matches (case-insensitive substring). |
+| `--maturity` | `str` = `all` | `all` / `pre_cve` (no CVE yet: ZDI/GHSA/RUSTSEC…) / `cve_prereserved` (CVE assigned, no official record yet — the earliest signal) / `cve_reserved` (CVE recorded in the mirror but NVD not yet published). |
 | `--format` / `-f` | `str` = `table` | `table` / `json` / `csv`. |
 
 ### What "pending" means
-Both `pending` and `trend` read the shared query `_PENDING_AP_SQL`
-(`_load_pending`), which LEFT JOINs `candidates` to `affected_products` and keeps
-a candidate iff:
+`pending` and `trend` are only a presentation layer: the canonical `pending`
+definition and its aggregates live in `app/api/queries.py` (`pending_top` /
+`trend_series`, predicate `PENDING_WHERE_SQL`) and are **reused** here — the SQL
+is not duplicated in `app/cli.py`. A candidate is kept iff it is live, not
+`rejected`, not `withdrawn`, has a **non-malware** affected product (and no
+malware one), NVD is still silent about it, and its `first_seen_at` is on/after
+Foreshock's operational start:
 
 ```sql
-c.merged_into IS NULL
+c.merged_into IS NULL AND c.status <> 'rejected' AND c.withdrawn IS NOT TRUE
 AND ( c.cve_id IS NULL
    OR NOT EXISTS (SELECT 1 FROM published_cves p
-                  WHERE p.id = c.cve_id AND p.state = 'PUBLISHED') )
+                  WHERE p.id = c.cve_id
+                    AND (p.nvd_published_at IS NOT NULL OR p.state = 'REJECTED')) )
+-- + a non-malware affected_products row, no malware row, and the operational floor
 ```
 
 So a candidate is **pending** when it is live and either (a) has **no** CVE yet,
-or (b) references a CVE that is **not `PUBLISHED`** in our baseline (only
-`RESERVED`/`REJECTED`, or not ingested at all). This is the set of things the
-official catalogs have not (fully) published while the radar already tracks them.
+or (b) references a CVE for which NVD still has no `nvd_published_at` (and which
+MITRE has not `REJECTED`). This is the set of things the official catalogs have
+not (fully) published while the radar already tracks them.
 
 ### Kind classification
 `affected_products.kind` is set at ingest time by `classify_kind(ecosystem,
@@ -383,27 +421,31 @@ is_malware)` in `app/ingest/affected.py`:
 - `product` — everything else (real package ecosystems: PyPI, Go, npm, …).
 
 ### Aggregation
-Rows are grouped per candidate into a set of `(product, kind)` pairs. The meta
-counts candidates (a candidate counts once per distinct kind it touches); the
-ranking counts, per product name, how many pending candidates reference it,
-filtered to the requested `kind` (or all).
+Aggregated entirely in SQL (`count(DISTINCT …)` / `GROUP BY`, `pend AS
+MATERIALIZED` so the predicate is evaluated once). `total` is the count of pending
+candidates; the per-kind buckets count, per `kind`, the distinct pending
+candidates with an affected product of that kind — a candidate touching several
+kinds is counted in each, so the buckets **overlap** and their sum can exceed
+`total`. The ranking counts, per product name, how many pending candidates
+reference it, filtered to the requested `kind` (or all) and `--tech`.
 
-Columns: `software`, `cves_pendientes` (count of pending candidates naming that
+Columns: `software`, `pending_vulns` (count of pending candidates naming that
 software).
 
-Meta keys: `total` (pending candidates), `con_software` (those with any resolved
-product), `product` / `distro` / `malware` (candidate counts by kind), `kind`
-(the filter used).
+Meta keys: `total` (pending candidates), `product` / `distro` / `malware`
+(candidate counts by kind), `kind` and `maturity` (the filters used). When
+`--maturity all`, the maturity breakdown `pre_cve` / `cve_reserved` is also
+added.
 
 ```
                  Top software (kind=product)
-┏━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┓
-┃ software             ┃ cves_pendientes ┃
-┡━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━┩
-│ tensorflow           │ 14              │
-│ pillow               │ 9               │
-└──────────────────────┴─────────────────┘
-total=512  con_software=430  product=380  distro=95  malware=37  kind=product
+┏━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┓
+┃ software             ┃ pending_vulns ┃
+┡━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━┩
+│ tensorflow           │ 14            │
+│ pillow               │ 9             │
+└──────────────────────┴───────────────┘
+total=512  product=380  distro=95  malware=37  kind=product  maturity=all  pre_cve=210  cve_reserved=180
 ```
 
 ---
@@ -420,19 +462,20 @@ foreshock trend --kind all --granularity year --months 0 --format csv
 |---|---|---|
 | `--kind` | `str` = `all` | `product` / `distro` / `malware` / `all` — restrict to candidates touching that kind. |
 | `--granularity` | `str` = `month` | `month` (`%Y-%m` buckets) or `year` (`%Y` buckets). |
-| `--months` | `int` = `12` | Look-back window in months (`cutoff = now - 30*months days`). `0` (or negative) disables the cutoff (all history). |
+| `--months` | `int` = `12` | Look-back window in months (the cutoff is aligned to the start of the current period). `0` (or negative) → all history (mapped internally to 1200 months). |
 | `--format` / `-f` | `str` = `table` | `table` / `json` / `csv`. |
 
 Buckets each pending candidate by its **`first_seen_at`** — the earliest radar
 signal for it (earliest commit date, OSV `published`, KEV `dateAdded`, etc.), not
-the CVE's official date. A candidate with `first_seen_at IS NULL`, outside the
-kind filter, or older than the cutoff is skipped. Empty result →
+the CVE's official date (delegates to `trend_series`, reading its
+`pre_published` count per period). A candidate with `first_seen_at IS NULL`,
+outside the kind filter, or older than the cutoff is skipped. Empty result →
 `sin datos temporales` and returns.
 
-- **`table`**: columns `periodo`, `pendientes`, and an unlabeled bar column
-  (`"█" * round(40 * count / peak)`) — an ASCII histogram to eyeball the
+- **`table`**: columns `period`, `pending`, and an unlabeled bar column
+  (`"█" * max(1, round(40 * count / peak))`) — an ASCII histogram to eyeball the
   hockey-stick. Meta footer `kind=… months=…`.
-- **`json` / `csv`**: columns `periodo`, `pendientes` only (no bar). JSON carries
+- **`json` / `csv`**: columns `period`, `pending` only (no bar). JSON carries
   the `meta` object; CSV omits it.
 
 ---
@@ -446,7 +489,7 @@ foreshock backfill-products --batch 2000
 
 | Option | Type / default | Effect |
 |---|---|---|
-| `--batch` | `int` = `1000` | `session.flush()` every N persisted candidates. |
+| `--batch` | `int` = `1000` | Commit a transaction every N persisted candidates (so partial progress survives an interrupt). |
 
 Idempotent. For every live candidate that has **no** `affected_products` row yet,
 it derives one software string via a COALESCE of three heuristics, in order:
@@ -485,11 +528,13 @@ don't duplicate. Prints `backfill: <n> candidates con affected_products`.
 | `baseline sync` | `--nvd-hours`, `--full-cvelist` |
 | `baseline nvd-full` | — |
 | `baseline epss-full` | — |
-| `baseline enrich-nvd` | `--batch` |
+| `baseline enrich-nvd` | `--batch`, `--full` |
+| `baseline reconcile` | `--limit` |
 | `emerging [list]` | `--since`, `--source`, `--tier`, `--min-mentions`, `--limit`, `--format/-f` |
 | `cve show <key>` | — |
 | `enrich <key>` | — |
+| `enrich-batch` | `--limit` |
 | `stats` | `--format/-f` |
-| `pending` | `--top`, `--kind`, `--format/-f` |
+| `pending` | `--top`, `--kind`, `--tech`, `--maturity`, `--format/-f` |
 | `trend` | `--kind`, `--granularity`, `--months`, `--format/-f` |
 | `backfill-products` | `--batch` |

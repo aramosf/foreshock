@@ -31,7 +31,9 @@ Registro y carga:
 - `@register` valida que la clase tenga `name`, rechaza duplicados y la añade a
   `REGISTRY`.
 - `load_all()` importa todos los módulos de `app/sources/` (excepto `base`,
-  `browser`, `runner`, `robots`) para poblar `REGISTRY`.
+  `browser`, `runner`, `__main__`) para poblar `REGISTRY`. El resto de módulos
+  sin fetchers (`http`, `cache`, `feeds_rss`, `repo_registry`, `gitproc`,
+  `gitsrc`) se importan pero no registran nada.
 - `sync_registry_to_db()` (`app/sources/runner.py`) crea/actualiza la fila de
   `sources` de cada fetcher. **`cadence_seconds` no se pisa** al re-sincronizar:
   puede haberse ajustado en operación.
@@ -56,11 +58,12 @@ Metadato declarativo (guardado en `sources.method`, `CHECK method IN
 
 ---
 
-## Los 22 fetchers (por tier)
+## Los 32 fetchers (por tier)
 
-Cada feed RSS/Atom de los tiers 1–3/5 es un fetcher **registrado por separado**,
-generado a partir de una fila de la tabla `_FEEDS` en `app/sources/feeds_rss.py`
-(ver framework RSS abajo). El resto son módulos escritos a mano.
+La mayoría de feeds RSS/Atom son fetchers **registrados por separado**, generados
+a partir de una fila de la tabla `_FEEDS` en `app/sources/feeds_rss.py` (ver
+framework RSS abajo). Unos pocos RSS (`certcc_vu`, `thehackernews`,
+`jenkins_security`, `kernel_cve`) y todos los no-RSS son módulos escritos a mano.
 
 ### Tier 1 — más temprano / máxima prioridad
 
@@ -83,6 +86,10 @@ generado a partir de una fila de la tabla `_FEEDS` en `app/sources/feeds_rss.py`
 | `spring_security` | rss | `spring.io/security.atom` | Advisories de Spring Security. |
 | `fortiguard_psirt` | rss | `fortiguard.com/rss/ir.xml` | Advisories IR de FortiGuard PSIRT. |
 | `veeam` | rss | `veeam.com/services/open/kb/security-feed` | Advisories de seguridad de Veeam. |
+| `cisco_psirt` | api | `sec.cloudapps.cisco.com/security/center/publicationService.x?advisoryFormat=json` | Advisories de Cisco PSIRT. |
+| `msrc` | rss | `api.msrc.microsoft.com/update-guide/rss` | Microsoft Security Response Center (Update Guide). |
+| `jenkins_security` | rss | `jenkins.io/security/advisories/rss.xml` | Advisories de seguridad de Jenkins. |
+| `github_repo_advisories` | api | `api.github.com/repos/{o}/{r}/security/advisories` + `/releases` | GHSA por-repo + notas de release escaneadas por CVE. PAT opcional (sube el rate limit). |
 
 ### Tier 3 — artefactos de exploit/detección y listas de disclosure
 
@@ -93,6 +100,10 @@ generado a partir de una fila de la tabla `_FEEDS` en `app/sources/feeds_rss.py`
 | `metasploit` | api (git) | `github.com/rapid7/metasploit-framework` (commits) | Módulo de exploit nuevo = exploit fiable existe. PAT de GitHub recomendado. |
 | `fulldisclosure` | rss | `seclists.org/rss/fulldisclosure.rss` | Lista Full Disclosure. |
 | `oss_security` | rss | `seclists.org/rss/oss-sec.rss` | Lista oss-security. |
+| `exploitdb` | api (CSV) | `gitlab.com/exploit-database/exploitdb/-/raw/main/files_exploits.csv` | Archivo de Exploit-DB; existe un exploit público (puede citar un CVE aún reservado). |
+| `wordfence` | api | `wordfence.com/api/intelligence/v3/vulnerabilities/production` | Vulns de WordPress (plugins/themes/core). API key gratuita (`FORESHOCK_WORDFENCE_API_KEY`); inactivo sin ella. |
+| `poc_in_github` | git | `github.com/nomi-sec/PoC-in-GitHub` | CVE → repos con PoC público. |
+| `trickest_cve` | git | `github.com/trickest/cve` | CVE → PoC + producto. |
 
 ### Tier 4 — feeds de advisories y escaneo de commits
 
@@ -101,6 +112,8 @@ generado a partir de una fila de la tabla `_FEEDS` en `app/sources/feeds_rss.py`
 | `github_advisories` | api | `api.github.com/advisories` | GHSA + CVE + paquetes afectados. PAT opcional (sube el rate limit). |
 | `github_commits` | git | clone blobless + `git log` de los repos vigilados | CVEs citados en mensajes de commit (a menudo reservados). PAT (embebido en la URL del clone). |
 | `osv` | api | `osv-vulnerabilities.storage.googleapis.com/{eco}/all.zip` | Advisories por ecosistema, datos estructurados ricos. |
+| `gemnasium` | git | `gitlab.com/gitlab-org/security-products/gemnasium-db` | Snapshot de la GitLab Advisory Database. |
+| `kernel_cve` | rss | `lore.kernel.org/linux-cve-announce/new.atom` | CVEs del kernel Linux (linux-cve-announce). |
 
 ### Tier 5 — noticias / resúmenes
 
@@ -131,10 +144,12 @@ adelantarse más al CVE público). Se usa para filtrar en la CLI (`emerging
 
 ### Framework de feeds RSS/Atom (`app/sources/feeds_rss.py`)
 
-Los 11 fetchers RSS/Atom son **data-driven**: una sola tabla `_FEEDS` de filas
-`(name, kind, tier, url)`, una subclase de `BaseSource` generada dinámicamente
-por fila (`method="rss"`, `cadence_seconds=3600`), todas registradas vía
-`register`. Añadir un feed = añadir una fila.
+La tabla `_FEEDS` genera **12** fetchers RSS/Atom **data-driven**: filas
+`(name, kind, tier, url)` (con un 5º elemento opcional `browser_ua`), una subclase
+de `BaseSource` generada dinámicamente por fila (`method="rss"`,
+`cadence_seconds=3600`), todas registradas vía `register`. Añadir un feed = añadir
+una fila. (Los otros cuatro RSS —`certcc_vu`, `thehackernews`, `jenkins_security`,
+`kernel_cve`— son módulos escritos a mano con parseo propio, no filas de `_FEEDS`.)
 
 Cada entrada se convierte en menciones con `_mentions_for_entry`, aplicando la
 misma política anti-sobre-fusión del resto del pipeline. Corre
@@ -227,7 +242,7 @@ las corre en orden, expuesta como `foreshock sources harvest-repos`):
 
 | `origin` | Prioridad | Fuente | Activada |
 |---|---|---|---|
-| `top_n` | 0 | Top-N repos por estrellas vía Search API de GitHub, ventanas descendentes de estrellas (`stars:>=50`, luego `stars:{floor}..{page_min}`), hasta `github_top_n` (default `10000`). **Se mantiene — adicional, no reemplazo.** | siempre |
+| `top_n` | 0 | Top-N repos por estrellas vía Search API de GitHub, ventanas descendentes de estrellas (`stars:>=50`, luego `stars:{floor}..{page_min}`), hasta `github_top_n` (default `1000`). **Se mantiene — adicional, no reemplazo.** | siempre |
 | `reference` | 10 | Repos citados en URLs de referencia de advisories: `mentions.url`, `cve_reference.url`, `candidates.reference_urls[]` → `github.com/owner/repo`. | siempre |
 | `past_cve` | 20 | Subconjunto de `reference` cuyo candidate citante **ya tiene un CVE** (mayor prioridad). | siempre |
 | `criticality` | 15 | CSV de OpenSSF Criticality Score (cualquier columna con URL de GitHub). | opt-in vía `FORESHOCK_CRITICALITY_CSV_URL` |

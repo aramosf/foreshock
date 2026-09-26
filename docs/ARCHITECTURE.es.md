@@ -6,7 +6,44 @@ que su CVE esté publicado y analizado en NVD, y mide cuántos días de ventaja
 obtiene cada fuente.
 
 Todo el código vive en el paquete `app/` y se ejecuta como procesos Python
-sobre Postgres 16. FastAPI sirve una API de solo lectura y dos dashboards.
+sobre Postgres 16. FastAPI sirve una API JSON de solo lectura y dos dashboards:
+el dashboard oficial "inminente" en `/` (y su alias `/next`) y el dashboard
+operativo `/pending_status`; `/healthz` es el chequeo de salud de la base de datos.
+
+---
+
+## Proceso conceptual — la carrera que vigila Foreshock
+
+Antes del cableado de componentes, la idea en una imagen: aparece una señal pública,
+Foreshock la captura y correlaciona en un **candidate**, lo enriquece y puntúa, y queda
+**pendiente** hasta que NVD cruza la línea de meta — el hueco entre ambos es la **ventaja**
+que Foreshock mide y la ventana en la que un operador puede actuar.
+
+```mermaid
+flowchart LR
+    SIG["Primera señal pública<br/>commit de seguridad · GHSA/OSV · plantilla de exploit · KEV · CVE reservado"]
+    CAP["Captura y correlaciona<br/>en un candidate<br/>(union-find sobre identificadores)"]
+    ENR["Enriquece y puntúa<br/>métricas LLM · CVSS · EPSS · productos afectados · Foreshock Score"]
+    PEND(["Pendiente<br/>NVD aún no ha publicado"])
+    NVD["NVD publica<br/>= línea de meta"]
+    LEAD["Ventaja registrada<br/>days_ahead_vs_nvd_present"]
+    ACT["El operador actúa antes<br/>la ventaja"]
+
+    SIG --> CAP --> ENR --> PEND
+    PEND ==>|ventana de la carrera| NVD --> LEAD
+    PEND --> ACT
+
+    classDef sig fill:#eef,stroke:#88a;
+    classDef proc fill:#fee,stroke:#c88;
+    classDef goal fill:#efe,stroke:#7a7;
+    class SIG sig;
+    class CAP,ENR proc;
+    class PEND,NVD,LEAD,ACT goal;
+```
+
+Leyenda: **azul** = señal externa · **rojo** = procesamiento de Foreshock · **verde** =
+resultado (el estado pendiente, la publicación de NVD, la ventaja registrada y la acción
+temprana del operador).
 
 ---
 
@@ -20,11 +57,11 @@ flowchart LR
         CVELIST["cvelistV5<br/>(git shallow)"]
         NVD["NVD 2.0<br/>delta feed"]
         EPSSAPI["EPSS<br/>FIRST.org"]
-        T1["Tier1 · CISA KEV · VulnCheck KEV · CERT/CC VU# · ZDI published/upcoming · CERT-EU"]
-        T2["Tier2 · Red Hat CSAF · Siemens · Palo Alto · Spring · FortiGuard · Veeam"]
-        T3["Tier3 · Nessus · nuclei-templates · metasploit · Full Disclosure · oss-security"]
-        T4["Tier4 · GHSA · github_commits (blobless clone) · OSV.dev"]
-        T5["Tier5 · The Hacker News · ZDI blog"]
+        T1["Tier1 (6) · cisa_kev · vulncheck_kev · certcc_vu · zdi_published · zdi_upcoming · certeu"]
+        T2["Tier2 (10) · redhat_csaf · siemens_cert · paloalto · spring_security · fortiguard_psirt · veeam · cisco_psirt · jenkins_security · msrc · github_repo_advisories"]
+        T3["Tier3 (9) · nessus · nuclei_templates · metasploit · fulldisclosure · oss_security · exploitdb · poc_in_github · trickest_cve · wordfence"]
+        T4["Tier4 (5) · github_advisories · github_commits (blobless clone) · osv · gemnasium · kernel_cve"]
+        T5["Tier5 (2) · thehackernews · zdi_blog"]
     end
 
     %% ---------------- baseline-worker ----------------
@@ -41,7 +78,7 @@ flowchart LR
     %% ---------------- sources-worker ----------------
     subgraph SW["sources-worker (APScheduler)"]
         direction TB
-        FETCH["BaseSource.fetch()<br/>22 fetchers, aislados"]
+        FETCH["BaseSource.fetch()<br/>32 fetchers, aislados"]
         INGEST["ingest_mention()<br/>1 extract_identifiers (identidad solo declarados)<br/>2 drop si no hay RECOGNIZED_SCHEME<br/>3 resolve_candidate (union-find)<br/>4 content_hash (idempotencia)<br/>5 persist raw + mention + soft refs<br/>6 aggregates + days_ahead"]
         ENRICH["enrich_candidate()<br/>LLM extrae métricas<br/>CVSS autoritativo+derivado<br/>severity_hint · afectados"]
         FETCH --> INGEST --> ENRICH
@@ -91,11 +128,13 @@ flowchart LR
     VOL["Volumen data:/data<br/>raw_html · clon cvelistV5 · cachés GitHub"]
     MIG["migrate<br/>alembic upgrade head"]
     CLI["CLI foreshock<br/>sources · baseline · emerging · cve · enrich · stats"]
+    API["api (uvicorn) · solo lectura<br/>dashboards: / y /next (inminente) · /pending_status (operativo) · /healthz<br/>JSON: /api/pending · pending/critical · pending/breakdown · emerging · trend · lag/histogram · queue/age · velocity · stats · software · candidate/{key} · admin/status"]
 
     BW -.-> VOL
     SW -.-> VOL
     MIG --> PG
     CLI --> PG
+    PG --> API
 
     classDef ext fill:#eef,stroke:#88a;
     classDef store fill:#efe,stroke:#7a7;
@@ -122,7 +161,7 @@ procesos de aplicación construidos con la misma imagen (`docker/Dockerfile`):
 | `migrate` | `alembic upgrade head` | Aplica las migraciones y termina. El resto espera a que acabe con éxito (`service_completed_successfully`). |
 | `baseline-worker` | `python -m app.baseline` | Sincroniza el estado canónico (cvelistV5 + delta NVD 2.0 + EPSS) en bucle con APScheduler. |
 | `sources-worker` | `python -m app.sources` | Ejecuta los fetchers habilitados en sus cadencias; ingesta menciones y enriquece candidates. |
-| `api` | `uvicorn app.api.main:app` | API JSON de solo lectura y dashboards `/` y `/pending_status`. |
+| `api` | `uvicorn app.api.main:app` | API JSON de solo lectura más el dashboard oficial "inminente" en `/` (y `/next`), el dashboard operativo `/pending_status` y el chequeo `/healthz` de la BD. |
 
 `migrate` es un job efímero de un solo uso; los dos workers son procesos de
 larga duración (`restart: unless-stopped`). Ambos workers comparten el volumen
@@ -160,13 +199,16 @@ esa telemetría sin montar el socket privilegiado de Docker.
  ┌──────────────────── sources-worker ───────────────────────────────────────┐
  │                                                                            │
  │  BaseSource.fetch(ctx) ──► list[FetchedMention]   (Capa 2: captación)      │
- │  22 fetchers por tier:                                                     │
+ │  32 fetchers por tier:                                                     │
  │   T1 cisa_kev · vulncheck_kev · certcc_vu · zdi_published · zdi_upcoming · │
- │      certeu                                                                 │
+ │      certeu                                                                │
  │   T2 redhat_csaf · siemens_cert · paloalto · spring_security ·             │
- │      fortiguard_psirt · veeam                                              │
- │   T3 nessus · nuclei_templates · metasploit · fulldisclosure · oss_security│
- │   T4 github_advisories · github_commits (blobless clone) · osv             │
+ │      fortiguard_psirt · veeam · cisco_psirt · jenkins_security · msrc ·    │
+ │      github_repo_advisories                                                │
+ │   T3 nessus · nuclei_templates · metasploit · fulldisclosure ·             │
+ │      oss_security · exploitdb · poc_in_github · trickest_cve · wordfence   │
+ │   T4 github_advisories · github_commits (blobless clone) · osv · gemnasium │
+ │      · kernel_cve                                                          │
  │   T5 thehackernews · zdi_blog                                              │
  │        │                                                                   │
  │        ▼  ingest_mention()   (app/ingest/service.py)                       │
@@ -287,6 +329,30 @@ posteriores. Es inmune al backfill porque mide un hecho de nuestro propio reloj:
 "a esta hora, este CVE ya estaba en NVD para nosotros". Por eso
 `days_ahead_vs_nvd_present` es la métrica de ventaja robusta, y es la que la CLI
 (`emerging`, `stats`) y la vista `radar` muestran por defecto.
+
+### Dos "ventanas operativas" distintas — no confundirlas
+
+La API de solo lectura aplica **dos** suelos operativos diferentes:
+
+- **La métrica de ventaja** (`/api/lag/histogram`, `metric=present`, con
+  `include_historical=false` por defecto) mide la ventaja **solo desde el arranque
+  operativo REAL de Foreshock** — derivado *dinámicamente* en tiempo de consulta de
+  `min(published_cves.nvd_first_observed_at)` (el día que el baseline observó algo por
+  primera vez). La variable de entorno `FORESHOCK_OPERATIONAL_START` lo fuerza, y solo
+  cae al valor fijo `OPERATIONAL_MIN_DATE` (`2026-01-01`) cuando aún no se ha observado
+  nada. La respuesta devuelve el suelo usado en un campo `operational_start`.
+  `include_historical=true` restaura el comportamiento anterior de ventana rodante /
+  histórica total (y entonces `operational_start` vale `null`). Así, las señales con
+  fecha antigua de aviso (p.ej. avisos GitHub previos a la instalación) no cuentan como
+  ventaja espuria del periodo pre-instalación.
+- **La ventana operativa de `pending` / `trend`** usa en cambio la constante **fija**
+  `OPERATIONAL_MIN_DATE = 2026-01-01` (`app/core/operational.py`) — un suelo estático de
+  ventana de producto, *no* el arranque operativo derivado dinámicamente de arriba. Son
+  dos nociones distintas.
+
+`/api/velocity` reporta el conteo diario de `candidates.created_at` en los últimos N días
+— el **reloj de captura** propio de Foreshock (el ritmo real de ingesta, no la fecha del
+aviso).
 
 ---
 

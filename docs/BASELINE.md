@@ -31,13 +31,19 @@ def sync_cvelist(force_full: bool = False) -> dict[str, int]
   {cvelist_repo_dir}`, then process **all** `CVE-*.json` under `cves/`
   (`_all_json_files`).
 - **Existing**: `git pull --ff-only`, then:
-  - `force_full=True` → all files;
-  - else `_changed_json_files` = `git diff --name-only HEAD@{1} HEAD`, keeping
-    lines under `cves/` ending in `.json`;
-  - if the diff fails (`CalledProcessError`, e.g. no prior revision) → fall back
-    to all files.
+  - `force_full=True` → all files. A full is **auto-forced** too when the mirror
+    holds no cvelist data (`mirror_has_mitre_data()` is false — e.g. the table was
+    truncated) or a prior full never completed (the `full_import_complete` marker
+    is absent from `sync_state.extra`);
+  - else `_changed_json_files` = `git diff --name-only {cursor} HEAD`, where
+    `{cursor}` is the last **successfully processed** HEAD SHA (the `cvelist` row
+    in `sync_state`); with no cursor yet it falls back to the historic reflog base
+    `HEAD@{1}`. Only lines under `cves/` ending in `.json` are kept;
+  - if the diff fails (`CalledProcessError`, e.g. the saved SHA is gone) → fall
+    back to all files.
 - `_process_files` parses each JSON with `parse_cve_record` and upserts via
-  `upsert_published`, inside a single `session_scope()`. A bad JSON is isolated
+  `upsert_published`, in batches (commit every `_COMMIT_EVERY` = 2000 files), each
+  file inside a `begin_nested()` savepoint. A bad JSON is isolated
   (`cvelist.parse_error`) and does not sink the sync. Returns
   `{files, upserted, skipped, errors}`.
 

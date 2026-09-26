@@ -15,6 +15,10 @@ schema**:
 | `0008_source_method_git` | `migrations/versions/0008_source_method_git.py` | widens `CHECK ck_sources_method` to include `'git'` |
 | `0009_source_tier_range` | `migrations/versions/0009_source_tier_range.py` | widens `CHECK ck_sources_tier` to `tier BETWEEN 1 AND 9` |
 | `0010_github_repos_registry` | `migrations/versions/0010_github_repos_registry.py` | `github_repos` watchlist/registry (PK `full_name`, per-repo watermark) |
+| `0011_sync_state_perf_idx` | `migrations/versions/0011_sync_state_perf_idx.py` | `sync_state` table (persistent sync watermarks) + performance indexes on `published_cves`/`candidates` |
+| `0012_github_repo_kind` | `migrations/versions/0012_github_repo_kind.py` | `github_repos.repo_kind` (distinguishes PoC repos from projects) |
+| `0013_github_repo_adv_scan` | `migrations/versions/0013_github_repo_adv_scan.py` | `github_repos` advisory-scan watermark columns + index (for the `github_repo_advisories` fetcher) |
+| `0014_affected_nonmalware_idx` | `migrations/versions/0014_affected_nonmalware_idx.py` | partial index on `affected_products` to speed up the `pending` predicate |
 
 `app/core/models.py` is a SQLModel ORM mapping **over** those tables. `migrations/env.py`
 sets `target_metadata=None`, so the models never autogenerate migrations and never

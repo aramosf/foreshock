@@ -57,8 +57,9 @@ Without tokens the system still runs; token-gated sources just fetch less.
 ./scripts/start.sh --stop-workers   # pause ONLY the schedulers (safe for re-ingest)
 ```
 
-Dashboard/API: <http://localhost:8000>. Administrative status:
-<http://localhost:8000/pending_status>.
+Dashboard/API: <http://localhost:8000> — `/` (alias `/next`) serves the official
+"imminent" dashboard (`next.html`). Administrative/operational status:
+<http://localhost:8000/pending_status>. Health check: `/healthz`.
 
 `docker compose up -d` (what `start.sh` runs) starts `migrate` first; the workers
 and `api` wait for migrations to complete, then the schedulers begin fetching on

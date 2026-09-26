@@ -53,7 +53,7 @@ without duplication.
 
 ### 2.1 Output schema (`schema.py`)
 
-`EnrichmentOut` (Pydantic, `extra="forbid"`):
+`EnrichmentOut` (Pydantic, `extra="ignore"`):
 
 - `affected_products: list[AffectedProductOut]` — `{vendor?, product,
   ecosystem?, versions_raw?, fixed_version?}`.
@@ -265,8 +265,9 @@ already in the DB. Entry point `foreshock baseline enrich-nvd` (CLI).
 ### 8.2 Primary CVSS / CWE (denormalized on `published_cves`)
 
 `_pick_primary_cvss` chooses the "primary" score among all collected CVSS rows with
-a non-null base score, ranked by: **CNA-proprietary** (source not `CVE`/`cisa-adp`)
-> `type == "Primary"` > **highest version** (`4.0 > 3.1 > 3.0 > 2.0`). It fills
+a non-null base score, ranked by: **highest version** (`4.0 > 3.1 > 3.0 > 2.0`) >
+**CNA-proprietary** (the CVSS came from the CNA container, not an ADP — detected by
+container type, not by `shortName`) > `type == "Primary"`. It fills
 `primary_cvss_version/score/severity/vector`. The primary CWE is the first `CWE-…`
 id. These, plus `has_exploit_ref`/`has_patch_ref`, the three SSVC fields,
 `description_en` and `enriched_at`, are written back onto `published_cves` in a

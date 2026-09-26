@@ -4,6 +4,22 @@
 *antes* de que MITRE/NVD los publiquen oficialmente, midiendo los "días de
 ventaja" sobre NVD por fuente.
 
+![Dashboard de Foreshock — la vista de triaje "inminente"](docs/screenshots/dashboard.png)
+
+> El dashboard en `/`: vulnerabilidades pendientes que NVD aún no ha publicado,
+> ordenadas por **Foreshock Score** (KEV +50, PoC público +20, severidad CVSS,
+> tier de la fuente), con el embudo de madurez (pre-CVE → pre-reservado →
+> reservado → público), el histograma de días de ventaja sobre NVD y la tabla de
+> ventaja por fuente. Las filas KEV y CVSS ≥ 9 se marcan en rojo.
+
+![Dashboard de Foreshock — analítica](docs/screenshots/dashboard-charts.png)
+
+> Analítica al pie del dashboard: **Evolución** (cuándo se detectaron por primera
+> vez los pendientes actuales, por madurez y por mes), **Cola de espera** (cuánto
+> llevan los pendientes sin que NVD los publique, separados según si ya tienen
+> CVE o no) y **Velocidad** (señales capturadas por día según el reloj propio de
+> Foreshock).
+
 Este repositorio es la **plataforma de carga y consulta**: workers que ingieren
 señal de fuentes públicas a Postgres, un pipeline de ingesta/reconciliación,
 enriquecimiento por LLM + CVSS, una CLI y dashboards web de solo lectura.
@@ -40,7 +56,7 @@ flowchart LR
         CVELIST["cvelistV5"]
         NVD["NVD 2.0 delta"]
         EPSSAPI["EPSS"]
-        SRC["6 fetchers<br/>Tier 1-5 + GitHub commits"]
+        SRC["32 fetchers<br/>Tier 1-5 + GitHub commits"]
     end
     subgraph BW["baseline-worker"]
         JOBS["cvelist · nvd · epss"]
@@ -136,7 +152,7 @@ fuente) → **derivado** (calculado desde métricas con la librería `cvss`) →
 ## Tests
 
 ```bash
-# 49 tests (unit + integración contra Postgres real)
+# 153 tests (unit + integración contra Postgres real)
 docker compose up -d postgres && docker compose run --rm migrate
 docker compose run --rm --no-deps \
   -e DATABASE_URL=postgresql+psycopg://foreshock:foreshock@postgres:5432/foreshock \

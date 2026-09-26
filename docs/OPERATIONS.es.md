@@ -27,8 +27,11 @@ la tabla `sources` (`sync_registry_to_db`) y programa cada fuente habilitada.
 Las primeras ejecuciones se reparten durante una hora y el ciclo completo de
 cada fetcher queda acotado por límites global, Git y fuentes pesadas.
 
-Dashboards: `/` para las señales y `/pending_status` para workers, fetchers,
-procesos, PostgreSQL y cobertura de ingesta.
+Dashboards: `/` (alias `/next`) sirve el dashboard oficial "inminente"
+(`next.html`); `/pending_status` es el dashboard operativo/administración para
+workers, fetchers, procesos, PostgreSQL y cobertura de ingesta. `/healthz` es el
+healthcheck. (Estáticos: `next.html`, `next.js`, `pending_status.html`,
+`pending_status.js`.)
 
 Para operar manualmente dentro de un contenedor:
 
@@ -74,7 +77,7 @@ rate limit) y consume el registro `github_repos` (migración `0010`) vía
 |---|---|---|
 | `FORESHOCK_GITHUB_API_BASE` | `https://api.github.com` | Search API de `harvest_top_n`. |
 | `FORESHOCK_GITHUB_TOKEN` | `None` | PAT. Se embebe en la URL de clon; sube el límite de la Search API. |
-| `FORESHOCK_GITHUB_TOP_N` | `10000` | Repos top por estrellas cosechados al watchlist (origin `top_n`). |
+| `FORESHOCK_GITHUB_TOP_N` | `1000` | Repos top por estrellas cosechados al watchlist (origin `top_n`). |
 | `FORESHOCK_GITHUB_COMMITS_MONTHS` | `5` | Ventana relativa (fallback si `..._SINCE` no se fija). |
 | `FORESHOCK_GITHUB_COMMITS_SINCE` | `2026-05-01` | Cutoff FIJO de commits (`YYYY-MM-DD`); si se fija, se usa en vez de la ventana y no rueda con el tiempo. |
 | `FORESHOCK_GITHUB_REPOS_PER_RUN` | `150` | Repos por ejecución (`next_batch`, rotación nunca-escaneados primero). |
@@ -116,11 +119,37 @@ Además de `top_n` y de `reference`/`past_cve` (siempre activas), el registro
 
 ### Otros
 `FORESHOCK_EMERGING_MIN_MENTIONS` (`1`), `FORESHOCK_LOG_LEVEL` (`INFO`),
-`FORESHOCK_LOG_JSON` (`True`).
+`FORESHOCK_LOG_JSON` (`True`), `FORESHOCK_OPERATIONAL_START` (`None`; fecha ISO
+que fuerza el arranque operativo real de la métrica de ventaja — ver más abajo).
 
 `docker-compose.yml` pasa `FORESHOCK_NVD_API_KEY`, `FORESHOCK_LLM_PROVIDER`,
 `FORESHOCK_LLM_API_KEY`, `FORESHOCK_LLM_MODEL` desde el entorno del host
 (interpolación `${VAR:-default}`), típicamente via un fichero `.env`.
+
+---
+
+## Ventana operativa de la API
+
+Foreshock usa **dos nociones distintas de ventana operativa** — no confundirlas.
+
+- Las lecturas de **pending / trend / emerging** usan la ventana canónica **fija**
+  que arranca el `2026-01-01` (`OPERATIONAL_MIN_DATE` en
+  `app/core/operational.py`). Las filas históricas se conservan; estos endpoints
+  aceptan `include_historical=true` para auditoría explícita y la cabecera de
+  respuesta `X-Foreshock-Operational-Since` expone este límite fijo.
+- La métrica de **ventaja/atraso** (`/api/lag/histogram`, por defecto
+  `include_historical=false`) mide la ventaja **solo desde el arranque operativo
+  REAL de Foreshock** — el día que empezó a observar por su propio reloj. Ese
+  arranque se deriva dinámicamente de `min(published_cves.nvd_first_observed_at)` y
+  el endpoint lo devuelve en un campo `operational_start`.
+  `FORESHOCK_OPERATIONAL_START` (fecha ISO) fuerza ese valor; el `2026-01-01` fijo
+  (`OPERATIONAL_MIN_DATE`) solo se usa como **fallback** si aún no se ha observado
+  nada. Con `include_historical=true` se recupera el comportamiento histórico
+  (all-time / ventana rodante).
+
+`/api/velocity` es otra cosa aparte: devuelve el conteo diario de
+`candidates.created_at` — el ritmo real de captura de Foreshock por su propio
+reloj, independiente de ambas ventanas.
 
 ---
 

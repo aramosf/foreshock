@@ -30,8 +30,11 @@ On startup:
   `cadence_seconds` (`jitter=30`, `max_instances=1`), spreads initial runs over
   one hour by default, and re-reconciles the job set against the DB every 60 s.
 
-Dashboards: `/` for vulnerability signal and `/pending_status` for worker,
-fetcher, process, database and ingestion status.
+Dashboards: `/` (alias `/next`) serves the official "imminent" dashboard
+(`next.html`); `/pending_status` is the operational/admin dashboard for worker,
+fetcher, process, database and ingestion status. `/healthz` is the health check.
+(Static assets are `next.html`, `next.js`, `pending_status.html`,
+`pending_status.js`.)
 
 Run operations manually inside a container:
 
@@ -80,7 +83,7 @@ API, no rate limit) and consumes the `github_repos` registry (migration `0010`) 
 |---|---|---|
 | `FORESHOCK_GITHUB_API_BASE` | `https://api.github.com` | GitHub API base (used by `harvest_top_n`'s Search API). |
 | `FORESHOCK_GITHUB_TOKEN` | `None` | PAT. Embedded in the clone URL for higher limits; raises the Search API rate limit. Strongly recommended. |
-| `FORESHOCK_GITHUB_TOP_N` | `10000` | Number of most-starred repos harvested into the `github_repos` watchlist (origin `top_n`). |
+| `FORESHOCK_GITHUB_TOP_N` | `1000` | Number of most-starred repos harvested into the `github_repos` watchlist (origin `top_n`). |
 | `FORESHOCK_GITHUB_COMMITS_MONTHS` | `5` | Relative look-back window (fallback when `..._SINCE` is unset). |
 | `FORESHOCK_GITHUB_COMMITS_SINCE` | `2026-05-01` | **Fixed** commit cutoff (`YYYY-MM-DD`). When set, used instead of the relative window and does not roll with time. |
 | `FORESHOCK_GITHUB_REPOS_PER_RUN` | `150` | Repos scanned per run (`next_batch`, unscanned-first rotation). |
@@ -187,10 +190,30 @@ degrade silently for the same reason.
 
 ### Operational API window
 
-All dashboard-facing API reads default to the canonical operational window
-starting at `2026-01-01`. Historical rows remain stored. Generic inspection
-endpoints accept `include_historical=true` for explicit audit use; the response
-header `X-Foreshock-Operational-Since` exposes the active boundary.
+Foreshock uses **two distinct operational-window notions** — do not conflate them.
+
+- **Pending / trend / emerging** reads use the **fixed** canonical window that
+  starts at `2026-01-01` (`OPERATIONAL_MIN_DATE` in `app/core/operational.py`).
+  Historical rows remain stored; these endpoints accept `include_historical=true`
+  for explicit audit use, and the response header `X-Foreshock-Operational-Since`
+  exposes this fixed boundary.
+- **The lead ("Ventaja") / lag metric** (`/api/lag/histogram`, default
+  `include_historical=false`) measures lead **only from Foreshock's real
+  operational start** — the day it began observing on its own clock. That start is
+  derived dynamically from `min(published_cves.nvd_first_observed_at)`, and the
+  endpoint returns it in an `operational_start` field. `FORESHOCK_OPERATIONAL_START`
+  (ISO date) overrides the derived value; the fixed `2026-01-01`
+  (`OPERATIONAL_MIN_DATE`) is used **only** as a fallback when nothing has been
+  observed yet. Passing `include_historical=true` restores the older all-time /
+  rolling-window behavior.
+
+`/api/velocity` is separate again: it reports the daily count of
+`candidates.created_at` — Foreshock's real capture rate on its own clock,
+independent of either window.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `FORESHOCK_OPERATIONAL_START` | `None` (derived from `min(nvd_first_observed_at)`) | ISO date (`YYYY-MM-DD`) that overrides the dynamically-derived real operational start used by the lead/lag metric. Does **not** affect the fixed `2026-01-01` pending/trend/emerging window. |
 
 ---
 

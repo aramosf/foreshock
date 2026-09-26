@@ -56,7 +56,7 @@ flowchart LR
         CVELIST["cvelistV5"]
         NVD["NVD 2.0 delta"]
         EPSSAPI["EPSS"]
-        SRC["11 fetchers<br/>Tier 1-5 + GitHub commits"]
+        SRC["32 fetchers<br/>Tier 1-5 + GitHub commits"]
     end
     subgraph BW["baseline-worker"]
         JOBS["cvelist · nvd · epss"]
@@ -107,7 +107,7 @@ Dashboards: <http://localhost:8000/> (vulnerability signal) and
 <http://localhost:8000/pending_status> (workers, fetchers, processes, database
 and ingestion coverage).
 
-Full operational guide (startup, first-time load, safe re-ingest, the 12 sources,
+Full operational guide (startup, first-time load, safe re-ingest, the 32 sources,
 monitoring, migrations, and pitfalls): **[`docs/RUNBOOK.md`](docs/RUNBOOK.md)**.
 
 Under the hood `start.sh` is just:
@@ -131,7 +131,7 @@ FORESHOCK_LLM_MODEL=mock-model
 FORESHOCK_LLM_API_KEY=                 # for openai/anthropic
 FORESHOCK_NVD_API_KEY=                 # raises NVD rate limit
 FORESHOCK_GITHUB_TOKEN=                # PAT -> 5000 req/h
-FORESHOCK_GITHUB_TOP_N=10000           # popular repos to watch (scales to 100k+)
+FORESHOCK_GITHUB_TOP_N=1000            # popular repos to watch (default; scales to 100k+)
 FORESHOCK_GITHUB_REPOS_PER_RUN=150     # incremental crawl batch size
 FORESHOCK_SOURCES_MAX_CONCURRENT=4     # complete fetch/parse/ingest cycles
 FORESHOCK_SOURCES_GIT_MAX_CONCURRENT=1 # external Git processes
@@ -279,7 +279,7 @@ deterministic aliases before hitting the LLM. See [`docs/ENRICHMENT.md`](docs/EN
 ## Tests
 
 ```bash
-# 55 tests (unit + integration against a real Postgres)
+# 153 tests (unit + integration against a real Postgres)
 docker compose up -d postgres && docker compose run --rm migrate
 docker compose run --rm --no-deps \
   -e DATABASE_URL=postgresql+psycopg://foreshock:foreshock@postgres:5432/foreshock \

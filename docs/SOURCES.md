@@ -9,7 +9,7 @@ raises is isolated by the runner: the exception is logged, recorded on the
 `sources` row, and the rest of the schedule keeps running.
 
 This document describes the `BaseSource` contract, the five collection methods,
-the **22 registered fetchers** (grouped by tier), the RSS/Atom feed framework,
+the **32 registered fetchers** (grouped by tier), the RSS/Atom feed framework,
 the polite-HTTP layer, the Playwright browser pool, the GitHub repo watchlist /
 registry, and how to add a new fetcher.
 
@@ -70,9 +70,11 @@ Returns the row written to the `sources` table by
 
 - `@register` validates `name` is set, rejects duplicates, and stores the class
   in the global `REGISTRY: dict[str, type[BaseSource]]`.
-- `load_all()` imports every module under `app.sources` (skipping the framework
-  modules `base`, `browser`, `runner`, `robots`) so their `@register`
-  decorators populate `REGISTRY`, then returns it.
+- `load_all()` imports every module under `app.sources` (skipping `base`,
+  `browser`, `runner`, `__main__`) so their `@register` decorators populate
+  `REGISTRY`, then returns it. The other non-fetcher modules (`http`, `cache`,
+  `feeds_rss`, `repo_registry`, `gitproc`, `gitsrc`) are imported but register
+  nothing.
 
 ### 1.6 The `FetchedMention` output object
 
@@ -106,11 +108,11 @@ dispatch on it — each `fetch()` implements its own collection.
 
 | `method` | Tooling | Typical use |
 |----------|---------|-------------|
-| `api` | `httpx` against a JSON/XML API | CISA KEV, VulnCheck, Red Hat, GHSA, OSV |
-| `rss` | `feedparser` over an RSS/Atom feed | 11 RSS fetchers (ZDI, CERT-EU, Siemens, Palo Alto, Spring, Fortinet, Veeam, Full Disclosure, oss-security, The Hacker News, …) |
+| `api` | `httpx` against a JSON/XML API | CISA KEV, VulnCheck, Red Hat, GHSA, OSV, Cisco, Wordfence, Exploit-DB |
+| `rss` | `feedparser` over an RSS/Atom feed | 16 RSS fetchers (ZDI, CERT-EU, Siemens, Palo Alto, Spring, Fortinet, Veeam, MSRC, CERT/CC, Jenkins, Linux-kernel, Full Disclosure, oss-security, The Hacker News, …) |
 | `scrape` | `httpx` + `selectolax` on static HTML | Nessus |
 | `browser` | `BrowserPool` (Playwright, optional dependency) | JS-rendered pages (no fetcher currently uses it) |
-| `git` | `git clone --filter=blob:none` + `git log` (no REST API) | `github_commits` (top-N repo commit scan) |
+| `git` | `git clone --filter=blob:none` + `git log` (no REST API) | `github_commits` (repo commit scan), `gemnasium`, `poc_in_github`, `trickest_cve` |
 
 > `nuclei_templates` and `metasploit` declare `method="api"` but delegate to
 > `scan_single_repo()`, which now also collects via a **blobless git clone**
@@ -118,11 +120,12 @@ dispatch on it — each `fetch()` implements its own collection.
 
 ---
 
-## 3. The 22 fetchers (by tier)
+## 3. The 32 fetchers (by tier)
 
-Each RSS/Atom feed on tiers 1–3/5 is a **separately registered** fetcher
-generated from one row of the `_FEEDS` table in `app/sources/feeds_rss.py`
-(§3.3). The remaining fetchers are hand-written modules.
+Most RSS/Atom feeds are **separately registered** fetchers generated from one row
+of the `_FEEDS` table in `app/sources/feeds_rss.py` (§3.3). A few RSS fetchers
+(`certcc_vu`, `thehackernews`, `jenkins_security`, `kernel_cve`) and all non-RSS
+fetchers are hand-written modules.
 
 ### Tier 1 — earliest / highest priority
 
@@ -145,6 +148,10 @@ generated from one row of the `_FEEDS` table in `app/sources/feeds_rss.py`
 | `spring_security` | rss | `spring.io/security.atom` | Spring Security advisories | none |
 | `fortiguard_psirt` | rss | `fortiguard.com/rss/ir.xml` | FortiGuard PSIRT IR advisories | none |
 | `veeam` | rss | `veeam.com/services/open/kb/security-feed` | Veeam security advisories | none |
+| `cisco_psirt` | api | `sec.cloudapps.cisco.com/security/center/publicationService.x?advisoryFormat=json` | Cisco PSIRT security advisories | none |
+| `msrc` | rss | `api.msrc.microsoft.com/update-guide/rss` | Microsoft Security Response Center Update Guide | none |
+| `jenkins_security` | rss | `jenkins.io/security/advisories/rss.xml` | Jenkins security advisories | none |
+| `github_repo_advisories` | api | `api.github.com/repos/{o}/{r}/security/advisories` + `/releases` | Per-repo GHSA + release notes scanned for CVE citations | GitHub PAT optional (raises rate limit) |
 
 ### Tier 3 — exploit / detection artefacts & disclosure lists
 
@@ -155,6 +162,10 @@ generated from one row of the `_FEEDS` table in `app/sources/feeds_rss.py`
 | `metasploit` | api (git) | `github.com/rapid7/metasploit-framework` commits | New exploit module = reliable exploit exists | GitHub PAT recommended |
 | `fulldisclosure` | rss | `seclists.org/rss/fulldisclosure.rss` | Full Disclosure mailing list | none |
 | `oss_security` | rss | `seclists.org/rss/oss-sec.rss` | oss-security mailing list | none |
+| `exploitdb` | api (CSV) | `gitlab.com/exploit-database/exploitdb/-/raw/main/files_exploits.csv` | Exploit-DB archive; a public exploit exists (may cite a still-reserved CVE) | none |
+| `wordfence` | api | `wordfence.com/api/intelligence/v3/vulnerabilities/production` | WordPress plugin/theme/core vulnerabilities | free API key (`FORESHOCK_WORDFENCE_API_KEY`) — inactive without it |
+| `poc_in_github` | git | `github.com/nomi-sec/PoC-in-GitHub` | CVE → public PoC repositories | none |
+| `trickest_cve` | git | `github.com/trickest/cve` | CVE → PoC + product | none |
 
 ### Tier 4 — advisory feeds & top-N commit scan
 
@@ -163,6 +174,8 @@ generated from one row of the `_FEEDS` table in `app/sources/feeds_rss.py`
 | `github_advisories` | api | `api.github.com/advisories` | GHSA + CVE + affected packages | GitHub PAT optional (raises rate limit) |
 | `github_commits` | git | blobless clone + `git log` of the watchlisted repos | CVE citations in commit messages (often reserved) | GitHub PAT (embedded in clone URL) |
 | `osv` | api | `osv-vulnerabilities.storage.googleapis.com/{eco}/all.zip` | Ecosystem advisories, rich structured data | none |
+| `gemnasium` | git | `gitlab.com/gitlab-org/security-products/gemnasium-db` | GitLab Advisory Database snapshot | none |
+| `kernel_cve` | rss | `lore.kernel.org/linux-cve-announce/new.atom` | Linux kernel CVEs (linux-cve-announce) | none |
 
 ### Tier 5 — news / roundups
 
@@ -296,10 +309,13 @@ falling back to `modified`; records published before the `osv_months` (default
 
 ### 3.3 RSS/Atom feed framework (`app/sources/feeds_rss.py`)
 
-All 11 RSS/Atom fetchers are **data-driven**: a single `_FEEDS` table of
-`(name, kind, tier, url)` rows, one dynamically generated `BaseSource` subclass
-per row (`method="rss"`, `cadence_seconds=3600`), all registered via `register`.
-Adding a feed = adding one row.
+The `_FEEDS` table drives **12** RSS/Atom fetchers **data-driven**: rows of
+`(name, kind, tier, url)` (with an optional 5th `browser_ua` element), one
+dynamically generated `BaseSource` subclass per row (`method="rss"`,
+`cadence_seconds=3600`), all registered via `register`. Adding a feed = adding
+one row. (The other four RSS fetchers — `certcc_vu`, `thehackernews`,
+`jenkins_security`, `kernel_cve` — are hand-written modules with custom parsing,
+not `_FEEDS` rows.)
 
 Each entry is turned into mentions by `_mentions_for_entry`, applying the same
 anti-over-merge policy as the rest of the pipeline. It runs
@@ -331,7 +347,7 @@ order, exposed as `foreshock sources harvest-repos`):
 
 | `origin` | Priority | Source | Enabled |
 |---|---|---|---|
-| `top_n` | 0 | Top-N repos by stars via the GitHub Search API, descending star windows (`stars:>=50`, then `stars:{floor}..{page_min}`), up to `github_top_n` (default 10000). **Kept — additional, not a replacement.** | always |
+| `top_n` | 0 | Top-N repos by stars via the GitHub Search API, descending star windows (`stars:>=50`, then `stars:{floor}..{page_min}`), up to `github_top_n` (default 1000). **Kept — additional, not a replacement.** | always |
 | `reference` | 10 | Repos cited in advisory reference URLs: `mentions.url`, `cve_reference.url`, `candidates.reference_urls[]` → `github.com/owner/repo`. | always |
 | `past_cve` | 20 | Subset of `reference` whose citing candidate **already has a CVE** (higher priority). | always |
 | `criticality` | 15 | OpenSSF Criticality Score CSV (any GitHub URL column). | opt-in via `FORESHOCK_CRITICALITY_CSV_URL` |

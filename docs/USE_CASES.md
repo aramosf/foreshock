@@ -24,7 +24,7 @@ A candidate is **pending** when it is live (`merged_into IS NULL`) and either ha
 no `cve_id`, or its `cve_id` is **not `PUBLISHED`** in our baseline:
 
 ```sql
--- app/cli.py :: _PENDING_AP_SQL
+-- illustrative; canonical predicate: app/api/queries.py :: PENDING_WHERE_SQL
 SELECT c.id, c.first_seen_at, a.product, a.kind
 FROM candidates c
 LEFT JOIN affected_products a ON a.candidate_id = c.id

@@ -24,7 +24,7 @@ CVSS v3.1 (validadas por `app/enrichment/schema.py::CVSSMetricsOut`), y el score
 se **calcula** de forma determinista con la librería `cvss`. Así el resultado es
 reproducible y auditable, y no se "adivina" un número. Ver `DESIGN_DECISIONS.md`.
 
-`EnrichmentOut` (salida validada del LLM, Pydantic `extra="forbid"`):
+`EnrichmentOut` (salida validada del LLM, Pydantic `extra="ignore"`):
 `affected_products[]`, `vuln_type`, `attack_vector`, `requires_auth`,
 `requires_interaction`, `has_public_poc`, `poc_urls[]`, `cvss_metrics`,
 `summary`, `confidence` (0..1). `CVSSMetricsOut` lleva las 8 métricas base:
@@ -192,9 +192,10 @@ re-ejecutable sin duplicar.
 ### 8.2 CVSS / CWE primarios (desnormalizados en `published_cves`)
 
 `_pick_primary_cvss` elige el score "primario" entre todas las filas CVSS
-recogidas con `base_score` no nulo, ordenando por: **CNA-propietario** (source
-distinto de `CVE`/`cisa-adp`) > `type == "Primary"` > **versión más alta**
-(`4.0 > 3.1 > 3.0 > 2.0`). Rellena `primary_cvss_version/score/severity/vector`.
+recogidas con `base_score` no nulo, ordenando por: **versión más alta**
+(`4.0 > 3.1 > 3.0 > 2.0`) > **CNA-propietario** (el CVSS viene del contenedor CNA,
+no de un ADP — detectado por el TIPO de contenedor, no por el `shortName`) >
+`type == "Primary"`. Rellena `primary_cvss_version/score/severity/vector`.
 El CWE primario es el primer id `CWE-…`. Estos, más `has_exploit_ref`/
 `has_patch_ref`, los tres campos SSVC, `description_en` y `enriched_at`, se
 escriben de vuelta en `published_cves` en un UPDATE por lotes con `executemany`.

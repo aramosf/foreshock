@@ -12,8 +12,14 @@ Migraciones posteriores: `0004_kev_flags` (`candidates.in_kev`, `kev_date`,
 en `published_cves` + tablas hijas `cve_cvss`, `cve_cwe`, `cve_cpe`,
 `cve_reference`), `0007_soft_cve_references` (`cve_soft_references`),
 `0008_source_method_git` (amplía `CHECK ck_sources_method` con `'git'`),
-`0009_source_tier_range` (amplía `CHECK ck_sources_tier` a `tier BETWEEN 1 AND 9`)
-y `0010_github_repos_registry` (`github_repos`).
+`0009_source_tier_range` (amplía `CHECK ck_sources_tier` a `tier BETWEEN 1 AND 9`),
+`0010_github_repos_registry` (`github_repos`), `0011_sync_state_perf_idx` (tabla
+`sync_state` de watermarks de sync + índices de rendimiento en
+`published_cves`/`candidates`), `0012_github_repo_kind` (`github_repos.repo_kind`,
+distingue repos-PoC de proyectos), `0013_github_repo_adv_scan` (columnas de marca de
+escaneo de advisories en `github_repos` + índice, para el fetcher
+`github_repo_advisories`) y `0014_affected_nonmalware_idx` (índice parcial en
+`affected_products` para acelerar el predicado `pending`).
 
 Postgres 16. Se aprovechan `gen_random_uuid()`, `TIMESTAMP WITH TIME ZONE`,
 `JSONB`, `ARRAY(Text)` e índices parciales.
