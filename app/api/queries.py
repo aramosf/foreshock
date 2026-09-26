@@ -16,6 +16,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.operational import (
     OPERATIONAL_MIN_DATE_ISO,
     old_cve_identifier_sql,
@@ -444,6 +445,7 @@ def lag_histogram(session: Session, months: int = 12, exclude_backfill: bool = T
     params: dict[str, Any] = {"months": months}
 
     where = ["c.merged_into IS NULL"]
+    op_start: str | None = None
     if include_historical:
         # Vista histórica: ventana rodante de `months` + suelo anti fechas-cero.
         where.append(
@@ -451,9 +453,20 @@ def lag_histogram(session: Session, months: int = 12, exclude_backfill: bool = T
         )
         where.append(f"c.first_seen_at >= '{_LAG_MIN_DATE}'::timestamptz")
     else:
-        # Vista por defecto: SOLO detecciones desde el arranque de Foreshock
-        # (sin ventana rodante ni CVEs previos) -> ventaja del periodo operativo.
-        where.append(f"c.first_seen_at >= '{OPERATIONAL_MIN_DATE_ISO}'::timestamptz")
+        # Vista por defecto: SOLO desde el arranque REAL de Foreshock (el día que
+        # empezó a observar por su propio reloj), no una fecha fija ni una ventana
+        # rodante. Se deriva de min(nvd_first_observed_at) (primer arranque del
+        # baseline); FORESHOCK_OPERATIONAL_START lo fuerza; fallback si aún no
+        # observó nada. Así las señales con fecha antigua (avisos GitHub previos)
+        # no cuentan como ventaja espuria del periodo pre-instalación.
+        op_start = get_settings().operational_start
+        if not op_start:
+            observed = session.execute(text(
+                "SELECT min(nvd_first_observed_at)::date FROM published_cves"
+            )).scalar()
+            op_start = str(observed) if observed else OPERATIONAL_MIN_DATE_ISO
+        params["op_start"] = op_start
+        where.append("c.first_seen_at >= CAST(:op_start AS timestamptz)")
     if exclude_backfill:
         where.append(_exclude_backfill_sql(params))
     where_sql = " AND ".join(where) + _lag_source_filter(source, params)
@@ -479,6 +492,7 @@ def lag_histogram(session: Session, months: int = 12, exclude_backfill: bool = T
         "count": int(row["n"]),
         "median": float(row["median"]) if row["median"] is not None else None,
         "p90": float(row["p90"]) if row["p90"] is not None else None,
+        "operational_start": op_start,   # arranque real usado como suelo (None si histórica)
         "bins": [{"label": label, "count": int(row[f"bin_{i}"])}
                  for i, (label, _) in enumerate(bins)],
     }

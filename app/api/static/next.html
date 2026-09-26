@@ -205,7 +205,7 @@ details.explain[open] summary::before{content:"▾"}
         <p>MITRE ya tiene ficha del CVE, pero NVD aún no ha publicado su análisis. Último paso antes de
           hacerse oficial.</p></div>
       <div class="subbox pub"><b>CVE público</b>
-        <div class="subkpi" id="sk-published">—</div><div class="subcap">ya medidos · desde ene 2026</div>
+        <div class="subkpi" id="sk-published">—</div><div class="subcap">ya medidos · periodo operativo</div>
         <p>NVD publica su análisis: deja de estar pendiente y cierra el ciclo (línea de meta de «la
           carrera»). El indicador es cuántos cruzaron esa meta y medimos su ventaja.</p></div>
     </div>
@@ -238,7 +238,7 @@ details.explain[open] summary::before{content:"▾"}
         <h2>Ventaja sobre NVD</h2>
         <p class="sub">De las pendientes que <b>ya se publicaron</b> en NVD: con cuántos días de antelación las
           vio Foreshock. Cada barra = <b>nº de vulnerabilidades</b> en ese rango de adelanto; la suma = total
-          medido (n). Solo detecciones <b>desde el arranque de Foreshock</b> (ene 2026), no CVEs anteriores.</p>
+          medido (n). Solo detecciones <b>desde el arranque de Foreshock</b>, no CVEs anteriores.</p>
         <div id="lag-head"></div>
         <div id="lag"><div class="empty">cargando…</div></div>
       </div>
@@ -262,6 +262,14 @@ details.explain[open] summary::before{content:"▾"}
     <div id="evo"><div class="empty">cargando…</div></div>
   </div>
 
+  <div class="card" id="queue-card">
+    <h2>Cola de espera: cuánto llevan pendientes de NVD</h2>
+    <p class="sub">Antigüedad de las pendientes (días desde la primera señal), separando las que aún no tienen
+      número CVE de las que ya lo tienen. La cola de la derecha = vulnerabilidades que NVD arrastra sin publicar.</p>
+    <div id="queue-head"></div>
+    <div id="queue"><div class="empty">cargando…</div></div>
+  </div>
+
   <div class="foot" id="foot">Foreshock — radar temprano de vulnerabilidades. El <b>Foreshock Score</b> y la
     madurez los calcula el servidor (<span class="mono">/api/pending/critical</span>). Estado operativo en
     <span class="mono">/pending_status</span>.</div>
@@ -273,6 +281,6 @@ details.explain[open] summary::before{content:"▾"}
   <div class="dc" id="dbody"></div>
 </aside>
 
-<script src="/static/next.js?v=9" defer></script>
+<script src="/static/next.js?v=10" defer></script>
 </body>
 </html>

@@ -8,6 +8,8 @@ const daysAgo = s => { if (!s) return null; const d = (Date.now() - new Date(s))
 const esc = s => (s == null ? "" : String(s)).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 // Solo http(s) como enlace navegable (evita XSS por href javascript:/data:).
 const safeUrl = u => { try { const p = new URL(u, location.origin); return (p.protocol === "http:" || p.protocol === "https:") ? p.href : null; } catch (e) { return null; } };
+const _MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+const monthYear = s => { if (!s) return "el arranque"; const d = new Date(s); return isNaN(d) ? String(s).slice(0, 7) : _MESES[d.getUTCMonth()] + " " + d.getUTCFullYear(); };
 
 // tema
 const tb = $("#themebtn");
@@ -67,10 +69,45 @@ function scoreBreakdown(row) {
 }
 
 function renderLag(el, headEl, lag) {
+  const since = monthYear(lag.operational_start);
   headEl.innerHTML = `<div class="lead" style="margin:0 0 12px">La mitad se detectaron
     <b>≥ ${esc(lag.median)} día(s)</b> antes que NVD (mediana); el 10% más adelantado,
-    <b>≥ ${esc(lag.p90)} días</b>. Sobre <b>${(lag.count || 0).toLocaleString()}</b> vulnerabilidades medidas.</div>`;
+    <b>≥ ${esc(lag.p90)} días</b>. Sobre <b>${(lag.count || 0).toLocaleString()}</b> medidas desde ${esc(since)}
+    (arranque de Foreshock).</div>`;
   barChart(el, (lag.bins || []).map(b => ({ label: b.label + " d", v: b.count })), {});
+}
+
+// "Cola de espera": cuánto llevan esperando las pendientes a que NVD publique,
+// por antigüedad (days desde first_seen) y si ya tienen CVE o no. Fuente /api/queue/age.
+function renderQueueAge(el, headEl, qa) {
+  const un = (qa && qa.unassigned) || { bins: [] }, as = (qa && qa.assigned) || { bins: [] };
+  const labels = (un.bins || []).map(b => b.label);
+  const rows = labels.map((lab, i) => ({
+    label: lab,
+    sin: ((un.bins[i] || {}).count) || 0,
+    con: ((as.bins && as.bins[i] || {}).count) || 0,
+  }));
+  headEl.innerHTML = `<div class="lead" style="margin:0 0 12px">Mediana de espera:
+    <b>${esc(un.median_days)} d</b> sin CVE · <b>${esc(as.median_days)} d</b> con CVE.
+    Cuanto más a la derecha, más lleva NVD sin publicarlas.</div>`;
+  const keys = [["sin", "var(--m1)", "sin CVE"], ["con", "var(--m3)", "con CVE (reservado)"]];
+  const W = 940, H = 200, padL = 34, padB = 30, padT = 8;
+  const tot = rows.map(r => r.sin + r.con), max = Math.max(1, ...tot), n = rows.length, bw = (W - padL - 6) / n;
+  const ticks = 4; let gl = "";
+  for (let t = 0; t <= ticks; t++) {
+    const v = Math.round(max * t / ticks), y = padT + (H - padT - padB) * (1 - t / ticks);
+    gl += `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W}" y2="${y.toFixed(1)}" stroke="var(--grid)" stroke-width="1"/>`;
+    gl += `<text x="${padL - 5}" y="${(y + 3).toFixed(1)}" font-size="9" text-anchor="end" fill="var(--muted)">${v}</text>`;
+  }
+  let bars = "";
+  rows.forEach((r, i) => {
+    let y = H - padB; const x = padL + i * bw;
+    keys.forEach(([k, c]) => { const h = (r[k] || 0) / max * (H - padT - padB); y -= h;
+      if (h > 0) bars += `<rect x="${(x + 2).toFixed(1)}" y="${y.toFixed(1)}" width="${(bw - 4).toFixed(1)}" height="${h.toFixed(1)}" fill="${c}"><title>${esc(r.label)} d: ${r.sin + r.con}</title></rect>`; });
+  });
+  const labs = rows.map((r, i) => `<text x="${(padL + i * bw + bw / 2).toFixed(1)}" y="${H - 12}" font-size="10" text-anchor="middle" fill="var(--muted)">${esc(r.label)} d</text>`).join("");
+  el.innerHTML = `<svg class="evo-svg" viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Antigüedad de la cola de pendientes">${gl}${bars}${labs}</svg>
+    <div class="lgd">${keys.map(([, c, lab]) => `<span><i style="background:${c}"></i>${lab}</span>`).join("")}</div>`;
 }
 
 let IMM = [];
@@ -124,9 +161,11 @@ function renderTrend(el, series) {
     keys.forEach(([k, c]) => { const h = (s[k] || 0) / max * (H - pad * 2); y -= h;
       bars += `<rect x="${x + 1}" y="${y.toFixed(1)}" width="${(bw - 2).toFixed(1)}" height="${h.toFixed(1)}" fill="${c}"/>`; });
   });
-  const labs = series.map((s, i) => `<text x="${(pad + i * bw + bw / 2).toFixed(1)}" y="${H - 1}" font-size="8"
-    fill="var(--muted)" text-anchor="middle">${esc(String(s.period).slice(5))}</text>`).join("");
-  el.innerHTML = `<svg viewBox="0 0 ${W} ${H + 12}" width="100%">${bars}${labs}</svg>
+  // Etiquetas rotadas para que no se solapen en columna estrecha.
+  const labs = series.map((s, i) => { const cx = (pad + i * bw + bw / 2).toFixed(1);
+    return `<text x="${cx}" y="${H + 2}" font-size="8" fill="var(--muted)" text-anchor="end"
+      transform="rotate(-40 ${cx} ${H + 2})">${esc(String(s.period).slice(2))}</text>`; }).join("");
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H + 26}" width="100%">${bars}${labs}</svg>
     <div class="lgd">
       <span><i style="background:var(--m1)"></i>pre-CVE</span>
       <span><i style="background:var(--m2)"></i>prereservado</span>
@@ -155,7 +194,9 @@ function renderEvolution(el, series) {
       if (h > 0) bars += `<rect x="${(x + 2).toFixed(1)}" y="${y.toFixed(1)}" width="${(bw - 4).toFixed(1)}" height="${h.toFixed(1)}" fill="${c}"><title>${esc(s.period)}: ${tot[i]} pendientes</title></rect>`;
     });
   });
-  const labs = series.map((s, i) => `<text x="${(padL + i * bw + bw / 2).toFixed(1)}" y="${H - 7}" font-size="9" text-anchor="middle">${esc(String(s.period).slice(2))}</text>`).join("");
+  const labs = series.map((s, i) => { const cx = (padL + i * bw + bw / 2).toFixed(1);
+    return `<text x="${cx}" y="${H - 6}" font-size="9" text-anchor="end"
+      transform="rotate(-35 ${cx} ${H - 6})">${esc(String(s.period).slice(2))}</text>`; }).join("");
   el.innerHTML = `<svg class="evo-svg" viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Detecciones de pendientes por mes y madurez">${gl}${bars}${labs}</svg>
     <div class="lgd">${keys.map(([, c, lab]) => `<span><i style="background:${c}"></i>${lab}</span>`).join("")}</div>`;
 }
@@ -214,10 +255,10 @@ $("#surface").oninput = e => renderImm(e.target.value);
 // Carga por secciones (allSettled): si un endpoint falla, el resto se pinta igual.
 async function load() {
   const eps = ["/api/pending/critical?limit=60", "/api/lag/histogram", "/api/stats",
-    "/api/trend?months=12", "/api/pending?kind=product", "/api/emerging?limit=100"];
+    "/api/trend?months=12", "/api/pending?kind=product", "/api/emerging?limit=100", "/api/queue/age"];
   const res = await Promise.allSettled(eps.map(jget));
   const val = i => res[i].status === "fulfilled" ? res[i].value : null;
-  const [crit, lag, stats, trend, pending, emerging] = [val(0), val(1), val(2), val(3), val(4), val(5)];
+  const [crit, lag, stats, trend, pending, emerging, queue] = [val(0), val(1), val(2), val(3), val(4), val(5), val(6)];
   const fail = i => `<div class="empty">no disponible</div>`;
 
   if (crit) { IMM = crit.rows || []; renderImm(""); } else { $("#imm").innerHTML = fail(); }
@@ -249,5 +290,6 @@ async function load() {
     renderTrend($("#trend"), (trend.series || []).slice(-6));
     renderEvolution($("#evo"), trend.series || []);
   } else { $("#trend").innerHTML = fail(); $("#evo").innerHTML = fail(); }
+  if (queue) renderQueueAge($("#queue"), $("#queue-head"), queue); else $("#queue").innerHTML = fail();
 }
 load();

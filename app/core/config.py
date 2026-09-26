@@ -137,6 +137,12 @@ class Settings(BaseSettings):
     # --- Promoción / reconciliación ---
     emerging_min_mentions: int = Field(default=1)
 
+    # --- Ventana de métricas de ventaja ---
+    # Arranque operativo REAL (día que Foreshock empezó a recoger señal propia).
+    # Por defecto (None) se deriva de los datos: min(nvd_first_observed_at). Fíjalo
+    # a YYYY-MM-DD (env FORESHOCK_OPERATIONAL_START) para forzarlo.
+    operational_start: str | None = Field(default=None)
+
     # --- Logging ---
     log_level: str = Field(default="INFO")
     log_json: bool = Field(default=True)
