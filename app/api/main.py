@@ -1,9 +1,9 @@
 """API de solo lectura + frontend estático de Foreshock.
 
 Sirve:
-- /api/*  -> JSON (trend, pending, emerging, lag/histogram, queue/age,
+- /api/*  -> JSON (trend, pending, emerging, lag/histogram, queue/age, velocity,
              candidate, software, stats y estado administrativo)
-- /       -> la página del dashboard (app/api/static/index.html)
+- /  (=/next) -> dashboard oficial "inminente" (app/api/static/next.html)
 - /pending_status -> dashboard operativo de administración
 
 Arranque: uvicorn app.api.main:app --host 0.0.0.0 --port 8000
@@ -39,8 +39,8 @@ _STATIC = os.path.join(os.path.dirname(__file__), "static")
 _SEC_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
-    # CSP conservadora: solo recursos propios. style 'unsafe-inline' porque
-    # index.html lleva su <style>; scripts inline y de terceros quedan vetados.
+    # CSP conservadora: solo recursos propios. style 'unsafe-inline' porque los
+    # dashboards llevan su <style>; scripts inline y de terceros quedan vetados.
     "Content-Security-Policy": (
         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; connect-src 'self'; object-src 'none'; "

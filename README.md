@@ -11,6 +11,13 @@ gains over NVD.
 > maturity funnel (pre-CVE → pre-reserved → reserved → public), the lead-time histogram
 > over NVD, and the per-source lead leaderboard. KEV and CVSS ≥ 9 rows are flagged red.
 
+![Foreshock dashboard — analytics](docs/screenshots/dashboard-charts.png)
+
+> Analytics at the bottom of the dashboard: **Evolution** (when the current pending
+> items were first detected, by maturity, per month), **Waiting queue** (how long
+> pending items have gone unpublished by NVD, split by whether they have a CVE yet),
+> and **Velocity** (signals captured per day on Foreshock's own clock).
+
 This repository is the **data-ingestion platform**: worker processes that pull signal
 from public sources into Postgres 16, an ingestion/reconciliation pipeline, LLM + CVSS
 enrichment, an operations/query CLI, and read-only web dashboards.
