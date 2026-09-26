@@ -130,6 +130,27 @@ def api_queue_age(
     return q.queue_age(s, exclude_backfill=exclude_backfill)
 
 
+@app.get("/api/quadrant")
+def api_quadrant(
+    limit: int = Query(400, ge=1, le=1000),
+    s: Session = Depends(db),
+) -> dict:
+    return q.exploit_epss_quadrant(s, limit=limit)
+
+
+@app.get("/api/kev/lead")
+def api_kev_lead(s: Session = Depends(db)) -> dict:
+    return q.kev_lead_histogram(s)
+
+
+@app.get("/api/velocity")
+def api_velocity(
+    days: int = Query(60, ge=1, le=400),
+    s: Session = Depends(db),
+) -> dict:
+    return q.capture_velocity(s, days=days)
+
+
 @app.get("/api/emerging")
 def api_emerging(
     since_days: int | None = Query(None, ge=0, le=3660),

@@ -10,6 +10,7 @@ Devuelven estructuras JSON-friendly (dicts/listas). El concepto central:
 from __future__ import annotations
 
 import datetime as _dt
+import time as _time
 import uuid
 from typing import Any
 
@@ -23,6 +24,21 @@ from app.core.operational import (
     operational_candidate_sql,
     operational_published_sql,
 )
+
+# Caché en proceso con TTL para consultas caras y de baja frecuencia de cambio
+# (p.ej. el cuadrante EPSS, que materializa la vista epss_current). No es estado
+# compartido crítico: si el proceso reinicia, se recalcula.
+_TTL_CACHE: dict[str, tuple[float, Any]] = {}
+
+
+def _cached(key: str, ttl_seconds: float, compute):  # noqa: ANN001
+    now = _time.time()
+    hit = _TTL_CACHE.get(key)
+    if hit is not None and now - hit[0] < ttl_seconds:
+        return hit[1]
+    value = compute()
+    _TTL_CACHE[key] = (now, value)
+    return value
 
 # Allowlist de granularidad -> (unidad date_trunc, formato to_char).
 # granularidad -> (unidad date_trunc, formato to_char). 'week' usa semana ISO
@@ -935,3 +951,87 @@ def pending_breakdown(session: Session) -> dict[str, Any]:
                  key=lambda x: x["pending"], reverse=True)
     maturity = {r["key"]: int(r["n"]) for r in rows if r["dim"] == "maturity"}
     return {"by_ecosystem": eco, "by_maturity": maturity}
+
+
+# --- Gráficas "laboratorio" (extras al pie del dashboard /next) --------------
+def exploit_epss_quadrant(session: Session, limit: int = 400) -> dict[str, Any]:
+    """Cuadrante EPSS x explotación de los candidates que TIENEN EPSS (EPSS solo
+    puntúa CVEs ya con ficha, no los pre-publicación), marcando KEV/PoC/CVSS.
+    Se limita a los `limit` de mayor EPSS ANTES de resolver cvss/producto, para
+    que cargue rápido (los subqueries corren solo sobre esas filas). Cacheado
+    (materializar epss_current es caro y cambia poco)."""
+    return _cached(f"quadrant:{limit}", 600.0, lambda: _quadrant_compute(session, limit))
+
+
+def _quadrant_compute(session: Session, limit: int) -> dict[str, Any]:
+    rows = session.execute(text("""
+        WITH top AS (
+            SELECT c.id, c.cve_id, c.in_kev, c.has_public_poc,
+                   e.score AS epss, e.percentile
+            FROM epss_current e
+            JOIN candidates c ON c.cve_id = e.cve_id
+            WHERE c.merged_into IS NULL AND e.score IS NOT NULL
+            ORDER BY e.score DESC
+            LIMIT :lim
+        )
+        SELECT t.cve_id, t.epss, t.percentile, t.in_kev, t.has_public_poc,
+               (SELECT max(base_score) FROM cvss_scores s WHERE s.candidate_id = t.id) AS cvss,
+               (SELECT product FROM affected_products a WHERE a.candidate_id = t.id
+                ORDER BY a.id LIMIT 1) AS product
+        FROM top t
+    """), {"lim": limit}).mappings().all()
+    return {"points": [{
+        "cve_id": r["cve_id"], "epss": float(r["epss"]),
+        "percentile": float(r["percentile"]) if r["percentile"] is not None else None,
+        "cvss": float(r["cvss"]) if r["cvss"] is not None else None,
+        "in_kev": bool(r["in_kev"]), "has_public_poc": bool(r["has_public_poc"]),
+        "product": r["product"],
+    } for r in rows]}
+
+
+_KEV_LEAD_BINS = [
+    ("<0", "lead < 0"), ("0", "lead = 0"), ("1-7", "lead BETWEEN 1 AND 7"),
+    ("8-30", "lead BETWEEN 8 AND 30"), ("31-90", "lead BETWEEN 31 AND 90"),
+    ("91-180", "lead BETWEEN 91 AND 180"), (">180", "lead > 180"),
+]
+
+
+def kev_lead_histogram(session: Session) -> dict[str, Any]:
+    """Antelación (días) entre la primera señal de Foreshock y la entrada en KEV.
+    Positivo = lo teníamos N días antes de que CISA lo marcara como explotado."""
+    bins_sql = ",\n               ".join(
+        f"count(*) FILTER (WHERE {cond}) AS bin_{i}"
+        for i, (_, cond) in enumerate(_KEV_LEAD_BINS)
+    )
+    row = session.execute(text(f"""
+        WITH k AS (
+            SELECT (c.kev_date - c.first_seen_at::date) AS lead
+            FROM candidates c
+            WHERE c.merged_into IS NULL AND c.in_kev
+              AND c.kev_date IS NOT NULL AND c.first_seen_at IS NOT NULL
+        )
+        SELECT count(*) AS n,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY lead) AS median,
+               {bins_sql}
+        FROM k
+    """)).mappings().one()
+    return {
+        "count": int(row["n"]),
+        "median": float(row["median"]) if row["median"] is not None else None,
+        "bins": [{"label": label, "count": int(row[f"bin_{i}"])}
+                 for i, (label, _) in enumerate(_KEV_LEAD_BINS)],
+    }
+
+
+def capture_velocity(session: Session, days: int = 60) -> dict[str, Any]:
+    """Señales capturadas por día (candidates.created_at) en los últimos `days`.
+    Reloj propio de Foreshock: ritmo real de captura, no la fecha del aviso."""
+    days = max(1, min(days, 400))
+    rows = session.execute(text("""
+        SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS d, count(*) AS n
+        FROM candidates
+        WHERE merged_into IS NULL
+          AND created_at >= now() - make_interval(days => :days)
+        GROUP BY 1 ORDER BY 1
+    """), {"days": days}).mappings().all()
+    return {"days": days, "series": [{"day": r["d"], "count": int(r["n"])} for r in rows]}
