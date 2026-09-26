@@ -4,6 +4,13 @@
 *before* MITRE/NVD publish them officially, and measures the **lead days** each source
 gains over NVD.
 
+![Foreshock dashboard — the "imminent" triage view](docs/screenshots/dashboard.png)
+
+> The dashboard at `/`: pending vulnerabilities NVD hasn't published yet, ranked by
+> **Foreshock Score** (KEV +50, public PoC +20, CVSS severity, source tier), with the
+> maturity funnel (pre-CVE → pre-reserved → reserved → public), the lead-time histogram
+> over NVD, and the per-source lead leaderboard. KEV and CVSS ≥ 9 rows are flagged red.
+
 This repository is the **data-ingestion platform**: worker processes that pull signal
 from public sources into Postgres 16, an ingestion/reconciliation pipeline, LLM + CVSS
 enrichment, an operations/query CLI, and read-only web dashboards.
