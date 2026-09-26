@@ -262,12 +262,6 @@ def index() -> FileResponse:
                         headers={"Cache-Control": "no-store"})
 
 
-@app.get("/classic")
-def classic() -> FileResponse:
-    """Dashboard clásico anterior (se conserva, no se borra)."""
-    return FileResponse(os.path.join(_STATIC, "index.html"))
-
-
 @app.get("/next")
 def next_dashboard() -> FileResponse:
     """Alias del dashboard oficial (compatibilidad con enlaces previos)."""

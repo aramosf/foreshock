@@ -164,6 +164,10 @@ details.explain[open] summary::before{content:"▾"}
 .gloss b{color:var(--ink)}
 .gloss .rd{color:var(--crit);font-weight:700}
 .evo-svg text{fill:var(--muted)}
+/* leyenda legible: cuadrito de color relleno + etiqueta (no chips con solo borde) */
+.lgd{display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-size:12px;color:var(--ink)}
+.lgd span{display:inline-flex;align-items:center;gap:6px}
+.lgd i{width:12px;height:12px;border-radius:3px;display:inline-block;flex:0 0 auto}
 @media (max-width:900px){.grid{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(2,1fr)}}
 @media (max-width:760px){.subsets{grid-template-columns:1fr 1fr}}
 </style>
@@ -175,7 +179,6 @@ details.explain[open] summary::before{content:"▾"}
     <small>radar temprano · vista inminente</small>
   </div>
   <span class="sp"></span>
-  <a class="lnk" href="/classic">dashboard clásico</a>
   <a class="lnk" href="/pending_status">estado</a>
   <button id="themebtn" title="tema">◐</button>
 </div></header>
@@ -202,7 +205,7 @@ details.explain[open] summary::before{content:"▾"}
         <p>MITRE ya tiene ficha del CVE, pero NVD aún no ha publicado su análisis. Último paso antes de
           hacerse oficial.</p></div>
       <div class="subbox pub"><b>CVE público</b>
-        <div class="subkpi" id="sk-published">—</div><div class="subcap">ya medidos · 12 m</div>
+        <div class="subkpi" id="sk-published">—</div><div class="subcap">ya medidos · desde ene 2026</div>
         <p>NVD publica su análisis: deja de estar pendiente y cierra el ciclo (línea de meta de «la
           carrera»). El indicador es cuántos cruzaron esa meta y medimos su ventaja.</p></div>
     </div>
@@ -235,7 +238,7 @@ details.explain[open] summary::before{content:"▾"}
         <h2>Ventaja sobre NVD</h2>
         <p class="sub">De las pendientes que <b>ya se publicaron</b> en NVD: con cuántos días de antelación las
           vio Foreshock. Cada barra = <b>nº de vulnerabilidades</b> en ese rango de adelanto; la suma = total
-          medido (n). Últimos 12 meses.</p>
+          medido (n). Solo detecciones <b>desde el arranque de Foreshock</b> (ene 2026), no CVEs anteriores.</p>
         <div id="lag-head"></div>
         <div id="lag"><div class="empty">cargando…</div></div>
       </div>
@@ -260,8 +263,8 @@ details.explain[open] summary::before{content:"▾"}
   </div>
 
   <div class="foot" id="foot">Foreshock — radar temprano de vulnerabilidades. El <b>Foreshock Score</b> y la
-    madurez los calcula el servidor (<span class="mono">/api/pending/critical</span>). Dashboard clásico en
-    <span class="mono">/classic</span>.</div>
+    madurez los calcula el servidor (<span class="mono">/api/pending/critical</span>). Estado operativo en
+    <span class="mono">/pending_status</span>.</div>
 </div>
 
 <div class="scrim" id="scrim"></div>
@@ -270,6 +273,6 @@ details.explain[open] summary::before{content:"▾"}
   <div class="dc" id="dbody"></div>
 </aside>
 
-<script src="/static/next.js?v=8" defer></script>
+<script src="/static/next.js?v=9" defer></script>
 </body>
 </html>

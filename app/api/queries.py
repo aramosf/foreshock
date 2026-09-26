@@ -443,14 +443,17 @@ def lag_histogram(session: Session, months: int = 12, exclude_backfill: bool = T
     months = max(1, months)
     params: dict[str, Any] = {"months": months}
 
-    where = [
-        "c.merged_into IS NULL",
-        "c.first_seen_at >= date_trunc('month', now()) - make_interval(months => :months)",
-    ]
+    where = ["c.merged_into IS NULL"]
     if include_historical:
+        # Vista histórica: ventana rodante de `months` + suelo anti fechas-cero.
+        where.append(
+            "c.first_seen_at >= date_trunc('month', now()) - make_interval(months => :months)"
+        )
         where.append(f"c.first_seen_at >= '{_LAG_MIN_DATE}'::timestamptz")
     else:
-        where.append(operational_candidate_sql("c"))
+        # Vista por defecto: SOLO detecciones desde el arranque de Foreshock
+        # (sin ventana rodante ni CVEs previos) -> ventaja del periodo operativo.
+        where.append(f"c.first_seen_at >= '{OPERATIONAL_MIN_DATE_ISO}'::timestamptz")
     if exclude_backfill:
         where.append(_exclude_backfill_sql(params))
     where_sql = " AND ".join(where) + _lag_source_filter(source, params)

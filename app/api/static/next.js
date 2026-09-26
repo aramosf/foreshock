@@ -127,10 +127,10 @@ function renderTrend(el, series) {
   const labs = series.map((s, i) => `<text x="${(pad + i * bw + bw / 2).toFixed(1)}" y="${H - 1}" font-size="8"
     fill="var(--muted)" text-anchor="middle">${esc(String(s.period).slice(5))}</text>`).join("");
   el.innerHTML = `<svg viewBox="0 0 ${W} ${H + 12}" width="100%">${bars}${labs}</svg>
-    <div class="chips" style="margin-top:4px">
-      <span class="chip" style="border-color:var(--m1)">pre-CVE</span>
-      <span class="chip" style="border-color:var(--m2)">prereservado</span>
-      <span class="chip" style="border-color:var(--ctx)">publicado</span></div>`;
+    <div class="lgd">
+      <span><i style="background:var(--m1)"></i>pre-CVE</span>
+      <span><i style="background:var(--m2)"></i>prereservado</span>
+      <span><i style="background:var(--ctx)"></i>publicado</span></div>`;
 }
 
 // "Evolución": detecciones de las PENDIENTES actuales por mes, apiladas por madurez
@@ -157,7 +157,7 @@ function renderEvolution(el, series) {
   });
   const labs = series.map((s, i) => `<text x="${(padL + i * bw + bw / 2).toFixed(1)}" y="${H - 7}" font-size="9" text-anchor="middle">${esc(String(s.period).slice(2))}</text>`).join("");
   el.innerHTML = `<svg class="evo-svg" viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Detecciones de pendientes por mes y madurez">${gl}${bars}${labs}</svg>
-    <div class="chips" style="margin-top:8px">${keys.map(([, c, lab]) => `<span class="chip" style="border-color:${c}">${lab}</span>`).join("")}</div>`;
+    <div class="lgd">${keys.map(([, c, lab]) => `<span><i style="background:${c}"></i>${lab}</span>`).join("")}</div>`;
 }
 
 async function openDrawer(id) {
