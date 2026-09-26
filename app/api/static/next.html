@@ -154,6 +154,11 @@ details.explain[open] summary::before{content:"▾"}
 .subbox.m1{border-top-color:var(--m1)} .subbox.m2{border-top-color:var(--m2)}
 .subbox.m3{border-top-color:var(--m3)} .subbox.pub{border-top-color:var(--ctx)}
 .subbox b{font-size:12.5px} .subbox p{font-size:12px;color:var(--muted);margin:4px 0 0}
+.subbox .subkpi{font-size:26px;font-weight:700;line-height:1;margin:6px 0 0;letter-spacing:-.01em;
+  font-variant-numeric:tabular-nums}
+.subbox.m1 .subkpi{color:var(--m2)} .subbox.m2 .subkpi{color:var(--m2)}
+.subbox.m3 .subkpi{color:var(--m3)} .subbox.pub .subkpi{color:var(--ink2)}
+.subbox .subcap{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:2px 0 4px}
 .gloss{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px 18px;font-size:12px;
   color:var(--ink2);border-top:1px solid var(--hair);padding-top:12px}
 .gloss b{color:var(--ink)}
@@ -167,11 +172,11 @@ details.explain[open] summary::before{content:"▾"}
 <header><div class="hd">
   <div class="brand">
     <span class="wordmark">Foreshock</span>
-    <span class="tag">Next</span>
-    <small>vista inminente · prototipo (propuesta)</small>
+    <small>radar temprano · vista inminente</small>
   </div>
   <span class="sp"></span>
-  <a class="lnk" href="/">← dashboard actual</a>
+  <a class="lnk" href="/classic">dashboard clásico</a>
+  <a class="lnk" href="/pending_status">estado</a>
   <button id="themebtn" title="tema">◐</button>
 </div></header>
 
@@ -184,14 +189,22 @@ details.explain[open] summary::before{content:"▾"}
       aquí. Cada pendiente está en uno de tres estados azules (de claro a oscuro) hasta que NVD publica y
       pasa a la fase final, en gris.</p>
     <div class="subsets">
-      <div class="subbox m1"><b>pre-CVE</b><p>Solo tiene el código nativo de su fuente (GHSA-, RUSTSEC-,
-        ZDI-CAN-, VU#…). Nadie le ha asignado aún un número CVE.</p></div>
-      <div class="subbox m2"><b>CVE pre-reservado</b><p>Ya circula un número CVE (citado en un commit o
-        aviso) pero sin ficha pública en MITRE ni NVD. La señal más temprana con número: la más valiosa.</p></div>
-      <div class="subbox m3"><b>CVE reservado</b><p>MITRE ya tiene ficha del CVE, pero NVD aún no ha
-        publicado su análisis. Último paso antes de hacerse oficial.</p></div>
-      <div class="subbox pub"><b>CVE público</b><p>NVD publica su análisis: deja de estar pendiente y
-        cierra el ciclo (línea de meta de «la carrera»).</p></div>
+      <div class="subbox m1"><b>pre-CVE</b>
+        <div class="subkpi" id="sk-pre_cve">—</div><div class="subcap">pendientes ahora</div>
+        <p>Solo tiene el código nativo de su fuente (GHSA-, RUSTSEC-, ZDI-CAN-, VU#…). Nadie le ha
+          asignado aún un número CVE.</p></div>
+      <div class="subbox m2"><b>CVE pre-reservado</b>
+        <div class="subkpi" id="sk-cve_prereserved">—</div><div class="subcap">pendientes ahora</div>
+        <p>Ya circula un número CVE (citado en un commit o aviso) pero sin ficha pública en MITRE ni NVD.
+          La señal más temprana con número: la más valiosa.</p></div>
+      <div class="subbox m3"><b>CVE reservado</b>
+        <div class="subkpi" id="sk-cve_reserved">—</div><div class="subcap">pendientes ahora</div>
+        <p>MITRE ya tiene ficha del CVE, pero NVD aún no ha publicado su análisis. Último paso antes de
+          hacerse oficial.</p></div>
+      <div class="subbox pub"><b>CVE público</b>
+        <div class="subkpi" id="sk-published">—</div><div class="subcap">ya medidos · 12 m</div>
+        <p>NVD publica su análisis: deja de estar pendiente y cierra el ciclo (línea de meta de «la
+          carrera»). El indicador es cuántos cruzaron esa meta y medimos su ventaja.</p></div>
     </div>
     <div class="gloss">
       <div><b>Foreshock Score (0–100)</b> — criticidad para actuar ya: explotación activa (KEV, +50),
@@ -199,7 +212,7 @@ details.explain[open] summary::before{content:"▾"}
       <div><b>Ventaja / días de adelanto</b> — días entre la primera detección en Foreshock y la
         publicación en NVD (<span class="mono">present</span>, sobre nuestra propia observación).</div>
       <div><span class="rd">Rojo</span> — <b>KEV</b> (explotación activa confirmada por CISA) marca la
-        fila con acento rojo intenso; <b>CVSS 10</b> también en rojo, un escalón por debajo.</div>
+        fila con acento rojo intenso; <b>CVSS ≥ 9</b> también en rojo, un escalón por debajo.</div>
       <div><b>CVSS · EPSS</b> — gravedad (0–10) y probabilidad de explotación a 30 días (0–1).
         <b>tier</b> — cómo de temprana es la fuente (1 = la que más se adelanta).</div>
     </div>
@@ -246,9 +259,9 @@ details.explain[open] summary::before{content:"▾"}
     <div id="evo"><div class="empty">cargando…</div></div>
   </div>
 
-  <div class="foot" id="foot">Prototipo servido en <span class="mono">/next</span>. Consume los endpoints
-    reales de la API; no altera el dashboard actual. El <b>Foreshock Score</b> y la madurez ya los calcula el
-    servidor (<span class="mono">/api/pending/critical</span>).</div>
+  <div class="foot" id="foot">Foreshock — radar temprano de vulnerabilidades. El <b>Foreshock Score</b> y la
+    madurez los calcula el servidor (<span class="mono">/api/pending/critical</span>). Dashboard clásico en
+    <span class="mono">/classic</span>.</div>
 </div>
 
 <div class="scrim" id="scrim"></div>
@@ -257,6 +270,6 @@ details.explain[open] summary::before{content:"▾"}
   <div class="dc" id="dbody"></div>
 </aside>
 
-<script src="/static/next.js?v=7" defer></script>
+<script src="/static/next.js?v=8" defer></script>
 </body>
 </html>

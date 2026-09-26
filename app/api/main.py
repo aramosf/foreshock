@@ -256,22 +256,28 @@ def healthz() -> dict:
 
 @app.get("/")
 def index() -> FileResponse:
+    """Dashboard OFICIAL: la vista "inminente" (next.html). no-store mientras
+    itera, para no servir HTML viejo (el JS se versiona con ?v= en el HTML)."""
+    return FileResponse(os.path.join(_STATIC, "next.html"),
+                        headers={"Cache-Control": "no-store"})
+
+
+@app.get("/classic")
+def classic() -> FileResponse:
+    """Dashboard clásico anterior (se conserva, no se borra)."""
     return FileResponse(os.path.join(_STATIC, "index.html"))
+
+
+@app.get("/next")
+def next_dashboard() -> FileResponse:
+    """Alias del dashboard oficial (compatibilidad con enlaces previos)."""
+    return FileResponse(os.path.join(_STATIC, "next.html"),
+                        headers={"Cache-Control": "no-store"})
 
 
 @app.get("/pending_status")
 def pending_status() -> FileResponse:
     return FileResponse(os.path.join(_STATIC, "pending_status.html"))
-
-
-@app.get("/next")
-def next_dashboard() -> FileResponse:
-    """Prototipo del dashboard "inminente" (propuesta). Coexiste con `/`; consume
-    los mismos endpoints /api/* de solo lectura, no altera el dashboard actual.
-    no-store: es un prototipo en iteración; evita que el navegador sirva HTML viejo
-    (el JS se versiona con ?v= en el propio HTML)."""
-    return FileResponse(os.path.join(_STATIC, "next.html"),
-                        headers={"Cache-Control": "no-store"})
 
 
 app.mount("/static", StaticFiles(directory=_STATIC), name="static")

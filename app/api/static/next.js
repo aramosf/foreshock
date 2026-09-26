@@ -79,16 +79,16 @@ function renderImm(filter) {
   const rows = IMM.filter(r => !q || (r.product || "").toLowerCase().includes(q) || (r.cve_id || "").toLowerCase().includes(q));
   if (!rows.length) { $("#imm").innerHTML = '<div class="empty">sin resultados para «' + esc(q) + '»</div>'; return; }
   $("#imm").innerHTML = rows.slice(0, 60).map(r => {
-    const isCvss10 = r.cvss != null && r.cvss >= 10;
+    const isCvssHigh = r.cvss != null && r.cvss >= 9.0;
     const chips = [];
     if (r.in_kev) chips.push('<span class="chip kev">KEV</span>');
     if (r.has_public_poc) chips.push('<span class="chip poc">PoC público</span>');
-    if (r.cvss != null) chips.push('<span class="chip ' + (isCvss10 ? "cvss10" : "cvss") + '">CVSS ' + esc(r.cvss) + '</span>');
+    if (r.cvss != null) chips.push('<span class="chip ' + (isCvssHigh ? "cvss10" : "cvss") + '">CVSS ' + esc(r.cvss) + '</span>');
     if (r.min_tier != null) chips.push('<span class="chip">tier ' + esc(r.min_tier) + '</span>');
     const mat = MAT[r.maturity] || r.maturity || "";
     const age = daysAgo(r.first_seen_at);
-    // Rojo: KEV (acento fuerte) o CVSS 10 (un escalón por debajo).
-    const rowcls = r.in_kev ? "imm kev" : (isCvss10 ? "imm red" : "imm");
+    // Rojo: KEV (acento fuerte) o CVSS ≥ 9.0 (un escalón por debajo).
+    const rowcls = r.in_kev ? "imm kev" : (isCvssHigh ? "imm red" : "imm");
     return `<div class="${rowcls}" data-id="${esc(r.id)}">
       ${dial(r.score)}
       <div class="body">
@@ -231,6 +231,14 @@ async function load() {
     { n: emerging ? newToday : "—", c: "", l: "Nuevos hoy en el radar", s: "primera detección = hoy" },
     { n: pending && pending.total != null ? pending.total.toLocaleString() : "—", c: "", l: "Pendientes de NVD", s: "pre-CVE " + (pending ? (pending.by_maturity || {}).pre_cve || 0 : "—") },
   ].map(k => `<div class="kpi"><div class="n ${k.c}">${k.n}</div><div class="l">${k.l}</div><div class="s">${k.s}</div></div>`).join("");
+
+  // Contadores del cuadro "Qué mide": pendientes por estado + publicados medidos.
+  const bm = (pending && pending.by_maturity) || {};
+  const setk = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v == null ? "—" : Number(v).toLocaleString(); };
+  setk("sk-pre_cve", bm.pre_cve);
+  setk("sk-cve_prereserved", bm.cve_prereserved);
+  setk("sk-cve_reserved", bm.cve_reserved);
+  setk("sk-published", lag ? lag.count : null);
 
   if (lag) renderLag($("#lag"), $("#lag-head"), lag); else $("#lag").innerHTML = fail();
   if (stats) {
