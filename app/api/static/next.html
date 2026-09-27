@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="es">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -194,62 +194,51 @@ details.explain[open] summary::before{content:"▾"}
 <header><div class="hd">
   <div class="brand">
     <span class="wordmark">Foreshock</span>
-    <small>radar temprano · vista inminente</small>
+    <small data-i18n="hd.sub">early radar · imminent view</small>
   </div>
   <span class="sp"></span>
-  <a class="lnk" href="/pending_status">estado</a>
-  <button id="themebtn" title="tema">◐</button>
+  <a class="lnk" href="/pending_status" data-i18n="hd.status">status</a>
+  <button id="langbtn" data-i18n-title="lang.title" title="language">ES</button>
+  <button id="themebtn" data-i18n-title="theme.title" title="theme">◐</button>
 </div></header>
 
 <div class="wrap">
   <details class="explain" open>
-    <summary>Qué mide este panel</summary>
-    <p class="lede">Foreshock rastrea fuentes públicas — avisos de GitHub y OSV, commits, boletines de
-      fabricante, ZDI, MSRC, listas de exploits — buscando vulnerabilidades que <b>todavía no aparecen en
-      NVD</b>, la base de datos oficial. Ese hueco temporal es la <b>ventaja</b> que mide todo lo que ves
-      aquí. Cada pendiente está en uno de tres estados azules (de claro a oscuro) hasta que NVD publica y
-      pasa a la fase final, en gris.</p>
+    <summary data-i18n="explain.summary">What this panel measures</summary>
+    <p class="lede" data-i18n-html="explain.lede">Foreshock tracks public sources — GitHub and OSV advisories,
+      commits, vendor bulletins, ZDI, MSRC, exploit lists — looking for vulnerabilities that <b>don't appear in
+      NVD yet</b>, the official database. That time gap is the <b>lead</b> everything here measures.</p>
     <div class="pyr-wrap">
       <div class="pyr">
         <!-- CVE público: la meta, FUERA de la pirámide, arriba -->
         <div class="pyr-goal">
-          <div class="g-l">CVE público</div>
+          <div class="g-l" data-i18n="pyr.goal.label">Published CVE</div>
           <div class="g-n" id="sk-published">—</div>
-          <div class="g-s">la meta · sale de la pirámide</div>
+          <div class="g-s" data-i18n="pyr.goal.sub">the goal · exits the pyramid</div>
         </div>
-        <div class="pyr-arrow">▲ más oficial · madura hacia el CVE público</div>
+        <div class="pyr-arrow" data-i18n="pyr.arrow">▲ more official · matures toward the published CVE</div>
         <!-- pirámide de pendientes: cima reservado (menos) … base pre-CVE (más) -->
         <div class="pyr-stack">
-          <div class="pyr-layer L3">CVE reservado <span class="p-n" id="sk-cve_reserved">—</span></div>
-          <div class="pyr-layer L2">CVE pre-reservado <span class="p-n" id="sk-cve_prereserved">—</span></div>
-          <div class="pyr-layer L1">pre-CVE <span class="p-n" id="sk-pre_cve">—</span></div>
-          <div class="pyr-layer L0">Zona ciega <span class="p-n">Indeterminado</span></div>
+          <div class="pyr-layer L3"><span data-i18n="pyr.L3">Reserved CVE</span> <span class="p-n" id="sk-cve_reserved">—</span></div>
+          <div class="pyr-layer L2"><span data-i18n="pyr.L2">Pre-reserved CVE</span> <span class="p-n" id="sk-cve_prereserved">—</span></div>
+          <div class="pyr-layer L1"><span data-i18n="pyr.L1">pre-CVE</span> <span class="p-n" id="sk-pre_cve">—</span></div>
+          <div class="pyr-layer L0"><span data-i18n="pyr.L0">Blind zone</span> <span class="p-n" data-i18n="pyr.indeterminate">Indeterminate</span></div>
         </div>
         <div class="pyr-since" id="pyr-since"></div>
       </div>
       <ul class="pyr-desc">
-        <li><i class="dp"></i><span><b>CVE público</b> — NVD publica su análisis: deja de estar pendiente y
-          cierra el ciclo (la meta, fuera de la pirámide).</span></li>
-        <li><i class="d3"></i><span><b>CVE reservado</b> — <b>MITRE ya tiene ficha</b>, pero NVD aún no ha
-          publicado su análisis. Último paso antes de hacerse oficial.</span></li>
-        <li><i class="d2"></i><span><b>CVE pre-reservado</b> — ya circula un número CVE (citado en un commit o
-          aviso) pero <b>MITRE aún no tiene ficha</b>. La señal más temprana con número.</span></li>
-        <li><i class="d1"></i><span><b>pre-CVE</b> — solo el código nativo de su fuente (GHSA-, RUSTSEC-,
-          ZDI-CAN-, VU#…); nadie le ha asignado aún un número CVE. Aquí empieza lo que Foreshock SÍ ve.</span></li>
-        <li><i class="d0"></i><span><b>Zona ciega</b> — el conjunto (enorme, sin cuantificar) que <b>solo
-          conocen quien tiene el producto y quien la ha reportado</b>: aún no existe señal pública de ningún
-          tipo. Por eso su indicador es <b>Indeterminado</b> — no se puede contar lo que nadie ha hecho público.</span></li>
+        <li><i class="dp"></i><span data-i18n-html="pyr.desc.pub"></span></li>
+        <li><i class="d3"></i><span data-i18n-html="pyr.desc.reserved"></span></li>
+        <li><i class="d2"></i><span data-i18n-html="pyr.desc.prereserved"></span></li>
+        <li><i class="d1"></i><span data-i18n-html="pyr.desc.precve"></span></li>
+        <li><i class="d0"></i><span data-i18n-html="pyr.desc.blind"></span></li>
       </ul>
     </div>
     <div class="gloss">
-      <div><b>Foreshock Score (0–100)</b> — criticidad para actuar ya: explotación activa (KEV, +50),
-        PoC público (+20), gravedad CVSS/severidad (0–40) y lo pronto que avisa la fuente (tier, 1–15).</div>
-      <div><b>Ventaja / días de adelanto</b> — días entre la primera detección en Foreshock y la
-        publicación en NVD (<span class="mono">present</span>, sobre nuestra propia observación).</div>
-      <div><span class="rd">Rojo</span> — <b>KEV</b> (explotación activa confirmada por CISA) marca la
-        fila con acento rojo intenso; <b>CVSS ≥ 9</b> también en rojo, un escalón por debajo.</div>
-      <div><b>CVSS · EPSS</b> — gravedad (0–10) y probabilidad de explotación a 30 días (0–1).
-        <b>tier</b> — cómo de temprana es la fuente (1 = la que más se adelanta).</div>
+      <div data-i18n-html="gloss.score"></div>
+      <div data-i18n-html="gloss.lead"></div>
+      <div data-i18n-html="gloss.red"></div>
+      <div data-i18n-html="gloss.cvss"></div>
     </div>
   </details>
 
@@ -258,60 +247,52 @@ details.explain[open] summary::before{content:"▾"}
   <div class="grid">
     <div>
       <div class="card">
-        <h2>Inminente — lo que hay que mirar hoy</h2>
-        <p class="sub">Candidates con señal accionable, ordenados por <b>Foreshock Score</b>. El cruce de oro:
-          exploit/señal mientras el CVE sigue pre-publicado. Pulsa una fila para ver <b>la carrera</b>.</p>
-        <input class="surface-in" id="surface" placeholder="Mi superficie: filtra por producto (p.ej. rabbitmq, ghost, n8n)…">
-        <div id="imm"><div class="empty">cargando…</div></div>
+        <h2 data-i18n="sec.imm.title">Imminent — what to watch today</h2>
+        <p class="sub" data-i18n-html="sec.imm.sub"></p>
+        <input class="surface-in" id="surface" data-i18n-ph="surface.ph" placeholder="My surface: filter by product…">
+        <div id="imm"><div class="empty" data-i18n="loading">loading…</div></div>
       </div>
     </div>
     <div>
       <div class="card">
-        <h2>Ventaja sobre NVD</h2>
-        <p class="sub">De las pendientes que <b>ya se publicaron</b> en NVD: con cuántos días de antelación las
-          vio Foreshock. Cada barra = <b>nº de vulnerabilidades</b> en ese rango de adelanto; la suma = total
-          medido (n). Solo detecciones <b>desde el arranque de Foreshock</b>, no CVEs anteriores.</p>
+        <h2 data-i18n="sec.lag.title">Lead over NVD</h2>
+        <p class="sub" data-i18n-html="sec.lag.sub"></p>
         <div id="lag-head"></div>
-        <div id="lag"><div class="empty">cargando…</div></div>
+        <div id="lag"><div class="empty" data-i18n="loading">loading…</div></div>
       </div>
       <div class="card">
-        <h2>Leaderboard de fuentes</h2>
-        <p class="sub">Adelanto medio por fuente — a quién creer antes.</p>
-        <div id="srcs"><div class="empty">cargando…</div></div>
+        <h2 data-i18n="sec.srcs.title">Source leaderboard</h2>
+        <p class="sub" data-i18n="sec.srcs.sub">Average lead per source — who to trust first.</p>
+        <div id="srcs"><div class="empty" data-i18n="loading">loading…</div></div>
       </div>
       <div class="card">
-        <h2>Tendencia mensual</h2>
-        <p class="sub">Pre-CVE vs prereservado vs publicado (primera detección).</p>
-        <div id="trend"><div class="empty">cargando…</div></div>
+        <h2 data-i18n="sec.trend.title">Monthly trend</h2>
+        <p class="sub" data-i18n="sec.trend.sub">Pre-CVE vs pre-reserved vs published (first detection).</p>
+        <div id="trend"><div class="empty" data-i18n="loading">loading…</div></div>
       </div>
     </div>
   </div>
 
   <div class="card" id="evo-card">
-    <h2>Evolución: cuándo se detectaron las pendientes actuales</h2>
-    <p class="sub">Cuántas de las pendientes actuales se detectaron por primera vez en cada mes, por madurez.
-      Columna alta y reciente = mucha señal nueva; columnas antiguas = NVD lleva meses sin publicarlas.</p>
-    <div id="evo"><div class="empty">cargando…</div></div>
+    <h2 data-i18n="sec.evo.title">Evolution: when the current pending items were detected</h2>
+    <p class="sub" data-i18n="sec.evo.sub"></p>
+    <div id="evo"><div class="empty" data-i18n="loading">loading…</div></div>
   </div>
 
   <div class="card" id="queue-card">
-    <h2>Cola de espera: cuánto llevan pendientes de NVD</h2>
-    <p class="sub">Antigüedad de las pendientes (días desde la primera señal), separando las que aún no tienen
-      número CVE de las que ya lo tienen. La cola de la derecha = vulnerabilidades que NVD arrastra sin publicar.</p>
+    <h2 data-i18n="sec.queue.title">Waiting queue: how long they've been pending in NVD</h2>
+    <p class="sub" data-i18n="sec.queue.sub"></p>
     <div id="queue-head"></div>
-    <div id="queue"><div class="empty">cargando…</div></div>
+    <div id="queue"><div class="empty" data-i18n="loading">loading…</div></div>
   </div>
 
   <div class="card" id="vel-card">
-    <h2>Velocidad: señales capturadas por día</h2>
-    <p class="sub">Reloj propio de Foreshock (<span class="mono">candidates.created_at</span>), últimos 60 días.
-      Ritmo real de captura, independiente de la fecha del aviso.</p>
-    <div id="x-vel"><div class="empty">cargando…</div></div>
+    <h2 data-i18n="sec.vel.title">Velocity: signals captured per day</h2>
+    <p class="sub" data-i18n-html="sec.vel.sub"></p>
+    <div id="x-vel"><div class="empty" data-i18n="loading">loading…</div></div>
   </div>
 
-  <div class="foot" id="foot">Foreshock — radar temprano de vulnerabilidades. El <b>Foreshock Score</b> y la
-    madurez los calcula el servidor (<span class="mono">/api/pending/critical</span>). Estado operativo en
-    <span class="mono">/pending_status</span>.</div>
+  <div class="foot" id="foot" data-i18n-html="foot"></div>
 </div>
 
 <div class="scrim" id="scrim"></div>
@@ -320,6 +301,6 @@ details.explain[open] summary::before{content:"▾"}
   <div class="dc" id="dbody"></div>
 </aside>
 
-<script src="/static/next.js?v=14" defer></script>
+<script src="/static/next.js?v=15" defer></script>
 </body>
 </html>
