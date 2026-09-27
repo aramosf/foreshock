@@ -33,7 +33,7 @@ _GRAN = {"week": ("week", 'IYYY-"W"IW'),
 
 # ----------------------------------------------------------------- pending
 # Definición CANÓNICA de "pending" — la métrica central del proyecto (decisión
-# de producto 2026-07-19, ver docs/AGENT_CHANGELOG.md): vulnerabilidades
+# de producto 2026-07-19): vulnerabilidades
 # identificadas en otras fuentes de las que NVD aún no ha publicado nada. Entran:
 #   a) candidates CON cve_id sin datos en NVD (sin fila en published_cves o
 #      nvd_published_at NULL), excluyendo CVEs REJECTED por MITRE, y
@@ -432,7 +432,7 @@ def lag_histogram(session: Session, months: int = 12, exclude_backfill: bool = T
 
     Común: mediana + p90 (percentile_cont en SQL); `months` filtra por
     first_seen_at; ignora `days_ahead NULL` y fechas < 1990 (fechas cero
-    corruptas, ver AGENT_CHANGELOG); `source` opcional restringe a una fuente.
+    corruptas); `source` opcional restringe a una fuente.
     """
     if metric not in _LAG_METRICS:
         raise ValueError(f"metric inválida: {metric!r}")
@@ -527,7 +527,7 @@ def queue_age(session: Session, exclude_backfill: bool = True) -> dict[str, Any]
       - unassigned: sin cve_id (esperando asignación de CVE)
       - assigned:   con cve_id (esperando publicación en NVD)
     Por grupo: bins fijos de días, total y median_days (percentile_cont en SQL).
-    Excluye first_seen_at < 1990 (fechas cero corruptas, ver AGENT_CHANGELOG).
+    Excluye first_seen_at < 1990 (fechas cero corruptas).
     `exclude_backfill` (misma semántica que /api/lag/histogram): descarta
     candidates cuya ÚNICA fuente es de archivo histórico — la cola sin CVE
     >365 d es casi 100% de esas fuentes y desvirtúa la lectura."""
@@ -779,7 +779,7 @@ def source_stats(
     """Media de días de ventaja por fuente (deduplicada, sin fusionados).
 
     Guarda defensiva: ignora days_ahead > 3650 o first_seen_at < 1990 — fechas
-    corruptas residuales (ver AGENT_CHANGELOG) no deben volver a inflar medias.
+    corruptas residuales no deben volver a inflar medias.
     """
     operational_scope = (
         "" if include_historical else " AND " + operational_candidate_sql("c")
@@ -990,8 +990,10 @@ def maturity_funnel(session: Session) -> dict[str, Any]:
         )
         SELECT
           count(*) FILTER (WHERE is_public) AS published,
-          count(*) FILTER (WHERE NOT is_public AND cve_id IS NOT NULL AND has_mirror) AS cve_reserved,
-          count(*) FILTER (WHERE NOT is_public AND cve_id IS NOT NULL AND NOT has_mirror) AS cve_prereserved,
+          count(*) FILTER (WHERE NOT is_public AND cve_id IS NOT NULL AND has_mirror)
+              AS cve_reserved,
+          count(*) FILTER (WHERE NOT is_public AND cve_id IS NOT NULL AND NOT has_mirror)
+              AS cve_prereserved,
           count(*) FILTER (WHERE NOT is_public AND cve_id IS NULL) AS pre_cve
         FROM base
     """), {"op_start": op_start}).mappings().one()
