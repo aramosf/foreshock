@@ -18,6 +18,7 @@ Estrategias:
 from __future__ import annotations
 
 import csv
+import gzip
 import io
 import re
 
@@ -205,21 +206,42 @@ async def harvest_top_n(client: httpx.AsyncClient, settings: Settings) -> dict[s
 
 # --- Estrategia 4: OpenSSF Criticality Score (CSV externo, opt-in) ------------
 async def harvest_criticality(client: httpx.AsyncClient, settings: Settings) -> dict[str, int]:
-    if not settings.criticality_csv_url:
+    url = settings.criticality_csv_url
+    if not url:
         return {"criticality": 0}
-    resp = await client.get(settings.criticality_csv_url, follow_redirects=True, timeout=120)
+    resp = await client.get(url, follow_redirects=True, timeout=180)
     resp.raise_for_status()
+    raw = resp.content
+    # El all.csv de OpenSSF está gzippeado: descomprime si viene .gz o magic gzip.
+    if url.endswith(".gz") or raw[:2] == b"\x1f\x8b":
+        raw = gzip.decompress(raw)
+    rows = list(csv.DictReader(io.StringIO(raw.decode("utf-8", errors="replace"))))
+    # El CSV NO viene ordenado por criticidad: ordena por default_score desc (si la
+    # columna existe) y quédate con los top-N (evita traer los ~585k escaneados).
+    if rows and "default_score" in rows[0]:
+        def _score(r: dict) -> float:
+            try:
+                return float(r.get("default_score") or 0)
+            except ValueError:
+                return 0.0
+        rows.sort(key=_score, reverse=True)
+    top_n = settings.criticality_top_n
+    if top_n and top_n > 0:
+        rows = rows[:top_n]
     repos: dict[str, dict] = {}
-    reader = csv.DictReader(io.StringIO(resp.text))
-    for row in reader:
-        for val in row.values():
-            repo = _extract_repo(val)
-            if repo:
-                repos.setdefault(repo, {"origin": "criticality"})
-                break
+    for row in rows:
+        candidate = row.get("repo.url") or row.get("repo")
+        repo = _extract_repo(candidate) if candidate else None
+        if not repo:
+            for val in row.values():
+                repo = _extract_repo(val)
+                if repo:
+                    break
+        if repo:
+            repos.setdefault(repo, {"origin": "criticality"})
     with session_scope() as session:
         upsert_repos(session, repos)
-    log.info("registry.harvest_criticality", repos=len(repos))
+    log.info("registry.harvest_criticality", rows=len(rows), repos=len(repos))
     return {"criticality": len(repos)}
 
 

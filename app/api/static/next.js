@@ -275,12 +275,12 @@ $("#surface").oninput = e => renderImm(e.target.value);
 // Carga por secciones (allSettled): si un endpoint falla, el resto se pinta igual.
 async function load() {
   const eps = ["/api/pending/critical?limit=60", "/api/lag/histogram", "/api/stats",
-    "/api/trend?months=12", "/api/pending?kind=product", "/api/emerging?limit=100",
+    "/api/trend?months=12", "/api/emerging?limit=100",
     "/api/queue/age", "/api/velocity?days=60", "/api/funnel"];
   const res = await Promise.allSettled(eps.map(jget));
   const val = i => res[i].status === "fulfilled" ? res[i].value : null;
-  const [crit, lag, stats, trend, pending, emerging, queue, vel, funnel] =
-    [val(0), val(1), val(2), val(3), val(4), val(5), val(6), val(7), val(8)];
+  const [crit, lag, stats, trend, emerging, queue, vel, funnel] =
+    [val(0), val(1), val(2), val(3), val(4), val(5), val(6), val(7)];
   const fail = i => `<div class="empty">no disponible</div>`;
 
   if (crit) { IMM = crit.rows || []; renderImm(""); } else { $("#imm").innerHTML = fail(); }
@@ -292,7 +292,7 @@ async function load() {
     { n: crit ? imminent : "—", c: "crit", l: "Inminentes ahora", s: "score ≥ 60 · exploit/KEV/severidad" },
     { n: lag && lag.median != null ? lag.median : "—", c: "good", l: "Ventaja mediana (días)", s: "p90 = " + (lag && lag.p90 != null ? lag.p90 : "—") + " · n=" + (lag ? lag.count || 0 : "—") },
     { n: emerging ? newToday : "—", c: "", l: "Nuevos hoy en el radar", s: "primera detección = hoy" },
-    { n: pending && pending.total != null ? pending.total.toLocaleString() : "—", c: "", l: "Pendientes de NVD", s: "pre-CVE " + (pending ? (pending.by_maturity || {}).pre_cve || 0 : "—") },
+    { n: funnel ? (funnel.pre_cve + funnel.cve_prereserved + funnel.cve_reserved).toLocaleString() : "—", c: "", l: "Pendientes de NVD", s: "pre-CVE " + (funnel ? funnel.pre_cve.toLocaleString() : "—") + " · desde " + (funnel ? monthYear(funnel.operational_start) : "—") },
   ].map(k => `<div class="kpi"><div class="n ${k.c}">${k.n}</div><div class="l">${k.l}</div><div class="s">${k.s}</div></div>`).join("");
 
   // Pirámide: embudo COHERENTE desde el arranque real (misma población y ventana

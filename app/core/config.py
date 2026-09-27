@@ -84,7 +84,8 @@ class Settings(BaseSettings):
     # --- Watchlist de repos (estrategias de relevancia más allá de las estrellas) ---
     # 1+2 (referencias de advisories / CVE previo) y 3 (distros vía refs) se derivan
     # de datos propios (siempre activas). 4 y 5 requieren fuente externa y son opt-in:
-    criticality_csv_url: str | None = Field(default=None)   # CSV OpenSSF Criticality Score
+    criticality_csv_url: str | None = Field(default=None)   # CSV OpenSSF Criticality (acepta .gz)
+    criticality_top_n: int = Field(default=2000)            # top-N por default_score (0 = todos)
     pypi_downloads_top_n: int = Field(default=0)            # >0 => top-N PyPI por descargas
 
     # --- VulnCheck (token gratis en vulncheck.com) ---
