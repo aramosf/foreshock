@@ -459,12 +459,7 @@ def lag_histogram(session: Session, months: int = 12, exclude_backfill: bool = T
         # baseline); FORESHOCK_OPERATIONAL_START lo fuerza; fallback si aún no
         # observó nada. Así las señales con fecha antigua (avisos GitHub previos)
         # no cuentan como ventaja espuria del periodo pre-instalación.
-        op_start = get_settings().operational_start
-        if not op_start:
-            observed = session.execute(text(
-                "SELECT min(nvd_first_observed_at)::date FROM published_cves"
-            )).scalar()
-            op_start = str(observed) if observed else OPERATIONAL_MIN_DATE_ISO
+        op_start = _dynamic_operational_start(session)
         params["op_start"] = op_start
         where.append("c.first_seen_at >= CAST(:op_start AS timestamptz)")
     if exclude_backfill:
@@ -950,3 +945,60 @@ def capture_velocity(session: Session, days: int = 60) -> dict[str, Any]:
         GROUP BY 1 ORDER BY 1
     """), {"days": days}).mappings().all()
     return {"days": days, "series": [{"day": r["d"], "count": int(r["n"])} for r in rows]}
+
+
+def _dynamic_operational_start(session: Session) -> str:
+    """Arranque operativo REAL de Foreshock: override de config, si no
+    min(nvd_first_observed_at) (primer arranque del baseline), si no el fallback
+    fijo. Es el día que Foreshock empezó a observar por su propio reloj."""
+    op = get_settings().operational_start
+    if op:
+        return op
+    observed = session.execute(text(
+        "SELECT min(nvd_first_observed_at)::date FROM published_cves"
+    )).scalar()
+    return str(observed) if observed else OPERATIONAL_MIN_DATE_ISO
+
+
+# Base "pendiente" SIN el filtro NVD-silent (para poder incluir también los ya
+# públicos): misma población que PENDING_BASE_WHERE_SQL pero sin exigir que NVD
+# no haya publicado. Mantiene no-malware / no-withdrawn / no-rejected.
+_FUNNEL_BASE_WHERE_SQL = (
+    "c.merged_into IS NULL AND c.status <> 'rejected' AND c.withdrawn IS NOT TRUE"
+    " AND EXISTS (SELECT 1 FROM affected_products ap0 WHERE ap0.candidate_id = c.id"
+    " AND (ap0.kind IS NULL OR ap0.kind <> 'malware'))"
+    " AND NOT EXISTS (SELECT 1 FROM affected_products apm"
+    " WHERE apm.candidate_id = c.id AND apm.kind = 'malware')"
+)
+
+
+def maturity_funnel(session: Session) -> dict[str, Any]:
+    """Embudo de madurez COHERENTE desde el arranque real de Foreshock: una sola
+    población (candidates con first_seen >= operational_start y los mismos filtros
+    de 'pendiente'), partida en pre_cve / cve_prereserved / cve_reserved /
+    published. Todos comparten ventana y filtros, así que suman un embudo real.
+    Devuelve también `operational_start` para mostrarlo en la UI."""
+    op_start = _dynamic_operational_start(session)
+    row = session.execute(text(f"""
+        WITH base AS (
+          SELECT c.cve_id,
+            NOT ({_NVD_SILENT_SQL}) AS is_public,
+            {_HAS_MIRROR} AS has_mirror
+          FROM candidates c
+          WHERE {_FUNNEL_BASE_WHERE_SQL}
+            AND c.first_seen_at >= CAST(:op_start AS timestamptz)
+        )
+        SELECT
+          count(*) FILTER (WHERE is_public) AS published,
+          count(*) FILTER (WHERE NOT is_public AND cve_id IS NOT NULL AND has_mirror) AS cve_reserved,
+          count(*) FILTER (WHERE NOT is_public AND cve_id IS NOT NULL AND NOT has_mirror) AS cve_prereserved,
+          count(*) FILTER (WHERE NOT is_public AND cve_id IS NULL) AS pre_cve
+        FROM base
+    """), {"op_start": op_start}).mappings().one()
+    return {
+        "operational_start": op_start,
+        "published": int(row["published"]),
+        "cve_reserved": int(row["cve_reserved"]),
+        "cve_prereserved": int(row["cve_prereserved"]),
+        "pre_cve": int(row["pre_cve"]),
+    }

@@ -130,6 +130,11 @@ def api_queue_age(
     return q.queue_age(s, exclude_backfill=exclude_backfill)
 
 
+@app.get("/api/funnel")
+def api_funnel(s: Session = Depends(db)) -> dict:
+    return q.maturity_funnel(s)
+
+
 @app.get("/api/velocity")
 def api_velocity(
     days: int = Query(60, ge=1, le=400),

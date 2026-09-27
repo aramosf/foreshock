@@ -10,6 +10,7 @@ const esc = s => (s == null ? "" : String(s)).replace(/[&<>"]/g, c => ({ "&": "&
 const safeUrl = u => { try { const p = new URL(u, location.origin); return (p.protocol === "http:" || p.protocol === "https:") ? p.href : null; } catch (e) { return null; } };
 const _MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 const monthYear = s => { if (!s) return "el arranque"; const d = new Date(s); return isNaN(d) ? String(s).slice(0, 7) : _MESES[d.getUTCMonth()] + " " + d.getUTCFullYear(); };
+const fmtLongDate = s => { if (!s) return ""; const d = new Date(String(s).slice(0, 10) + "T00:00:00Z"); return isNaN(d) ? String(s) : d.getUTCDate() + " " + _MESES[d.getUTCMonth()] + " " + d.getUTCFullYear(); };
 
 // tema
 const tb = $("#themebtn");
@@ -275,11 +276,11 @@ $("#surface").oninput = e => renderImm(e.target.value);
 async function load() {
   const eps = ["/api/pending/critical?limit=60", "/api/lag/histogram", "/api/stats",
     "/api/trend?months=12", "/api/pending?kind=product", "/api/emerging?limit=100",
-    "/api/queue/age", "/api/velocity?days=60"];
+    "/api/queue/age", "/api/velocity?days=60", "/api/funnel"];
   const res = await Promise.allSettled(eps.map(jget));
   const val = i => res[i].status === "fulfilled" ? res[i].value : null;
-  const [crit, lag, stats, trend, pending, emerging, queue, vel] =
-    [val(0), val(1), val(2), val(3), val(4), val(5), val(6), val(7)];
+  const [crit, lag, stats, trend, pending, emerging, queue, vel, funnel] =
+    [val(0), val(1), val(2), val(3), val(4), val(5), val(6), val(7), val(8)];
   const fail = i => `<div class="empty">no disponible</div>`;
 
   if (crit) { IMM = crit.rows || []; renderImm(""); } else { $("#imm").innerHTML = fail(); }
@@ -294,13 +295,18 @@ async function load() {
     { n: pending && pending.total != null ? pending.total.toLocaleString() : "—", c: "", l: "Pendientes de NVD", s: "pre-CVE " + (pending ? (pending.by_maturity || {}).pre_cve || 0 : "—") },
   ].map(k => `<div class="kpi"><div class="n ${k.c}">${k.n}</div><div class="l">${k.l}</div><div class="s">${k.s}</div></div>`).join("");
 
-  // Contadores del cuadro "Qué mide": pendientes por estado + publicados medidos.
-  const bm = (pending && pending.by_maturity) || {};
+  // Pirámide: embudo COHERENTE desde el arranque real (misma población y ventana
+  // en las 4 capas), de /api/funnel. Muestra la fecha de arranque para aclararlo.
+  const f = funnel || {};
   const setk = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v == null ? "—" : Number(v).toLocaleString(); };
-  setk("sk-pre_cve", bm.pre_cve);
-  setk("sk-cve_prereserved", bm.cve_prereserved);
-  setk("sk-cve_reserved", bm.cve_reserved);
-  setk("sk-published", lag ? lag.count : null);
+  setk("sk-pre_cve", f.pre_cve);
+  setk("sk-cve_prereserved", f.cve_prereserved);
+  setk("sk-cve_reserved", f.cve_reserved);
+  setk("sk-published", f.published);
+  const sinceEl = document.getElementById("pyr-since");
+  if (sinceEl) sinceEl.textContent = f.operational_start
+    ? "Todas las cifras: población detectada desde el " + fmtLongDate(f.operational_start) + " (arranque de Foreshock)"
+    : "";
 
   if (lag) renderLag($("#lag"), $("#lag-head"), lag); else $("#lag").innerHTML = fail();
   if (stats) {
