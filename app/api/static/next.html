@@ -161,13 +161,18 @@ details.explain[open] summary::before{content:"▾"}
 .pyr-stack{width:100%}
 .pyr-layer{height:50px;display:flex;align-items:center;justify-content:center;gap:8px;font-size:12.5px;font-weight:600}
 .pyr-layer .p-n{font-weight:700;font-variant-numeric:tabular-nums}
-.pyr-layer.L3{background:var(--m3);color:#fff;clip-path:polygon(30% 0,70% 0,81% 100%,19% 100%)}
-.pyr-layer.L2{background:var(--m2);color:#fff;clip-path:polygon(19% 0,81% 0,92% 100%,8% 100%)}
-.pyr-layer.L1{background:var(--m1);color:#06233f;clip-path:polygon(8% 0,92% 0,97% 100%,3% 100%)}
+.pyr-layer.L3{background:var(--m3);color:#fff;clip-path:polygon(33% 0,67% 0,75% 100%,25% 100%)}
+.pyr-layer.L2{background:var(--m2);color:#fff;clip-path:polygon(25% 0,75% 0,84% 100%,16% 100%)}
+.pyr-layer.L1{background:var(--m1);color:#06233f;clip-path:polygon(16% 0,84% 0,92% 100%,8% 100%)}
+/* base "zona ciega": rayada = no medible (Indeterminado) */
+.pyr-layer.L0{color:var(--ink2);clip-path:polygon(8% 0,92% 0,100% 100%,0 100%);
+  background:repeating-linear-gradient(-45deg,var(--surface2),var(--surface2) 7px,var(--grid) 7px,var(--grid) 14px)}
+.pyr-layer.L0 .p-n{font-style:italic;color:var(--muted);font-weight:600}
 .pyr-desc{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:9px;font-size:12px;color:var(--ink2)}
 .pyr-desc li{display:flex;gap:8px;line-height:1.4}
 .pyr-desc i{width:11px;height:11px;border-radius:3px;flex:0 0 auto;margin-top:3px}
 .pyr-desc b{color:var(--ink)}
+.pyr-desc .d0{background:repeating-linear-gradient(-45deg,var(--surface2),var(--surface2) 3px,var(--grid) 3px,var(--grid) 6px);border:1px solid var(--grid)}
 .pyr-desc .d1{background:var(--m1)} .pyr-desc .d2{background:var(--m2)}
 .pyr-desc .d3{background:var(--m3)} .pyr-desc .dp{background:var(--ctx)}
 .gloss{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px 18px;font-size:12px;
@@ -217,11 +222,15 @@ details.explain[open] summary::before{content:"▾"}
           <div class="pyr-layer L3">CVE reservado <span class="p-n" id="sk-cve_reserved">—</span></div>
           <div class="pyr-layer L2">CVE pre-reservado <span class="p-n" id="sk-cve_prereserved">—</span></div>
           <div class="pyr-layer L1">pre-CVE <span class="p-n" id="sk-pre_cve">—</span></div>
+          <div class="pyr-layer L0">Zona ciega <span class="p-n">Indeterminado</span></div>
         </div>
       </div>
       <ul class="pyr-desc">
+        <li><i class="d0"></i><span><b>Zona ciega</b> — el conjunto (enorme, sin cuantificar) que <b>solo
+          conocen quien tiene el producto y quien la ha reportado</b>: aún no existe señal pública de ningún
+          tipo. Por eso su indicador es <b>Indeterminado</b> — no se puede contar lo que nadie ha hecho público.</span></li>
         <li><i class="d1"></i><span><b>pre-CVE</b> — solo el código nativo de su fuente (GHSA-, RUSTSEC-,
-          ZDI-CAN-, VU#…); nadie le ha asignado aún un número CVE.</span></li>
+          ZDI-CAN-, VU#…); nadie le ha asignado aún un número CVE. Aquí empieza lo que Foreshock SÍ ve.</span></li>
         <li><i class="d2"></i><span><b>CVE pre-reservado</b> — ya circula un número CVE (citado en un commit o
           aviso) pero <b>MITRE aún no tiene ficha</b>. La señal más temprana con número.</span></li>
         <li><i class="d3"></i><span><b>CVE reservado</b> — <b>MITRE ya tiene ficha</b>, pero NVD aún no ha
